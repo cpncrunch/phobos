@@ -12,9 +12,13 @@ from .agent_store import AgentStore
 from .models import EngagementROE
 
 
+DEFAULT_DB = "data/phobos-agent.db"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standalone Phobos Agent runtime")
-    parser.add_argument("--db", default="data/phobos-agent.db", help="SQLite runtime DB path")
+    parser.add_argument("--db", default=DEFAULT_DB, help="SQLite runtime DB path")
+    parser.add_argument("--profile", help="Use/create a named local profile under ~/.phobos/profiles/<name>")
     parser.add_argument("--session", default="default", help="Session name")
     parser.add_argument("--config", help="Agent runtime JSON config with provider fallback, workspace, and plugin settings")
     parser.add_argument("--workspace-dir", help="Engagement workspace directory for local file tools")
@@ -25,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key-env", default="OPENAI_API_KEY")
     parser.add_argument("--command-template")
     parser.add_argument("--auto-execute-natural", action="store_true", help="Allow natural-language messages to invoke recognized non-command tools automatically; command execution still requires explicit slash/tool args")
+    parser.add_argument("--auto-model-planning", action="store_true", help="Allow /auto model=true or configured natural planning to ask the configured model for JSON tool plans; registry policy and ROE still apply")
+    parser.add_argument("--max-auto-steps", type=int, help="Maximum bounded /auto-loop steps")
     parser.add_argument("--block-tool", action="append", default=[], help="Block a registered tool by name at runtime policy level")
     parser.add_argument("--confirm-tool", action="append", default=[], help="Queue a registered tool for approval before execution")
     parser.add_argument("--skill-dir", action="append", default=[], help="Directory containing local Hermes-style SKILL.md files")
@@ -33,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_init = sub.add_parser("config-init", help="Write a default agent runtime config JSON")
     config_init.add_argument("--out", default="agent.config.json")
+
+    profile_init = sub.add_parser("profile-init", help="Create a named local Phobos profile under ~/.phobos/profiles")
+    profile_init.add_argument("--name", required=True)
+
+    sub.add_parser("profiles", help="List local Phobos profiles")
 
     init = sub.add_parser("init", help="Initialize an agent DB/session for an engagement")
     init.add_argument("--engagement", required=True)
@@ -58,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="Print runtime status and schema information")
     status.add_argument("--engagement", required=True)
+
+    auth_status = sub.add_parser("auth-status", help="Check configured auth/token environment variables without revealing values")
+    auth_status.add_argument("--engagement", required=True)
 
     export_pack = sub.add_parser("export-pack", help="Create a redacted engagement pack ZIP")
     export_pack.add_argument("--engagement", required=True)
@@ -114,13 +128,34 @@ def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, sl
         parser.add_argument("--app-token-env", help="Environment variable containing the Slack app-level Socket Mode token (xapp-...)")
 
 
+def _profiles_root() -> Path:
+    return Path.home() / ".phobos" / "profiles"
+
+
+def _profile_dir(name: str) -> Path:
+    cleaned = str(name).strip()
+    if not cleaned:
+        raise SystemExit("profile name is required")
+    if any(part in {"", ".", ".."} for part in Path(cleaned).parts) or any(sep in cleaned for sep in ("/", "\\")):
+        raise SystemExit("profile names must be simple names, not paths")
+    return _profiles_root() / cleaned
+
+
 def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
-    if args.config:
-        cfg = AgentAppConfig.load(args.config).to_runtime_config(args.engagement, args.db, args.session)
+    profile_dir = _profile_dir(args.profile) if getattr(args, "profile", None) else None
+    config_path = args.config
+    db_path = args.db
+    if profile_dir is not None:
+        if db_path == DEFAULT_DB:
+            db_path = str(profile_dir / "phobos-agent.db")
+        if not config_path and (profile_dir / "agent.config.json").exists():
+            config_path = str(profile_dir / "agent.config.json")
+    if config_path:
+        cfg = AgentAppConfig.load(config_path).to_runtime_config(args.engagement, db_path, args.session)
     else:
         cfg = AgentRuntimeConfig(
             engagement_path=args.engagement,
-            db_path=args.db,
+            db_path=db_path,
             session_name=args.session,
             provider=args.provider,
             model=args.model,
@@ -134,6 +169,10 @@ def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
         cfg.plugin_dirs = tuple(list(cfg.plugin_dirs) + list(args.plugin_dir))
     if args.auto_execute_natural:
         cfg.auto_execute_natural = True
+    if args.auto_model_planning:
+        cfg.auto_model_planning = True
+    if args.max_auto_steps is not None:
+        cfg.max_auto_steps = args.max_auto_steps
     if args.block_tool:
         cfg.blocked_tools = tuple(list(cfg.blocked_tools) + list(args.block_tool))
     if args.confirm_tool:
@@ -151,16 +190,32 @@ def main(argv: list[str] | None = None) -> int:
         path = AgentAppConfig.default().save(args.out)
         print(json.dumps({"config": str(path), "status": "written"}, indent=2))
         return 0
+    if args.subcommand == "profile-init":
+        profile_dir = _profile_dir(args.name)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        config_path = profile_dir / "agent.config.json"
+        if not config_path.exists():
+            AgentAppConfig.default().save(config_path)
+        print(json.dumps({"status": "written", "profile": args.name, "dir": str(profile_dir), "config": str(config_path), "db": str(profile_dir / "phobos-agent.db")}, indent=2))
+        return 0
+    if args.subcommand == "profiles":
+        root = _profiles_root()
+        profiles = []
+        if root.exists():
+            for path in sorted(item for item in root.iterdir() if item.is_dir()):
+                profiles.append({"name": path.name, "dir": str(path), "config_exists": (path / "agent.config.json").exists(), "db_exists": (path / "phobos-agent.db").exists()})
+        print(json.dumps({"profiles_root": str(root), "profiles": profiles}, indent=2))
+        return 0
 
     if args.subcommand == "init":
         roe = EngagementROE.load(args.engagement)
         cfg = _config(args)
-        store = AgentStore(args.db)
+        store = AgentStore(cfg.db_path)
         session_id = store.get_or_create_session(args.session, args.engagement)
         bridge_configs = {name: BridgeConfig.from_dict(name, data).sanitized() for name, data in (cfg.bridges or {}).items()}
         store.audit(session_id, "agent_init", {"engagement": roe.name, "scope": roe.in_scope_targets, "safety_mode": roe.safety_mode, "workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "bridges": bridge_configs})
         store.close()
-        print(json.dumps({"db": args.db, "session_id": session_id, "engagement": roe.to_dict(), "runtime": {"workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "skill_bundles": {name: list(skills) for name, skills in (cfg.skill_bundles or {}).items()}, "bridges": bridge_configs, "provider_chain": list(cfg.model_providers) or [{"provider": cfg.provider, "model": cfg.model}]}}, indent=2))
+        print(json.dumps({"db": cfg.db_path, "session_id": session_id, "engagement": roe.to_dict(), "runtime": {"workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "skill_bundles": {name: list(skills) for name, skills in (cfg.skill_bundles or {}).items()}, "bridges": bridge_configs, "provider_chain": list(cfg.model_providers) or [{"provider": cfg.provider, "model": cfg.model}]}}, indent=2))
         return 0
 
     runtime = OffSecAgentRuntime(_config(args))
@@ -184,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.subcommand == "status":
             result = runtime.registry.run("runtime_status", {})
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0
+        if args.subcommand == "auth-status":
+            result = runtime.registry.run("auth_status", {})
             print(json.dumps(result.to_dict(), indent=2))
             return 0
         if args.subcommand == "export-pack":

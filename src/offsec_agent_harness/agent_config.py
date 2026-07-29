@@ -42,6 +42,8 @@ class AgentAppConfig:
     max_context_messages: int = 12
     tool_timeout: int = 30
     auto_execute_natural: bool = False
+    auto_model_planning: bool = False
+    max_auto_steps: int = 5
     blocked_tools: list[str] = field(default_factory=list)
     confirm_tools: list[str] = field(default_factory=list)
     skill_dirs: list[str] = field(default_factory=list)
@@ -66,6 +68,8 @@ class AgentAppConfig:
             max_context_messages=int(data.get("max_context_messages", 12)),
             tool_timeout=int(data.get("tool_timeout", 30)),
             auto_execute_natural=bool(data.get("auto_execute_natural", False)),
+            auto_model_planning=bool(data.get("auto_model_planning", False)),
+            max_auto_steps=int(data.get("max_auto_steps", 5)),
             blocked_tools=[str(item) for item in data.get("blocked_tools", [])],
             confirm_tools=[str(item) for item in data.get("confirm_tools", [])],
             skill_dirs=[str(item) for item in data.get("skill_dirs", [])],
@@ -98,6 +102,8 @@ class AgentAppConfig:
             max_context_messages=self.max_context_messages,
             tool_timeout=self.tool_timeout,
             auto_execute_natural=self.auto_execute_natural,
+            auto_model_planning=self.auto_model_planning,
+            max_auto_steps=self.max_auto_steps,
             blocked_tools=tuple(self.blocked_tools),
             confirm_tools=tuple(self.confirm_tools),
             skill_dirs=tuple(self.skill_dirs),

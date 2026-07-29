@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any, Callable
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import time
 import uuid
 import zipfile
 
@@ -22,6 +25,7 @@ from .model_adapters import BaseModelAdapter, HeuristicAdapter
 from .models import ActionRequest, DecisionStatus, EngagementROE, redact_secrets
 from .reporting import FindingInput, FindingMarkdownExporter, safe_report_filename
 from .agent_store import AgentStore, utc_now
+from .agent_crypto import seal_bytes, unseal_bytes
 
 
 _LIVE_PROCESSES: dict[int, subprocess.Popen] = {}
@@ -135,6 +139,7 @@ class OffSecToolRegistry:
             "execute": {"type": "boolean", "description": "Must be true to start."},
         }, ["target", "purpose", "command"]))
         self.register_tool("poll_process", self.poll_process, _spec("poll_process", "Poll a background process status.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("wait_process", self.wait_process, _spec("wait_process", "Wait up to timeout seconds for a background process to complete, then return status and log tails.", {"id": {"type": "integer"}, "timeout": {"type": "integer"}, "limit": {"type": "integer"}}, ["id"]))
         self.register_tool("process_log", self.process_log, _spec("process_log", "Read redacted stdout/stderr tails for a background process.", {"id": {"type": "integer"}, "limit": {"type": "integer"}}, ["id"]))
         self.register_tool("kill_process", self.kill_process, _spec("kill_process", "Terminate a tracked background process.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("list_processes", self.list_processes, _spec("list_processes", "List tracked background processes for the current session.", {"limit": {"type": "integer"}}))
@@ -148,8 +153,14 @@ class OffSecToolRegistry:
         self.register_tool("remember", self.remember, _spec("remember", "Store local agent memory in SQLite.", {"key": _string("Memory key."), "value": _string("Memory value."), "tags": _string("Optional comma tags.")}, ["key", "value"]))
         self.register_tool("recall", self.recall, _spec("recall", "Search local agent memory.", {"query": _string("Memory search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("search_session", self.search_session, _spec("search_session", "Search current-session messages.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
+        self.register_tool("search_all_sessions", self.search_all_sessions, _spec("search_all_sessions", "Search messages across all local Phobos sessions in this DB.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("context_snapshot", self.context_snapshot, _spec("context_snapshot", "Return latest compact summary, recent messages, and relevant memory.", {"query": _string("Optional relevance query."), "limit": {"type": "integer"}}))
         self.register_tool("compact_context", self.compact_context, _spec("compact_context", "Summarize recent session messages into durable local context.", {"limit": {"type": "integer"}}))
+        self.register_tool("context_compact_node", self.context_compact_node, _spec("context_compact_node", "Create an LCM-style context node from recent messages and optionally roll child nodes into a parent.", {"limit": {"type": "integer"}, "title": _string("Optional node title."), "parent": {"type": "boolean"}}, []))
+        self.register_tool("context_describe", self.context_describe, _spec("context_describe", "Describe local LCM-style context nodes without expanding full sources.", {"id": {"type": "integer"}, "limit": {"type": "integer"}}, []))
+        self.register_tool("context_expand", self.context_expand, _spec("context_expand", "Expand a local context node and recover its source messages/child summaries.", {"id": {"type": "integer"}, "source_limit": {"type": "integer"}}, ["id"]))
+        self.register_tool("context_query", self.context_query, _spec("context_query", "Search memories, session history, and LCM-style context nodes, then synthesize an answer.", {"query": _string("Question or recall query."), "limit": {"type": "integer"}}, ["query"]))
+        self.register_tool("reflect_memory", self.reflect_memory, _spec("reflect_memory", "Synthesize an answer from local memories and session/context recall without executing tools.", {"query": _string("Question to answer from memory/context."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("workspace_read", self.workspace_read, _spec("workspace_read", "Read a text file inside the engagement workspace.", {"path": _string("Workspace-relative path."), "limit": {"type": "integer"}}, ["path"]))
         self.register_tool("workspace_write", self.workspace_write, _spec("workspace_write", "Write or append a text file inside the engagement workspace.", {"path": _string("Workspace-relative path."), "content": _string("Text content."), "append": {"type": "boolean"}}, ["path", "content"]))
         self.register_tool("workspace_search", self.workspace_search, _spec("workspace_search", "Search text files inside the engagement workspace.", {"query": _string("Substring/regex query."), "glob": _string("Glob like **/*.md."), "limit": {"type": "integer"}}, ["query"]))
@@ -158,6 +169,13 @@ class OffSecToolRegistry:
         self.register_tool("list_jobs", self.list_jobs, _spec("list_jobs", "List scheduled jobs.", {}))
         self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due jobs from tool-only context; runtime executes them.", {}))
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
+        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted.")}, []))
+        self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
+        self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
+        self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
+        self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
+        self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
+        self.register_tool("sealed_import", self.sealed_import, _spec("sealed_import", "Decrypt a sealed session snapshot and import its handoff data; no commands are executed.", {"path": _string("Sealed snapshot path."), "passphrase_env": _string("Environment variable containing passphrase."), "merge_memories": {"type": "boolean"}}, ["path", "passphrase_env"]))
         self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List pending approvals.", {"status": _string("Approval status; default pending.")}))
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
@@ -238,6 +256,18 @@ class OffSecToolRegistry:
         if not process:
             return ToolResult("error", "Process not found.")
         return ToolResult(process["status"], f"Process {process['id']} is {process['status']}.", {"process": process})
+
+    def wait_process(self, args: dict[str, Any]) -> ToolResult:
+        process_id = int(args.get("id") or args.get("process_id"))
+        deadline = time.monotonic() + max(0, int(args.get("timeout", 30)))
+        process = self._refresh_process(process_id)
+        while process and process.get("status") in {"running", "starting"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            process = self._refresh_process(process_id)
+        if not process:
+            return ToolResult("error", "Process not found.")
+        log = self.process_log({"id": process_id, "limit": int(args.get("limit", 4000))})
+        return ToolResult(process["status"], f"Process {process_id} wait ended with status {process['status']}.", {"process": process, "stdout": log.data.get("stdout", ""), "stderr": log.data.get("stderr", "")})
 
     def process_log(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
@@ -382,6 +412,10 @@ class OffSecToolRegistry:
         rows = self.store.search_messages(self.session_id, str(args.get("query", "")), limit=int(args.get("limit", 10)))
         return ToolResult("ok", f"Found {len(rows)} session messages.", {"messages": rows})
 
+    def search_all_sessions(self, args: dict[str, Any]) -> ToolResult:
+        rows = self.store.search_all_messages(str(args.get("query", "")), limit=int(args.get("limit", 10)))
+        return ToolResult("ok", f"Found {len(rows)} message(s) across local sessions.", {"messages": rows})
+
     def context_snapshot(self, args: dict[str, Any]) -> ToolResult:
         query = str(args.get("query", ""))
         limit = int(args.get("limit", 8))
@@ -397,7 +431,7 @@ class OffSecToolRegistry:
         messages = self.store.recent_messages(self.session_id, limit=int(args.get("limit", 40)))
         if not messages:
             return ToolResult("ok", "No messages to compact.", {"summary_id": None})
-        serialized = redact_secrets("\n".join(f"{row['id']} {row['role']}: {row['content']}" for row in messages))
+        serialized = redact_secrets("\n".join(f"{row['id']} {row['role']}: {row['content']}" for row in messages)) or ""
         prompt = "Summarize this Phobos Agent session for future continuity. Preserve scope, decisions, evidence paths, approvals, jobs, and open tasks.\n\n" + serialized
         summary = redact_secrets(self.model_adapter.generate("evidence", prompt).content) or ""
         summary_id = self.store.create_context_summary(self.session_id, messages[0]["id"], messages[-1]["id"], summary)
@@ -405,6 +439,77 @@ class OffSecToolRegistry:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(summary, encoding="utf-8")
         return ToolResult("ok", f"Context summary {summary_id} written.", {"summary_id": summary_id, "summary": summary}, {"markdown": str(out)})
+
+    def context_compact_node(self, args: dict[str, Any]) -> ToolResult:
+        messages = self.store.recent_messages(self.session_id, limit=int(args.get("limit", 60)))
+        if not messages:
+            return ToolResult("ok", "No messages to compact into a context node.", {"node_id": None})
+        title = str(args.get("title") or f"Session context {messages[0]['id']}-{messages[-1]['id']}")
+        serialized = redact_secrets("\n".join(f"{row['id']} {row['role']}: {row['content']}" for row in messages)) or ""
+        prompt = "Create an LCM-style Phobos context node. Preserve task state, decisions, evidence paths, scope constraints, approvals, and unresolved questions.\n\n" + serialized
+        summary = redact_secrets(self.model_adapter.generate("evidence", prompt).content) or ""
+        sources = [{"type": "message", "id": row["id"], "role": row["role"], "created_at": row["created_at"]} for row in messages]
+        node_id = self.store.create_context_node(self.session_id, title, summary, sources, depth=0, metadata={"kind": "message_compaction", "source_from": messages[0]["id"], "source_to": messages[-1]["id"]})
+        artifacts = {"markdown": str(_write_context_node_artifact(self.harness.store.root, node_id, title, summary))}
+        parent_id: int | None = None
+        if args.get("parent", False):
+            children = self.store.list_context_nodes(self.session_id, limit=int(args.get("child_limit", 6)))
+            child_lines = "\n\n".join(f"Node {child['id']} depth={child['depth']} title={child['title']}\n{child['summary']}" for child in reversed(children))
+            parent_summary = redact_secrets(self.model_adapter.generate("evidence", "Roll these Phobos context nodes into a higher-level continuity summary.\n\n" + child_lines).content) or ""
+            parent_sources = [{"type": "context_node", "id": child["id"], "title": child["title"]} for child in children]
+            parent_id = self.store.create_context_node(self.session_id, f"Rollup through node {node_id}", parent_summary, parent_sources, depth=1, metadata={"kind": "rollup", "child_count": len(children)})
+            artifacts["parent_markdown"] = str(_write_context_node_artifact(self.harness.store.root, parent_id, f"Rollup through node {node_id}", parent_summary))
+        return ToolResult("ok", f"Context node {node_id} written.", {"node_id": node_id, "parent_id": parent_id, "summary": summary, "sources": sources}, artifacts)
+
+    def context_describe(self, args: dict[str, Any]) -> ToolResult:
+        node_arg = args.get("id") or args.get("node_id")
+        if node_arg:
+            node = self.store.get_context_node(int(node_arg))
+            if not node:
+                return ToolResult("error", f"Context node {node_arg} not found.")
+            children = self.store.child_context_nodes(int(node_arg))
+            preview = dict(node)
+            preview["summary_preview"] = preview.pop("summary")[:1000]
+            preview["source_count"] = len(node.get("sources", []))
+            return ToolResult("ok", f"Context node {node_arg} described.", {"node": preview, "children": children})
+        nodes = self.store.list_context_nodes(self.session_id, limit=int(args.get("limit", 20)))
+        previews = []
+        for node in nodes:
+            previews.append({"id": node["id"], "parent_id": node["parent_id"], "depth": node["depth"], "title": node["title"], "source_count": len(node.get("sources", [])), "summary_preview": node["summary"][:500], "created_at": node["created_at"]})
+        return ToolResult("ok", f"Found {len(previews)} context node(s).", {"nodes": previews})
+
+    def context_expand(self, args: dict[str, Any]) -> ToolResult:
+        node_id = int(args.get("id") or args.get("node_id"))
+        node = self.store.get_context_node(node_id)
+        if not node:
+            return ToolResult("error", f"Context node {node_id} not found.")
+        source_limit = int(args.get("source_limit", 40))
+        expanded_sources = []
+        for source in node.get("sources", [])[:source_limit]:
+            if source.get("type") == "message":
+                message = self.store.get_message(int(source.get("id")))
+                if message:
+                    expanded_sources.append({"type": "message", "message": _redacted_mapping(message)})
+            elif source.get("type") == "context_node":
+                child = self.store.get_context_node(int(source.get("id")))
+                if child:
+                    expanded_sources.append({"type": "context_node", "node": {"id": child["id"], "title": child["title"], "summary": redact_secrets(child["summary"])}})
+        return ToolResult("ok", f"Context node {node_id} expanded.", {"node": _redacted_mapping(node), "expanded_sources": expanded_sources})
+
+    def context_query(self, args: dict[str, Any]) -> ToolResult:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return ToolResult("error", "query is required.")
+        limit = int(args.get("limit", 8))
+        memories = self.store.recall(query, limit=limit)
+        messages = self.store.search_messages(self.session_id, query, limit=limit)
+        nodes = self.store.search_context_nodes(self.session_id, query, limit=limit)
+        context = json.dumps(_redact_value({"memories": memories, "messages": messages, "context_nodes": nodes}), indent=2)[:16000]
+        answer = redact_secrets(self.model_adapter.generate("evidence", f"Answer this from the supplied Phobos local context only. If evidence is missing, say what is missing.\n\nQuestion: {query}", context=context).content)
+        return ToolResult("ok", "Context query answered from local memory/session/context nodes.", {"answer": answer, "memories": memories, "messages": messages, "context_nodes": nodes})
+
+    def reflect_memory(self, args: dict[str, Any]) -> ToolResult:
+        return self.context_query(args)
 
     def workspace_read(self, args: dict[str, Any]) -> ToolResult:
         path = self._workspace_path(str(args.get("path", "")))
@@ -497,6 +602,120 @@ class OffSecToolRegistry:
         out.write_text("\n".join(lines), encoding="utf-8")
         return ToolResult("ok", f"Subagent review complete: {out}", {"roles": roles, "results": results}, {"markdown": str(out)})
 
+    def delegate_tasks(self, args: dict[str, Any]) -> ToolResult:
+        prompt = str(args.get("prompt") or "").strip()
+        task_specs = _parse_delegate_tasks(args)
+        if not task_specs:
+            return ToolResult("error", "Provide tasks as JSON/list/newline text, or roles plus prompt.")
+        delegation_id = self.store.create_delegation(self.session_id, prompt, task_specs)
+        out_dir = self.harness.store.root / "agent" / "delegations" / f"delegation-{delegation_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(6, len(task_specs))) as pool:
+            future_map = {}
+            for idx, task in enumerate(task_specs, 1):
+                role = str(task.get("role") or "impact")
+                task_prompt = str(task.get("prompt") or task.get("goal") or prompt)
+                task_context = str(task.get("context") or prompt)
+                future_map[pool.submit(self.model_adapter.generate, role, task_prompt, task_context)] = (idx, role, task_prompt)
+            for future in as_completed(future_map):
+                idx, role, task_prompt = future_map[future]
+                try:
+                    content = redact_secrets(future.result().content) or ""
+                    status = "ok"
+                except Exception as exc:
+                    content = f"ERROR: {exc}"
+                    status = "error"
+                path = out_dir / f"task-{idx}-{_safe_filename(role)}.md"
+                path.write_text(f"# Delegated Task {idx}: {role}\n\nPrompt: {redact_secrets(task_prompt)}\n\n{content}\n", encoding="utf-8")
+                results.append({"index": idx, "role": role, "prompt": redact_secrets(task_prompt), "status": status, "content": content, "artifact": str(path)})
+        results.sort(key=lambda item: int(item["index"]))
+        summary_path = out_dir / "SUMMARY.md"
+        summary_lines = ["# Phobos Local Delegation", "", f"Delegation: {delegation_id}", f"Prompt: {redact_secrets(prompt)}", ""]
+        for result in results:
+            summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']})", "", str(result["content"])[:4000], ""]
+        summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+        status = "ok" if all(result["status"] == "ok" for result in results) else "error"
+        delegation = self.store.complete_delegation(delegation_id, status, results, {"summary": str(summary_path), "dir": str(out_dir)})
+        return ToolResult(status, f"Delegation {delegation_id} completed with {len(results)} task(s).", {"delegation": delegation}, {"summary": str(summary_path), "directory": str(out_dir)})
+
+    def list_delegations(self, args: dict[str, Any]) -> ToolResult:
+        delegations = self.store.list_delegations(self.session_id, limit=int(args.get("limit", 20)))
+        return ToolResult("ok", f"Found {len(delegations)} delegation batch(es).", {"delegations": delegations})
+
+    def auth_status(self, args: dict[str, Any]) -> ToolResult:
+        env_names = {"model_key_env": "OPENAI_API_KEY"}
+        providers = []
+        adapter_provider = getattr(self.model_adapter, "provider", "unknown")
+        providers.append({"provider": adapter_provider, "configured": True})
+        for name in ("OPENAI_API_KEY", "PHOBOS_DISCORD_TOKEN", "PHOBOS_SLACK_BOT_TOKEN", "PHOBOS_SLACK_APP_TOKEN", "PHOBOS_TELEGRAM_TOKEN"):
+            env_names[name] = name
+        env = {name: {"set": bool(os.environ.get(name)), "length": len(os.environ.get(name, "")) if args.get("include_environment", False) and os.environ.get(name) else None} for name in sorted(set(env_names.values()))}
+        return ToolResult("ok", "Auth and token environment checked without revealing values.", {"provider": adapter_provider, "environment": env, "secret_values_redacted": True})
+
+    def media_import(self, args: dict[str, Any]) -> ToolResult:
+        src = Path(str(args.get("path", ""))).expanduser()
+        if not src.exists() or not src.is_file():
+            return ToolResult("error", f"Media/artifact source file not found: {src}")
+        data = src.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        mime_type = mimetypes.guess_type(str(src))[0] or "application/octet-stream"
+        kind = str(args.get("kind") or _kind_from_mime(mime_type)).strip() or "file"
+        media_dir = self.harness.store.root / "agent" / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        dest = media_dir / f"{digest[:12]}-{_safe_filename(src.name)}"
+        shutil.copyfile(src, dest)
+        media_id = self.store.create_media_artifact(self.session_id, kind, str(src), str(dest), mime_type, digest, len(data), {"original_name": src.name})
+        return ToolResult("ok", f"Imported media/artifact {media_id}: {dest}", {"media": self.store.list_media_artifacts(self.session_id, limit=1)[0]}, {"file": str(dest)})
+
+    def media_list(self, args: dict[str, Any]) -> ToolResult:
+        rows = self.store.list_media_artifacts(self.session_id, limit=int(args.get("limit", 50)))
+        return ToolResult("ok", f"Found {len(rows)} media/artifact file(s).", {"media": rows})
+
+    def sealed_export(self, args: dict[str, Any]) -> ToolResult:
+        passphrase_env = str(args.get("passphrase_env") or "").strip()
+        passphrase = os.environ.get(passphrase_env, "") if passphrase_env else ""
+        if not passphrase:
+            return ToolResult("error", "passphrase_env must name an environment variable containing the passphrase; no secret value is accepted in args.")
+        handoff = self.export_session({"out": f"sealed-source-{uuid.uuid4().hex[:8]}.json", "message_limit": int(args.get("message_limit", 1000))})
+        if handoff.status != "ok":
+            return handoff
+        source_path = Path(handoff.data["path"])
+        payload: dict[str, Any] = {"handoff": json.loads(source_path.read_text(encoding="utf-8"))}
+        if args.get("include_pack", False):
+            pack = self.export_pack({"out": f"sealed-source-{uuid.uuid4().hex[:8]}.zip"})
+            payload["pack_manifest"] = pack.data.get("manifest", {}) if pack.status == "ok" else {"error": pack.message}
+        sealed = seal_bytes(json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"), passphrase, aad=b"phobos-agent-sealed-export")
+        out_arg = str(args.get("out") or "").strip()
+        out = Path(out_arg) if out_arg else self.harness.store.root / "agent" / "sealed" / f"session-{uuid.uuid4().hex[:10]}.sealed.json"
+        if not out.is_absolute():
+            out = self.harness.store.root / "agent" / "sealed" / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(sealed)
+        source_path.unlink(missing_ok=True)
+        return ToolResult("ok", f"Sealed encrypted snapshot written: {out}", {"path": str(out), "format": "PHOBOS_SEALED_V1", "passphrase_env": passphrase_env}, {"sealed": str(out)})
+
+    def sealed_import(self, args: dict[str, Any]) -> ToolResult:
+        passphrase_env = str(args.get("passphrase_env") or "").strip()
+        passphrase = os.environ.get(passphrase_env, "") if passphrase_env else ""
+        if not passphrase:
+            return ToolResult("error", "passphrase_env must name an environment variable containing the passphrase; no secret value is accepted in args.")
+        path = Path(str(args.get("path", ""))).expanduser()
+        if not path.exists() or not path.is_file():
+            return ToolResult("error", f"Sealed snapshot not found: {path}")
+        payload = json.loads(unseal_bytes(path.read_bytes(), passphrase, aad=b"phobos-agent-sealed-export").decode("utf-8"))
+        handoff = payload.get("handoff")
+        if not isinstance(handoff, dict):
+            return ToolResult("error", "Sealed snapshot does not contain a session handoff.")
+        tmp = self.harness.store.root / "agent" / "sealed" / f"import-{uuid.uuid4().hex[:8]}.json"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(handoff, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            result = self.import_session({"path": str(tmp), "merge_memories": bool(args.get("merge_memories", False))})
+        finally:
+            tmp.unlink(missing_ok=True)
+        return ToolResult(result.status, "Sealed snapshot decrypted and imported; no commands executed.", result.data, result.artifacts)
+
     def list_approvals(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_approvals(self.session_id, status=str(args.get("status", "pending")))
         return ToolResult("ok", f"Found {len(rows)} approvals.", {"approvals": rows})
@@ -520,6 +739,9 @@ class OffSecToolRegistry:
         jobs = self.store.list_jobs(self.session_id)
         processes = self.store.list_processes(self.session_id, limit=100)
         tasks = self.store.list_tasks(self.session_id, status="all", limit=100)
+        context_nodes = self.store.list_context_nodes(self.session_id, limit=100)
+        delegations = self.store.list_delegations(self.session_id, limit=100)
+        media = self.store.list_media_artifacts(self.session_id, limit=100)
         data = {
             "session_id": self.session_id,
             "engagement": self.roe.to_dict(),
@@ -530,6 +752,9 @@ class OffSecToolRegistry:
             "jobs": len(jobs),
             "tasks": len(tasks),
             "open_tasks": len([task for task in tasks if task["status"] not in {"completed", "cancelled"}]),
+            "context_nodes": len(context_nodes),
+            "delegations": len(delegations),
+            "media_artifacts": len(media),
             "processes": len(processes),
             "policy": {"blocked_tools": sorted(self.blocked_tools), "confirm_tools": sorted(self.confirm_tools)},
             "evidence_root": str(self.harness.store.root),
@@ -569,6 +794,9 @@ class OffSecToolRegistry:
             "pending_approvals": self.store.list_approvals(self.session_id, status="pending"),
             "jobs": [asdict(job) for job in self.store.list_jobs(self.session_id)],
             "tasks": [_redacted_mapping(row) for row in self.store.list_tasks(self.session_id, status="all", limit=500)],
+            "context_nodes": [_redacted_mapping(row) for row in self.store.list_context_nodes(self.session_id, limit=500)],
+            "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=200)],
+            "media_artifacts": [_redacted_mapping(row) for row in self.store.list_media_artifacts(self.session_id, limit=200)],
             "processes": self.store.list_processes(self.session_id, limit=200),
             "audit": self.store.list_audit(self.session_id, limit=200),
         }
@@ -702,10 +930,13 @@ class OffSecToolRegistry:
             "schema": self.store.schema_info(),
             "messages": [_redacted_mapping(row) for row in self.store.all_messages(self.session_id, limit=message_limit)],
             "context_summaries": [_redacted_mapping(row) for row in self.store.list_context_summaries(self.session_id, limit=50)],
+            "context_nodes": [_redacted_mapping(row) for row in self.store.list_context_nodes(self.session_id, limit=500)],
             "memories": [_redacted_mapping(row) for row in self.store.recall("", limit=500)],
             "tasks": [_redacted_mapping(row) for row in self.store.list_tasks(self.session_id, status="all", limit=500)],
             "pending_approvals": [_redacted_mapping(row) for row in self.store.list_approvals(self.session_id, status="pending")],
             "jobs": [asdict(job) for job in self.store.list_jobs(self.session_id)],
+            "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=500)],
+            "media_artifacts": [_redacted_mapping(row) for row in self.store.list_media_artifacts(self.session_id, limit=500)],
             "processes": [_redacted_mapping(row) for row in self.store.list_processes(self.session_id, limit=500)],
             "audit": [_redacted_mapping(row) for row in self.store.list_audit(self.session_id, limit=500)],
         }
@@ -740,6 +971,21 @@ class OffSecToolRegistry:
             summary_text = "Imported session messages:\n" + "\n".join(msg_lines)
         if summary_text.strip():
             self.store.create_context_summary(self.session_id, None, None, f"Imported handoff from {source} at {utc_now()}:\n\n{summary_text[:12000]}")
+        imported_nodes = 0
+        for node in bundle.get("context_nodes", [])[:100]:
+            title = str(node.get("title", "imported context node")).strip() or "imported context node"
+            summary = str(node.get("summary", "")).strip()
+            if not summary:
+                continue
+            self.store.create_context_node(
+                self.session_id,
+                f"Imported from {source}: {title}",
+                summary[:12000],
+                sources=[{"type": "imported_context_node", "source_session_id": source, "source_node_id": node.get("id")}],
+                depth=int(node.get("depth", 0) or 0),
+                metadata={"imported": True, "source_session_id": source},
+            )
+            imported_nodes += 1
         imported_tasks = 0
         for task in bundle.get("tasks", []):
             content = str(task.get("content", "")).strip()
@@ -751,8 +997,8 @@ class OffSecToolRegistry:
                 imported_status = "pending"
             self.store.create_task(self.session_id, f"Imported from {source}: {content}", status=imported_status, metadata={"source_session_id": source, "source_task_id": task.get("id")})
             imported_tasks += 1
-        self.store.append_message(self.session_id, "system", f"Imported session handoff from {source}: {imported_memories} memories, {imported_tasks} tasks, source file {path}")
-        return ToolResult("ok", f"Imported handoff from {source}; no commands executed.", {"source_session_id": source, "imported_memories": imported_memories, "imported_tasks": imported_tasks})
+        self.store.append_message(self.session_id, "system", f"Imported session handoff from {source}: {imported_memories} memories, {imported_nodes} context nodes, {imported_tasks} tasks, source file {path}")
+        return ToolResult("ok", f"Imported handoff from {source}; no commands executed.", {"source_session_id": source, "imported_memories": imported_memories, "imported_context_nodes": imported_nodes, "imported_tasks": imported_tasks})
 
     def list_tasks(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_tasks(self.session_id, status=str(args.get("status", "all")), limit=int(args.get("limit", 100)))
@@ -841,6 +1087,61 @@ def _request_from_args(args: dict[str, Any]) -> ActionRequest:
         command=args.get("command"),
         actor=str(args.get("actor", "operator")),
     )
+
+
+def _parse_delegate_tasks(args: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = args.get("tasks")
+    prompt = str(args.get("prompt") or "").strip()
+    if isinstance(raw, list):
+        out = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(dict(item))
+            elif str(item).strip():
+                out.append({"prompt": str(item).strip()})
+        return out
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return _parse_delegate_tasks({"tasks": parsed, "prompt": prompt})
+            except json.JSONDecodeError:
+                pass
+        return [{"prompt": line.strip()} for line in text.splitlines() if line.strip()]
+    roles = args.get("roles")
+    if isinstance(roles, str):
+        role_list = [role.strip() for role in roles.split(",") if role.strip()]
+    elif isinstance(roles, list):
+        role_list = [str(role).strip() for role in roles if str(role).strip()]
+    else:
+        role_list = []
+    if role_list and prompt:
+        return [{"role": role, "prompt": prompt, "context": prompt} for role in role_list]
+    return []
+
+
+def _safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-")
+    return cleaned[:80] or "artifact"
+
+
+def _kind_from_mime(mime_type: str) -> str:
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    if mime_type.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def _write_context_node_artifact(root: Path, node_id: int, title: str, summary: str) -> Path:
+    out = root / "agent" / "context-nodes" / f"context-node-{node_id}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(f"# {redact_secrets(title)}\n\nNode: {node_id}\nGenerated: {utc_now()}\n\n{redact_secrets(summary)}\n", encoding="utf-8")
+    return out
 
 
 def _normalize_task_status(status: str) -> str:

@@ -4,24 +4,26 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 
 ## Runtime components
 
-- **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v3.
-- **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; memory and session search use FTS5 when available and fall back to LIKE otherwise.
+- **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v4.
+- **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; memory and current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
-- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state.
+- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, and `/lcm-query` add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
-- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; it never bypasses ROE and does not execute commands unless `execute=true` is supplied.
+- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
+- **Profiles and auth status:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values.
 - **Approvals:** confirm-level commands are queued in SQLite and require `/approve id=<n>` before execution/start.
 - **Runtime tool policy:** config/CLI can block or approval-gate arbitrary tool names, independent of ROE guardrails.
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
-- **Background processes:** `/start`, `/poll`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
+- **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; run via `phobos-agent run-due` or external cron.
-- **Subagent orchestration:** parallel role reviews for scope, safety, evidence, impact, CVE, and report-writing roles.
+- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with per-task artifacts.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
-- **Operator briefing and handoff:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs.
+- **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
+- **Operator briefing, handoff, and sealed snapshots:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots.
 - **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
@@ -34,7 +36,8 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /tools
 /schemas name=<optional-tool>
 /tool name=<tool_name> key=value ...
-/auto prompt=<natural request> apply=false execute=false
+/auto prompt=<natural request> apply=false execute=false model=false
+/auto-loop prompt=<goal> steps=5 execute=false model=false
 /plugins
 /skills
 /skill name=<skill-name>
@@ -42,9 +45,15 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /sessions limit=20 recent=8
 /remember key=<name> value=<fact> tags=<optional>
 /recall query=<text>
+/reflect query=<question>
 /search query=<text>
+/search-all query=<text>
 /context query=<optional> limit=8
 /compact limit=40
+/lcm-compact limit=60 parent=false
+/lcm-describe id=<optional-node-id>
+/lcm-expand id=<node-id>
+/lcm-query query=<question>
 /read path=<workspace-relative-file>
 /write path=<workspace-relative-file> content=<text> append=false
 /workspace-search query=<regex> glob="**/*.md"
@@ -54,6 +63,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /start target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /processes
 /poll id=<process-id>
+/wait id=<process-id> timeout=30
 /log id=<process-id> limit=4000
 /kill id=<process-id>
 /approvals
@@ -65,6 +75,13 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /cve component=<product> version=<version> catalog=<catalog.json> online=false
 /finding finding_file=<finding.json>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
+/delegate prompt=<task> roles=scope,safety,report
+/delegations limit=20
+/auth-status
+/media-import path=<local-file> kind=<optional>
+/media-list
+/sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
+/sealed-import path=<sealed.json> passphrase_env=<ENV_NAME>
 /job name=<name> schedule="every 1 h" prompt=<agent prompt>
 /run-due
 /status
@@ -119,6 +136,8 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "max_context_messages": 12,
   "tool_timeout": 30,
   "auto_execute_natural": false,
+  "auto_model_planning": false,
+  "max_auto_steps": 5,
   "blocked_tools": [],
   "confirm_tools": [],
   "skill_dirs": [],
@@ -413,11 +432,11 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 28 tests in 3.882s
+Ran 31 tests in 5.956s
 OK
 ```
 
-The committed Hermes-clone smoke demo is:
+The committed Hermes-like local parity smoke demo is:
 
 ```bash
 python scripts/smoke_hermes_parity.py
@@ -427,29 +446,41 @@ It recreates `demo-phobos-parity/` with `agent.config.json`, `phobos-parity.enga
 
 ```text
 PHOBOS AGENT PARITY SMOKE SUMMARY
+profile_cli_ok=True
 default_non_destructive=True
 config_written=True
 agent_init_ok=True
 tools_include_core_plugin_and_new_parity=True
 schema_version_ok=True
+db_schema_counts_ok=True
 local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
 auto_memory_recall=True
+auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
 guardrails_execution_approvals_blocks=True
 background_process_completed=True
+wait_process_ok=True
 jobs_and_subagents=True
 task_board_roundtrip=True
 context_compacted=True
+lcm_context_nodes_ok=True
+delegation_batches_ok=True
+auth_status_redacted_ok=True
+media_artifacts_ok=True
+sealed_snapshot_roundtrip_ok=True
+redacted_exports_not_db_encryption_ok=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
 bridges_offline_ok=True
 gateway_ok=True
+gateway_full_api_ok=True
 pack_exported_and_redacted=True
+no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=80
+artifact_count=113
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -459,32 +490,51 @@ Representative smoke outputs are stored under `demo-phobos-parity/output/`:
 active-scan-assess.txt
 agent-init.stdout.txt
 approvals.txt
+auth-status.json
 auto-apply.txt
+auto-loop.txt
+auto-loop-recall.txt
 auto-plan.txt
 auto-recall.txt
+bridge-approval-block.json
+bridge-discord.json
+bridge-slack.json
+bridge-telegram.json
 compact.txt
 config-init.stdout.txt
 context.txt
+delegation.json
+delegations.json
 destructive-block.txt
 dos-block.txt
 gateway-dashboard.html
 gateway-health.json
+gateway-routes.json
 gateway-status.json
 gateway-tool.json
+lcm-compact.json
+lcm-describe.json
+lcm-expand.json
+lcm-query.json
+legacy-term-grep.txt
+media-import.json
+media-list.json
 operator-briefing.json
 pack-export.json
 plugin-echo.txt
 policy-approved.json
 policy-block.json
 policy-confirm.json
-bridge-discord.json
-bridge-slack.json
-bridge-telegram.json
-bridge-approval-block.json
 process-log.json
 process-poll.json
 process-start.json
+process-wait.json
+profile-init.stdout.txt
+profiles.stdout.txt
 schema-start-process.txt
+sealed-export.json
+sealed-import.json
+sealed-missing.json
 session-export.json
 session-import.json
 skill-load.txt
@@ -504,13 +554,14 @@ workspace-write.txt
 
 ## Current limitations
 
-This is now a real local Hermes-like offsec agent runtime, but it is still not a full production clone of Hermes. Missing or intentionally minimal areas include:
+This is now a real local Hermes-like offsec agent runtime, but it is still not a full production Hermes replacement. Missing or intentionally minimal areas include:
 
 - Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
 - web UI is intentionally minimal/local, not a production console;
-- deterministic slash-command grammar plus a guarded heuristic `/auto` planner, not a full LLM function-calling planner;
-- no distributed worker pool beyond local background processes and role subagent reviews;
-- no encrypted database layer yet;
-- context compaction is explicit via `/compact`, not a live long-context DAG comparable to Hermes LCM.
+- `/auto` has deterministic planning plus optional model-returned JSON plans and a bounded `/auto-loop`, but it is not Hermes' full native function-calling autonomy or general-purpose task computer;
+- local `/delegate` persists batches and artifacts, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
+- sealed exports provide authenticated passphrase-env protected portable snapshots; the live SQLite database remains plaintext unless the operator uses filesystem encryption, SQLCipher, or another deployment control;
+- Phobos now has explicit LCM-style context nodes, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
+- local media import records operator-supplied files, but there is no native chat attachment ingestion, voice, or TTS UX.
 
-The important pieces for a standalone pentest agent are working: sessions, memory, task board, local skills, context snapshots/compaction, tool schemas, plugin loading, runtime policy, approvals, foreground/background execution, jobs, model fallback, subagent role reviews, operator briefings, handoff export/import, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
+The important pieces for a standalone pentest agent are working: sessions, memory, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches, media/artifact import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.

@@ -10,7 +10,7 @@ import sqlite3
 import uuid
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -173,6 +173,44 @@ class AgentStore:
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_session_status ON tasks(session_id, status, id);
+            CREATE TABLE IF NOT EXISTS context_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                parent_id INTEGER,
+                depth INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                source_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_context_nodes_session ON context_nodes(session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_context_nodes_parent ON context_nodes(parent_id);
+            CREATE TABLE IF NOT EXISTS delegations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                tasks_json TEXT NOT NULL DEFAULT '[]',
+                results_json TEXT NOT NULL DEFAULT '[]',
+                artifacts_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_delegations_session ON delegations(session_id, id);
+            CREATE TABLE IF NOT EXISTS media_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_session ON media_artifacts(session_id, id);
             """
         )
         self._init_meta()
@@ -313,6 +351,10 @@ class AgentStore:
         ).fetchall()
         return [_message_row(row) for row in rows]
 
+    def get_message(self, message_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        return _message_row(row) if row else None
+
     def search_messages(self, session_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if query.strip() and self.fts_available:
             for match_query in _fts_query_candidates(query):
@@ -401,6 +443,87 @@ class AgentStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def create_context_node(
+        self,
+        session_id: str,
+        title: str,
+        summary: str,
+        sources: list[dict[str, Any]] | None = None,
+        *,
+        parent_id: int | None = None,
+        depth: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO context_nodes(session_id, parent_id, depth, title, summary, source_json, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, parent_id, depth, title, summary, json.dumps(sources or [], sort_keys=True), json.dumps(metadata or {}, sort_keys=True), utc_now()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_context_node(self, node_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM context_nodes WHERE id=?", (node_id,)).fetchone()
+        return _context_node_row(row) if row else None
+
+    def list_context_nodes(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM context_nodes WHERE session_id=? ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        return [_context_node_row(row) for row in rows]
+
+    def child_context_nodes(self, parent_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM context_nodes WHERE parent_id=? ORDER BY id", (parent_id,)).fetchall()
+        return [_context_node_row(row) for row in rows]
+
+    def search_context_nodes(self, session_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        like = f"%{query}%"
+        rows = self.conn.execute(
+            """
+            SELECT * FROM context_nodes
+            WHERE session_id=? AND (title LIKE ? OR summary LIKE ? OR metadata_json LIKE ?)
+            ORDER BY id DESC LIMIT ?
+            """,
+            (session_id, like, like, like, limit),
+        ).fetchall()
+        return [_context_node_row(row) for row in rows]
+
+    def search_all_messages(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        if query.strip() and self.fts_available:
+            for match_query in _fts_query_candidates(query):
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT messages.*, sessions.name AS session_name
+                        FROM messages_fts
+                        JOIN messages ON messages_fts.rowid = messages.id
+                        LEFT JOIN sessions ON messages.session_id = sessions.id
+                        WHERE messages_fts MATCH ?
+                        ORDER BY bm25(messages_fts), messages.id DESC
+                        LIMIT ?
+                        """,
+                        (match_query, limit),
+                    ).fetchall()
+                    if rows:
+                        return [_message_row(row) | {"session_name": row["session_name"]} for row in rows]
+                except sqlite3.OperationalError:
+                    continue
+        like = f"%{query}%"
+        rows = self.conn.execute(
+            """
+            SELECT messages.*, sessions.name AS session_name
+            FROM messages
+            LEFT JOIN sessions ON messages.session_id = sessions.id
+            WHERE content LIKE ?
+            ORDER BY messages.id DESC LIMIT ?
+            """,
+            (like, limit),
+        ).fetchall()
+        return [_message_row(row) | {"session_name": row["session_name"]} for row in rows]
+
     def create_task(self, session_id: str, content: str, status: str = "pending", metadata: dict[str, Any] | None = None) -> int:
         now = utc_now()
         cur = self.conn.execute(
@@ -447,6 +570,59 @@ class AgentStore:
                 (session_id, limit),
             ).fetchall()
         return [_task_row(row) for row in rows]
+
+    def create_delegation(self, session_id: str, prompt: str, tasks: list[dict[str, Any]]) -> int:
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            INSERT INTO delegations(session_id, status, prompt, tasks_json, results_json, artifacts_json, created_at, updated_at)
+            VALUES (?, 'running', ?, ?, '[]', '{}', ?, ?)
+            """,
+            (session_id, prompt, json.dumps(tasks, sort_keys=True), now, now),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def complete_delegation(self, delegation_id: int, status: str, results: list[dict[str, Any]], artifacts: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE delegations SET status=?, results_json=?, artifacts_json=?, updated_at=? WHERE id=?",
+            (status, json.dumps(results, sort_keys=True), json.dumps(artifacts or {}, sort_keys=True), utc_now(), delegation_id),
+        )
+        self.conn.commit()
+        return self.get_delegation(delegation_id)
+
+    def get_delegation(self, delegation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM delegations WHERE id=?", (delegation_id,)).fetchone()
+        return _delegation_row(row) if row else None
+
+    def list_delegations(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM delegations WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+        return [_delegation_row(row) for row in rows]
+
+    def create_media_artifact(
+        self,
+        session_id: str,
+        kind: str,
+        source_path: str,
+        artifact_path: str,
+        mime_type: str,
+        sha256: str,
+        size: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO media_artifacts(session_id, kind, source_path, artifact_path, mime_type, sha256, size, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, kind, source_path, artifact_path, mime_type, sha256, size, json.dumps(metadata or {}, sort_keys=True), utc_now()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_media_artifacts(self, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM media_artifacts WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+        return [_media_artifact_row(row) for row in rows]
 
     def create_approval(self, session_id: str, tool_name: str, args: dict[str, Any], decision: dict[str, Any]) -> int:
         cur = self.conn.execute(
@@ -637,6 +813,49 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
         "metadata": json.loads(row["metadata_json"] or "{}"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _context_node_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "parent_id": row["parent_id"],
+        "depth": row["depth"],
+        "title": row["title"],
+        "summary": row["summary"],
+        "sources": json.loads(row["source_json"] or "[]"),
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def _delegation_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "status": row["status"],
+        "prompt": row["prompt"],
+        "tasks": json.loads(row["tasks_json"] or "[]"),
+        "results": json.loads(row["results_json"] or "[]"),
+        "artifacts": json.loads(row["artifacts_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _media_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "kind": row["kind"],
+        "source_path": row["source_path"],
+        "artifact_path": row["artifact_path"],
+        "mime_type": row["mime_type"],
+        "sha256": row["sha256"],
+        "size": row["size"],
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
     }
 
 

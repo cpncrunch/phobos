@@ -255,8 +255,12 @@ cve/*.md                             # CVE coverage notes
 reports/*.md                         # report-ready finding drafts
 agent/processes/*.log                # background process stdout/stderr artifacts
 agent/context-summary-*.md           # compacted session summaries
+agent/context-nodes/*.md             # LCM-style expandable context node summaries
+agent/delegations/delegation-*/       # durable local pseudo-subagent task artifacts
+agent/media/*                         # copied local media/artifact evidence with hashes
 agent/operator-briefing-*.md         # redacted operator briefings
 agent/session-exports/*.json         # portable redacted session handoffs
+agent/sealed/*.sealed.json           # passphrase-env sealed portable snapshots
 agent/exports/*.zip                  # redacted engagement packs
 ```
 
@@ -272,7 +276,7 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-Current verification: 28 tests pass, covering guardrails, CLI, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, SQLite FTS recall, guarded auto-planning, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, gateway tool calls, and the standalone Hermes-like agent runtime.
+Current verification: 31 tests pass, covering guardrails, CLI/profile/auth-status, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, SQLite FTS recall, guarded auto-planning and bounded auto-loop, LCM-style context nodes, local delegations, media artifacts, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, gateway tool calls, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -285,20 +289,23 @@ phobos-agent
 This turns the harness into a standalone agent-style application with:
 
 - SQLite-backed sessions and task boards;
-- local persistent memory and FTS-backed session/memory search;
-- schema-versioned SQLite state with `/status` health output; current runtime schema is v3;
-- context snapshots and explicit `/compact` summaries;
+- local persistent memory and FTS-backed current/cross-session search;
+- schema-versioned SQLite state with `/status` health output; current runtime schema is v4;
+- context snapshots, explicit `/compact` summaries, and LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, and audit log;
-- guarded deterministic `/auto` planning for common natural-language operator intents;
+- guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
 - non-destructive-by-default command execution;
-- foreground and background process management;
+- foreground and background process management, including `/wait`;
 - approval queue for confirm-level actions;
 - runtime policy that can block or approval-gate arbitrary tools;
 - durable scheduled jobs runnable with `phobos-agent run-due`;
-- role-based subagent reviews;
+- role-based subagent reviews and durable local delegation batches;
 - model adapter fallback chains;
 - engagement workspace file tools;
-- operator briefing and portable session handoff export/import;
+- profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
+- auth/token environment status checks that never reveal secret values;
+- local media/artifact import and listing with SHA-256 metadata;
+- operator briefing, portable session handoff export/import, and passphrase-env sealed snapshot export/import;
 - local HTTP gateway with JSON endpoints and a simple web dashboard;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export;
@@ -421,7 +428,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 28 tests in 3.882s
+Ran 31 tests in 5.956s
 OK
 ```
 
@@ -429,29 +436,41 @@ Polished parity smoke verification is committed as `scripts/smoke_hermes_parity.
 
 ```text
 PHOBOS AGENT PARITY SMOKE SUMMARY
+profile_cli_ok=True
 default_non_destructive=True
 config_written=True
 agent_init_ok=True
 tools_include_core_plugin_and_new_parity=True
 schema_version_ok=True
+db_schema_counts_ok=True
 local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
 auto_memory_recall=True
+auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
 guardrails_execution_approvals_blocks=True
 background_process_completed=True
+wait_process_ok=True
 jobs_and_subagents=True
 task_board_roundtrip=True
 context_compacted=True
+lcm_context_nodes_ok=True
+delegation_batches_ok=True
+auth_status_redacted_ok=True
+media_artifacts_ok=True
+sealed_snapshot_roundtrip_ok=True
+redacted_exports_not_db_encryption_ok=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
 bridges_offline_ok=True
 gateway_ok=True
+gateway_full_api_ok=True
 pack_exported_and_redacted=True
+no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=80
+artifact_count=113
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

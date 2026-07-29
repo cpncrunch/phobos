@@ -11,6 +11,31 @@ import zipfile
 from pathlib import Path
 
 from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, OffSecAgentRuntime, chunk_text, discover_skills, handle_bridge_message, load_skill
+from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
+from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
+
+
+class FakePlannerAdapter(BaseModelAdapter):
+    provider = "fake-planner"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model planned a safe memory write",
+                    "tool_calls": [
+                        {
+                            "tool": "remember",
+                            "args": {"key": "model-plan", "value": "model planner worked"},
+                            "reason": "operator asked for durable local state",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
 class AgentRuntimeTests(unittest.TestCase):
@@ -113,6 +138,119 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_lcm_context_reflect_cross_session_delegation_and_wait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, engagement = self.make_runtime(tmp)
+            try:
+                self.assertGreaterEqual(runtime.store.schema_info()["schema_version"], 4)
+                runtime.handle_message("LCM marker acme-lcm-node source context")
+                compacted = runtime.handle_message('/lcm-compact title="LCM parity marker" limit=20 parent=true')
+                self.assertIn("Context node", compacted)
+                described = runtime.handle_message('/lcm-describe')
+                self.assertIn("LCM parity marker", described)
+                expanded = runtime.handle_message('/lcm-expand id=1')
+                self.assertIn("acme-lcm-node", expanded)
+                queried = runtime.handle_message('/reflect query=acme-lcm-node')
+                self.assertIn("Context query answered", queried)
+
+                delegated = runtime.handle_message('/delegate prompt="review lcm parity evidence" roles=scope,safety')
+                self.assertIn("Delegation", delegated)
+                delegations = runtime.handle_message('/delegations')
+                self.assertIn("review lcm parity evidence", delegations)
+
+                started = runtime.registry.run("start_process", {
+                    "target": "app.example.test",
+                    "type": "host",
+                    "purpose": "wait process smoke",
+                    "command": "printf wait-ok",
+                    "execute": True,
+                })
+                waited = runtime.registry.run("wait_process", {"id": started.data["process_id"], "timeout": 5})
+                self.assertEqual(waited.status, "completed", waited.to_dict())
+                self.assertIn("wait-ok", waited.data["stdout"])
+            finally:
+                runtime.close()
+
+            other = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "agent.db"), session_name="other"))
+            try:
+                other.handle_message("cross-session marker crosssession-acme")
+            finally:
+                other.close()
+            runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "agent.db"), session_name="unit"))
+            try:
+                searched = runtime.handle_message('/search-all query=crosssession-acme')
+                self.assertIn("crosssession-acme", searched)
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_media_and_sealed_export_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, engagement = self.make_runtime(tmp)
+            try:
+                model_runtime = OffSecAgentRuntime(
+                    AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "model-agent.db"), session_name="model", auto_model_planning=True),
+                    adapter=FakePlannerAdapter(),
+                )
+                try:
+                    planned = model_runtime.handle_message('/auto model=true prompt="remember a model planner marker"')
+                    self.assertIn('"mode": "plan_only"', planned)
+                    applied = model_runtime.handle_message('/auto apply=true model=true prompt="remember a model planner marker"')
+                    self.assertIn('"tool": "remember"', applied)
+                    looped = model_runtime.handle_message('/auto-loop model=true prompt="remember a model planner marker" steps=3')
+                    self.assertIn("Auto loop completed", looped)
+                    recalled = model_runtime.handle_message('/recall query=model-plan')
+                    self.assertIn("model planner worked", recalled)
+                finally:
+                    model_runtime.close()
+
+                media_src = Path(tmp) / "proof.txt"
+                media_src.write_text("media marker token=supersecret", encoding="utf-8")
+                media = runtime.registry.run("media_import", {"path": str(media_src)})
+                self.assertEqual(media.status, "ok", media.to_dict())
+                self.assertTrue(Path(media.artifacts["file"]).exists())
+                media_list = runtime.registry.run("media_list", {})
+                self.assertEqual(len(media_list.data["media"]), 1)
+
+                missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_TEST_MISSING_PASSPHRASE"})
+                self.assertEqual(missing.status, "error")
+                os.environ["PHOBOS_TEST_SEAL"] = "correct horse battery staple"
+                os.environ["PHOBOS_TEST_SEAL_WRONG"] = "wrong passphrase"
+                runtime.handle_message('/remember key=sealed-client value="ACME token=supersecret" tags=sealed')
+                node = runtime.handle_message('/lcm-compact title="sealed context" limit=40')
+                self.assertIn("Context node", node)
+                sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_TEST_SEAL", "out": "unit.sealed.json"})
+                self.assertEqual(sealed.status, "ok", sealed.to_dict())
+                sealed_path = Path(sealed.data["path"])
+                sealed_text = sealed_path.read_text(encoding="utf-8")
+                self.assertIn("PHOBOS_SEALED_V1", sealed_text)
+                self.assertNotIn("supersecret", sealed_text)
+                wrong = runtime.registry.run("sealed_import", {"path": str(sealed_path), "passphrase_env": "PHOBOS_TEST_SEAL_WRONG"})
+                self.assertEqual(wrong.status, "error")
+            finally:
+                runtime.close()
+                os.environ.pop("PHOBOS_TEST_SEAL", None)
+                os.environ.pop("PHOBOS_TEST_SEAL_WRONG", None)
+
+            os.environ["PHOBOS_TEST_SEAL"] = "correct horse battery staple"
+            imported_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "sealed-import.db"), session_name="sealed-import"))
+            try:
+                imported = imported_runtime.registry.run("sealed_import", {"path": str(sealed_path), "passphrase_env": "PHOBOS_TEST_SEAL"})
+                self.assertEqual(imported.status, "ok", imported.to_dict())
+                self.assertGreaterEqual(imported.data["imported_context_nodes"], 1)
+                recalled = imported_runtime.handle_message('/recall query=sealed-client')
+                self.assertIn("ACME", recalled)
+            finally:
+                imported_runtime.close()
+                os.environ.pop("PHOBOS_TEST_SEAL", None)
+
+            sealed_bytes = seal_bytes(b"sealed roundtrip", "passphrase", aad=b"unit")
+            self.assertEqual(unseal_bytes(sealed_bytes, "passphrase", aad=b"unit"), b"sealed roundtrip")
+            with self.assertRaises(ValueError):
+                unseal_bytes(sealed_bytes, "wrong", aad=b"unit")
+            tampered = sealed_bytes.replace(b"PHOBOS_SEALED_V1", b"PHOBOS_SEALED_VX", 1)
+            with self.assertRaises(ValueError):
+                unseal_bytes(tampered, "passphrase", aad=b"unit")
+
     def test_fts_auto_planner_workspace_escape_and_pack_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
@@ -161,12 +299,12 @@ class AgentRuntimeTests(unittest.TestCase):
             runtime, engagement = self.make_runtime(tmp)
             try:
                 self.assertGreaterEqual(runtime.store.schema_info()["schema_version"], 3)
-                added = runtime.handle_message('/task-add content="clone polish token=supersecret"')
+                added = runtime.handle_message('/task-add content="parity polish token=supersecret"')
                 self.assertIn("Task 1 added", added)
                 updated = runtime.handle_message('/task-update id=1 status=in_progress')
                 self.assertIn('"status": "in_progress"', updated)
                 tasks = runtime.handle_message('/tasks')
-                self.assertIn("clone polish", tasks)
+                self.assertIn("parity polish", tasks)
 
                 runtime.handle_message('/remember key=handoff-client value="ACME token=supersecret" tags=handoff')
                 runtime.handle_message("portable handoff context marker")
@@ -491,6 +629,15 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("schema_version", status.stdout)
 
+            auth_env = dict(env)
+            auth_env["PHOBOS_DISCORD_TOKEN"] = "discord-secret-value"
+            auth = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "auth-status", "--engagement", str(engagement),
+            ], cwd=project, env=auth_env, text=True, capture_output=True)
+            self.assertEqual(auth.returncode, 0, auth.stderr)
+            self.assertIn("secret_values_redacted", auth.stdout)
+            self.assertNotIn("discord-secret-value", auth.stdout)
+
             bridge = subprocess.run([
                 sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"),
                 "bridge-test", "--engagement", str(engagement), "--platform", "discord",
@@ -508,6 +655,47 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(once.returncode, 0, once.stderr)
             self.assertIn("Guardrail decision: allow", once.stdout)
 
+    def test_phobos_agent_profiles_cli(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "src"
+        project = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env["HOME"] = str(tmp_path)
+            profile_init = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "profile-init", "--name", "caligo",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(profile_init.returncode, 0, profile_init.stderr)
+            profile_json = json.loads(profile_init.stdout)
+            self.assertEqual(profile_json["profile"], "caligo")
+            self.assertTrue(Path(profile_json["config"]).exists())
+
+            profiles = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "profiles",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(profiles.returncode, 0, profiles.stderr)
+            self.assertIn("caligo", profiles.stdout)
+
+            engagement = tmp_path / "engagement.json"
+            init_engagement = subprocess.run([
+                sys.executable, "-m", "phobos_agent.cli", "init",
+                "--name", "Profile CLI", "--scope", "app.example.test", "--evidence-dir", str(tmp_path / "evidence"), "--out", str(engagement),
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(init_engagement.returncode, 0, init_engagement.stderr)
+
+            init = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--profile", "caligo", "init", "--engagement", str(engagement),
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(init.returncode, 0, init.stderr)
+            init_json = json.loads(init.stdout)
+            self.assertIn(".phobos/profiles/caligo/phobos-agent.db", init_json["db"])
+            self.assertTrue((tmp_path / ".phobos" / "profiles" / "caligo" / "phobos-agent.db").exists())
+
+            bad = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "profile-init", "--name", "../bad",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertNotEqual(bad.returncode, 0)
+
     def test_phobos_agent_config_init_cli(self):
         env = os.environ.copy()
         env["PYTHONPATH"] = "src"
@@ -522,6 +710,8 @@ class AgentCliTests(unittest.TestCase):
             data = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(data["providers"][0]["provider"], "heuristic")
             self.assertFalse(data["auto_execute_natural"])
+            self.assertFalse(data["auto_model_planning"])
+            self.assertEqual(data["max_auto_steps"], 5)
             self.assertEqual(data["blocked_tools"], [])
             self.assertEqual(data["confirm_tools"], [])
             self.assertEqual(data["skill_dirs"], [])

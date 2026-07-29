@@ -6,7 +6,7 @@ from typing import Any
 import json
 import shlex
 
-from .agent_planner import AgentPlan, plan_agent_actions
+from .agent_planner import AgentPlan, PlannedToolCall, plan_agent_actions
 from .agent_plugins import load_plugins
 from .agent_skills import LocalSkill, discover_skills, load_skill, render_loaded_skills
 from .agent_store import AgentStore
@@ -31,6 +31,8 @@ class AgentRuntimeConfig:
     tool_timeout: int = 30
     model_providers: tuple[dict[str, Any], ...] = ()
     auto_execute_natural: bool = False
+    auto_model_planning: bool = False
+    max_auto_steps: int = 5
     blocked_tools: tuple[str, ...] = ()
     confirm_tools: tuple[str, ...] = ()
     skill_dirs: tuple[str, ...] = ()
@@ -116,7 +118,7 @@ class OffSecAgentRuntime:
 
     def _handle_natural(self, message: str) -> str:
         if self.config.auto_execute_natural:
-            plan = plan_agent_actions(message, allow_command_execution=False)
+            plan = self._plan_actions(message, allow_command_execution=False, use_model=self.config.auto_model_planning)
             if plan.tool_calls:
                 return self._execute_plan(plan, apply=True)
         memories = self.store.recall(message, limit=5)
@@ -202,9 +204,14 @@ class OffSecAgentRuntime:
         if command in {"auto", "agent", "do"}:
             prompt = str(args.get("prompt") or args.get("query") or " ".join(args.get("_positional", []))).strip()
             if not prompt:
-                return "Usage: /auto prompt=<natural request> apply=false execute=false"
-            plan = plan_agent_actions(prompt, allow_command_execution=bool(args.get("execute", False)))
+                return "Usage: /auto prompt=<natural request> apply=false execute=false model=false"
+            plan = self._plan_actions(prompt, allow_command_execution=bool(args.get("execute", False)), use_model=bool(args.get("model", self.config.auto_model_planning)))
             return self._execute_plan(plan, apply=bool(args.get("apply", False)))
+        if command in {"auto-loop", "loop", "task-run"}:
+            prompt = str(args.get("prompt") or args.get("query") or " ".join(args.get("_positional", []))).strip()
+            if not prompt:
+                return "Usage: /auto-loop prompt=<goal> steps=5 execute=false model=false"
+            return self._execute_auto_loop(prompt, steps=int(args.get("steps", self.config.max_auto_steps)), execute=bool(args.get("execute", False)), use_model=bool(args.get("model", self.config.auto_model_planning)))
         if command == "sessions":
             data = {
                 "session_id": self.session_id,
@@ -221,6 +228,8 @@ class OffSecAgentRuntime:
             "process-start": "start_process",
             "poll": "poll_process",
             "process-poll": "poll_process",
+            "wait": "wait_process",
+            "process-wait": "wait_process",
             "log": "process_log",
             "process-log": "process_log",
             "kill": "kill_process",
@@ -238,8 +247,19 @@ class OffSecAgentRuntime:
             "remember": "remember",
             "recall": "recall",
             "search": "search_session",
+            "search-all": "search_all_sessions",
+            "search-sessions": "search_all_sessions",
             "context": "context_snapshot",
             "compact": "compact_context",
+            "lcm-compact": "context_compact_node",
+            "context-node": "context_compact_node",
+            "lcm-describe": "context_describe",
+            "context-describe": "context_describe",
+            "lcm-expand": "context_expand",
+            "context-expand": "context_expand",
+            "lcm-query": "context_query",
+            "context-query": "context_query",
+            "reflect": "reflect_memory",
             "read": "workspace_read",
             "write": "workspace_write",
             "workspace-read": "workspace_read",
@@ -252,6 +272,14 @@ class OffSecAgentRuntime:
             "jobs": "list_jobs",
             "approvals": "list_approvals",
             "subagents": "subagent_review",
+            "delegate": "delegate_tasks",
+            "delegations": "list_delegations",
+            "auth-status": "auth_status",
+            "auth": "auth_status",
+            "media-import": "media_import",
+            "media-list": "media_list",
+            "sealed-export": "sealed_export",
+            "sealed-import": "sealed_import",
             "audit": "audit_log",
             "status": "runtime_status",
             "export-pack": "export_pack",
@@ -284,11 +312,96 @@ class OffSecAgentRuntime:
         payload["results"] = results
         return "Auto plan applied:\n" + json.dumps(payload, indent=2)[:10000]
 
+    def _plan_actions(self, prompt: str, *, allow_command_execution: bool, use_model: bool) -> AgentPlan:
+        deterministic = plan_agent_actions(prompt, allow_command_execution=allow_command_execution)
+        if not use_model:
+            return deterministic
+        try:
+            model_plan = self._plan_actions_with_model(prompt, allow_command_execution=allow_command_execution)
+        except Exception as exc:
+            deterministic.warnings.append(f"Model planner failed; deterministic planner used: {exc}")
+            return deterministic
+        if not model_plan.tool_calls:
+            if deterministic.tool_calls:
+                deterministic.warnings.extend(model_plan.warnings)
+                return deterministic
+            return model_plan
+        return model_plan
+
+    def _plan_actions_with_model(self, prompt: str, *, allow_command_execution: bool) -> AgentPlan:
+        specs = [spec.to_dict() for spec in self.registry.specs()]
+        planner_prompt = (
+            "You are planning Phobos Agent tool calls. Return ONLY JSON with keys summary, tool_calls, warnings. "
+            "tool_calls must be a list of {tool, args, reason}. Use only registered tools. Do not invent tools. "
+            "Target-affecting tools still go through ROE guardrails. If command execution is not explicitly allowed, set execute=false.\n\n"
+            f"Command execution allowed: {allow_command_execution}\n"
+            f"Operator request: {prompt}\n\n"
+            f"Registered tools: {json.dumps(specs[:80], indent=2)[:30000]}"
+        )
+        raw = self.adapter.generate("impact", planner_prompt).content
+        parsed = _extract_json_object(raw)
+        calls: list[PlannedToolCall] = []
+        warnings = [str(item) for item in parsed.get("warnings", []) if str(item).strip()] if isinstance(parsed.get("warnings", []), list) else []
+        for item in parsed.get("tool_calls", []):
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool", "")).strip()
+            if tool not in self.registry.tools:
+                warnings.append(f"Model planner requested unknown tool {tool!r}; skipped.")
+                continue
+            tool_args = item.get("args", {})
+            if not isinstance(tool_args, dict):
+                warnings.append(f"Model planner args for {tool!r} were not an object; skipped.")
+                continue
+            if tool in {"run_command", "start_process"} and not allow_command_execution:
+                tool_args = dict(tool_args)
+                tool_args["execute"] = False
+                warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
+            calls.append(PlannedToolCall(tool=tool, args=tool_args, reason=str(item.get("reason") or "Model planner selected this tool.")))
+        return AgentPlan(prompt=prompt, summary=str(parsed.get("summary") or f"Model planned {len(calls)} tool call(s)."), tool_calls=calls, warnings=warnings)
+
+    def _execute_auto_loop(self, prompt: str, *, steps: int, execute: bool, use_model: bool) -> str:
+        steps = max(1, min(int(steps), 10))
+        current_prompt = prompt
+        loop_results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for step in range(1, steps + 1):
+            plan = self._plan_actions(current_prompt, allow_command_execution=execute, use_model=use_model)
+            if not plan.tool_calls:
+                loop_results.append({"step": step, "mode": "no_plan", "plan": plan.to_dict()})
+                break
+            signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
+            if all(signature in seen for signature in signatures):
+                loop_results.append({"step": step, "mode": "stopped_duplicate_plan", "plan": plan.to_dict()})
+                break
+            for signature in signatures:
+                seen.add(signature)
+            step_results = []
+            for call in plan.tool_calls:
+                result = self.registry.run(call.tool, call.args)
+                step_results.append({"tool": call.tool, "reason": call.reason, "result": result.to_dict()})
+            loop_results.append({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results})
+            if not use_model:
+                break
+            current_prompt = prompt + "\n\nPrevious Phobos tool results:\n" + json.dumps(step_results, indent=2)[:8000] + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
+        return "Auto loop completed:\n" + json.dumps({"prompt": prompt, "steps_requested": steps, "execute": execute, "model": use_model, "steps": loop_results}, indent=2)[:12000]
+
     def _load_skill(self, name: str) -> LocalSkill:
         skill = load_skill(name, self.config.skill_dirs)
         self.loaded_skills[skill.name] = skill
         self.store.audit(self.session_id, "skill_loaded", {"skill": skill.name, "path": skill.path})
         return skill
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("model did not return a JSON object")
+    parsed = json.loads(text[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("model JSON response was not an object")
+    return parsed
 
 
 def _parse_key_values(tokens: list[str]) -> dict[str, Any]:
@@ -348,7 +461,8 @@ HELP_TEXT = """Phobos Agent commands:
 /tools
 /schemas name=<optional-tool>
 /tool name=<tool_name> key=value ...
-/auto prompt=<natural request> apply=false execute=false
+/auto prompt=<natural request> apply=false execute=false model=false
+/auto-loop prompt=<goal> steps=5 execute=false model=false
 /plugins
 /skills
 /skill name=<skill-name>
@@ -356,9 +470,15 @@ HELP_TEXT = """Phobos Agent commands:
 /sessions limit=20 recent=8
 /remember key=<name> value=<fact> tags=<optional>
 /recall query=<text>
+/reflect query=<question>
 /search query=<text>
+/search-all query=<text>
 /context query=<optional> limit=8
 /compact limit=40
+/lcm-compact limit=60 parent=false
+/lcm-describe id=<optional-node-id>
+/lcm-expand id=<node-id>
+/lcm-query query=<question>
 /read path=<workspace-relative-file>
 /write path=<workspace-relative-file> content=<text> append=false
 /workspace-search query=<regex> glob="**/*.md"
@@ -368,6 +488,7 @@ HELP_TEXT = """Phobos Agent commands:
 /start target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /processes
 /poll id=<process-id>
+/wait id=<process-id> timeout=30
 /log id=<process-id> limit=4000
 /kill id=<process-id>
 /approvals
@@ -379,6 +500,13 @@ HELP_TEXT = """Phobos Agent commands:
 /cve component=<product> version=<version> catalog=<catalog.json> online=false
 /finding finding_file=<finding.json>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
+/delegate prompt=<task> roles=scope,safety,report
+/delegations limit=20
+/auth-status
+/media-import path=<local-file> kind=<optional>
+/media-list
+/sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
+/sealed-import path=<sealed.json> passphrase_env=<ENV_NAME>
 /job name=<name> schedule="every 1 h" prompt=<agent prompt>
 /run-due
 /status

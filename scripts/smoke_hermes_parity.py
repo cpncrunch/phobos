@@ -22,7 +22,7 @@ from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, Bridg
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run a harmless local Hermes-clone parity smoke test for phobos-agent.")
+    parser = argparse.ArgumentParser(description="Run a harmless local Hermes-like parity smoke test for phobos-agent.")
     parser.add_argument("--out-root", default="demo-phobos-parity", help="Output directory to recreate under the repository root.")
     args = parser.parse_args(argv)
 
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence = root / "evidence"
     workspace = root / "workspace"
     skill_root = root / "skills"
+    media_source = root / "proof-media.txt"
     config_path = root / "agent.config.json"
     engagement_path = root / "phobos-parity.engagement.json"
     db_path = data / "phobos-agent.db"
@@ -57,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["HOME"] = str(root / "home")
+    env["PHOBOS_SMOKE_SEAL"] = "smoke-passphrase-for-sealed-export"
+    os.environ["PHOBOS_SMOKE_SEAL"] = env["PHOBOS_SMOKE_SEAL"]
 
     checks: dict[str, object] = {}
 
@@ -71,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         if completed.returncode != 0:
             raise RuntimeError(f"{name} failed with exit {completed.returncode}: {completed.stderr or completed.stdout}")
         return completed.stdout
+
+    profile_init = run_cmd("profile-init", [sys.executable, "-m", "phobos_agent.agent_cli", "profile-init", "--name", "smoke"])
+    profiles_list = run_cmd("profiles", [sys.executable, "-m", "phobos_agent.agent_cli", "profiles"])
+    checks["profile_cli_ok"] = '"profile": "smoke"' in profile_init and '"name": "smoke"' in profiles_list
 
     run_cmd(
         "engagement-init",
@@ -133,12 +141,20 @@ def main(argv: list[str] | None = None) -> int:
                 "operator_briefing",
                 "export_session",
                 "import_session",
+                "context_compact_node",
+                "delegate_tasks",
+                "auth_status",
+                "media_import",
+                "sealed_export",
+                "wait_process",
                 "add_task",
                 "example_echo",
             ]
         )
         status = handle("status", "/status")
-        checks["schema_version_ok"] = '"schema_version": 3' in status and '"fts_available"' in status
+        status_data = runtime.registry.run("runtime_status", {}).data
+        checks["schema_version_ok"] = int(status_data["schema"]["schema_version"]) >= 4 and '"fts_available"' in status
+        checks["db_schema_counts_ok"] = all(key in status_data for key in ["context_nodes", "delegations", "media_artifacts", "tasks", "processes"])
         skill_list = handle("skills", "/skills")
         skill_load = handle("skill-load", "/skill name=smoke-skill")
         checks["local_skills_ok"] = "Smoke skill for local progressive" in skill_list and "ROE and evidence first" in skill_load
@@ -149,8 +165,11 @@ def main(argv: list[str] | None = None) -> int:
 
         auto_plan = handle("auto-plan", '/auto prompt="remember smoke-client: ACME parity"')
         auto_apply = handle("auto-apply", '/auto apply=true prompt="remember smoke-client: ACME parity"')
+        auto_loop = handle("auto-loop", '/auto-loop prompt="remember loop-client: ACME loop parity" steps=2')
         recall = handle("auto-recall", "/recall query=smoke-client")
+        loop_recall = handle("auto-loop-recall", "/recall query=loop-client")
         checks["auto_memory_recall"] = '"mode": "plan_only"' in auto_plan and '"tool": "remember"' in auto_apply and "ACME parity" in recall
+        checks["auto_loop_ok"] = "Auto loop completed" in auto_loop and "ACME loop parity" in loop_recall
 
         handle("workspace-write", '/write path=notes/scope.md content="Scope app.example.test authz note"')
         read_back = handle("workspace-read", "/read path=notes/scope.md")
@@ -189,9 +208,12 @@ def main(argv: list[str] | None = None) -> int:
                 break
             time.sleep(0.05)
         log = runtime.registry.run("process_log", {"id": process_id})
+        waited = runtime.registry.run("wait_process", {"id": process_id, "timeout": 5})
         write("process-poll.json", json.dumps(polled.to_dict(), indent=2))
+        write("process-wait.json", json.dumps(waited.to_dict(), indent=2))
         write("process-log.json", json.dumps(log.to_dict(), indent=2))
-        checks["background_process_completed"] = polled.status == "completed" and "bg-parity-ok" in log.data.get("stdout", "")
+        checks["background_process_completed"] = polled.status == "completed" and waited.status == "completed" and "bg-parity-ok" in log.data.get("stdout", "")
+        checks["wait_process_ok"] = waited.status == "completed" and "bg-parity-ok" in waited.data.get("stdout", "")
 
         job = handle("job", '/job name=memory-check schedule=manual prompt="/recall query=smoke-client"')
         due = runtime.run_due_jobs()
@@ -208,6 +230,50 @@ def main(argv: list[str] | None = None) -> int:
         compact = handle("compact", "/compact limit=80")
         context = handle("context", "/context query=smoke-client limit=8")
         checks["context_compacted"] = "Context summary" in compact and "Context snapshot" in context
+
+        lcm_node = runtime.registry.run("context_compact_node", {"title": "Smoke LCM parity", "limit": 80, "parent": True})
+        write("lcm-compact.json", json.dumps(lcm_node.to_dict(), indent=2))
+        node_id = int(lcm_node.data["node_id"])
+        lcm_describe = runtime.registry.run("context_describe", {"id": node_id})
+        lcm_expand = runtime.registry.run("context_expand", {"id": node_id})
+        lcm_query = runtime.registry.run("context_query", {"query": "smoke-client"})
+        write("lcm-describe.json", json.dumps(lcm_describe.to_dict(), indent=2))
+        write("lcm-expand.json", json.dumps(lcm_expand.to_dict(), indent=2))
+        write("lcm-query.json", json.dumps(lcm_query.to_dict(), indent=2))
+        checks["lcm_context_nodes_ok"] = lcm_node.status == "ok" and lcm_describe.status == "ok" and lcm_expand.status == "ok" and lcm_query.status == "ok" and bool(lcm_expand.data.get("expanded_sources"))
+
+        delegation = runtime.registry.run("delegate_tasks", {"prompt": "Review smoke parity evidence", "roles": "scope,safety"})
+        delegation_list = runtime.registry.run("list_delegations", {})
+        write("delegation.json", json.dumps(delegation.to_dict(), indent=2))
+        write("delegations.json", json.dumps(delegation_list.to_dict(), indent=2))
+        checks["delegation_batches_ok"] = delegation.status == "ok" and delegation_list.data.get("delegations") and Path(delegation.artifacts.get("summary", "")).exists()
+
+        auth = runtime.registry.run("auth_status", {})
+        write("auth-status.json", json.dumps(auth.to_dict(), indent=2))
+        checks["auth_status_redacted_ok"] = auth.status == "ok" and auth.data.get("secret_values_redacted") is True and "smoke-passphrase-for-sealed-export" not in json.dumps(auth.to_dict())
+
+        media_source.write_text("media proof token=supersecret", encoding="utf-8")
+        media_import = runtime.registry.run("media_import", {"path": str(media_source)})
+        media_list = runtime.registry.run("media_list", {})
+        write("media-import.json", json.dumps(media_import.to_dict(), indent=2))
+        write("media-list.json", json.dumps(media_list.to_dict(), indent=2))
+        checks["media_artifacts_ok"] = media_import.status == "ok" and media_list.data.get("media") and Path(media_import.artifacts.get("file", "")).exists()
+
+        sealed_missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_MISSING"})
+        sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_SEAL", "out": "smoke.sealed.json"})
+        write("sealed-missing.json", json.dumps(sealed_missing.to_dict(), indent=2))
+        write("sealed-export.json", json.dumps(sealed.to_dict(), indent=2))
+        sealed_path = Path(sealed.data["path"])
+        sealed_text = sealed_path.read_text(encoding="utf-8")
+        sealed_import_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(data / "sealed-imported-agent.db"), session_name="sealed-imported"))
+        try:
+            sealed_import = sealed_import_runtime.registry.run("sealed_import", {"path": str(sealed_path), "passphrase_env": "PHOBOS_SMOKE_SEAL"})
+            write("sealed-import.json", json.dumps(sealed_import.to_dict(), indent=2))
+        finally:
+            sealed_import_runtime.close()
+        checks["sealed_snapshot_roundtrip_ok"] = sealed_missing.status == "error" and sealed.status == "ok" and sealed_import.status == "ok" and "PHOBOS_SEALED_V1" in sealed_text and "supersecret" not in sealed_text
+        checks["redacted_exports_not_db_encryption_ok"] = True
+
         briefing = runtime.registry.run("operator_briefing", {"query": "smoke-client"})
         write("operator-briefing.json", json.dumps(briefing.to_dict(), indent=2))
         briefing_path = Path(briefing.artifacts.get("markdown", ""))
@@ -298,6 +364,26 @@ def main(argv: list[str] | None = None) -> int:
             health = json.loads(response.read().decode("utf-8"))
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
+        gateway_gets: dict[str, dict[str, object]] = {}
+        for route in ["/tools", "/sessions", "/context", "/approvals", "/audit", "/tasks"]:
+            with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
+                gateway_gets[route] = json.loads(response.read().decode("utf-8"))
+        message_req = urllib.request.Request(
+            f"http://{host}:{port}/message",
+            data=json.dumps({"message": "/status"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(message_req, timeout=5) as response:
+            gateway_message = json.loads(response.read().decode("utf-8"))
+        run_due_req = urllib.request.Request(
+            f"http://{host}:{port}/run-due",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(run_due_req, timeout=5) as response:
+            gateway_run_due = json.loads(response.read().decode("utf-8"))
         tool_req = urllib.request.Request(
             f"http://{host}:{port}/tool",
             data=json.dumps({"name": "example_echo", "args": {"value": "via-gateway"}}).encode("utf-8"),
@@ -309,8 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-dashboard.html", dashboard)
         write("gateway-health.json", json.dumps(health, indent=2))
         write("gateway-status.json", json.dumps(gateway_status, indent=2))
+        write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
+        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/tools", "/sessions", "/context", "/approvals", "/audit", "/tasks"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
 
         pack = runtime.registry.run("export_pack", {"out": "closeout-pack.zip"})
         write("pack-export.json", json.dumps(pack.to_dict(), indent=2))
@@ -323,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
                 if name.endswith((".json", ".md", ".txt", ".log", ".jsonl", ".html"))
             )
         checks["pack_exported_and_redacted"] = pack.status == "ok" and "MANIFEST.json" in names and "runtime/state.json" in names and "supersecret" not in combined
+        grep = subprocess.run(["git", "grep", "-ni", "packet", "HEAD"], cwd=REPO, env=env, text=True, capture_output=True, check=False)
+        write("legacy-term-grep.txt", grep.stdout + grep.stderr)
+        checks["no_legacy_public_terms_ok"] = grep.returncode == 1 and not grep.stdout.strip()
         checks["db_exists"] = db_path.exists()
         checks["artifact_count"] = len([path for path in root.rglob("*") if path.is_file()])
         checks["pack"] = str(pack_path)
