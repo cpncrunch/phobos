@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+
+# Local runtime data and generated evidence
+/data/
+/evidence/
+/workspace/
+/agent.config.json
+/engagement.json
+/*.engagement.json
+/*.config.json
+/demo-*/
+/demo_*/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor/OS noise
+.DS_Store
+.idea/
+.vscode/

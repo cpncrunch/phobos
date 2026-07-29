@@ -1,0 +1,41 @@
+{
+  "nodes": [
+    {
+      "id": "u",
+      "name": "USER@CORP.LOCAL",
+      "type": "User"
+    },
+    {
+      "id": "g",
+      "name": "HELPDESK@CORP.LOCAL",
+      "type": "Group"
+    },
+    {
+      "id": "da",
+      "name": "DOMAIN ADMINS@CORP.LOCAL",
+      "type": "Group"
+    },
+    {
+      "id": "tpl",
+      "name": "ESC1 Certificate Template",
+      "type": "CertTemplate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "u",
+      "target": "g",
+      "relationship": "MemberOf"
+    },
+    {
+      "source": "g",
+      "target": "da",
+      "relationship": "GenericAll"
+    },
+    {
+      "source": "u",
+      "target": "tpl",
+      "relationship": "ADCSESC1"
+    }
+  ]
+}

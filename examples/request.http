@@ -1,0 +1,4 @@
+GET /api/invoices/123 HTTP/1.1
+Host: app.example.test
+Authorization: Bearer abc.def.ghi
+

@@ -1,0 +1,18 @@
+{
+  "title": "Improper Authorization Allows Access to Controlled Invoice",
+  "severity": "High",
+  "component": "API",
+  "industry_reference": "OWASP A01: Broken Access Control",
+  "impact": "Unauthorized Access",
+  "root_cause": "Improper Authorization",
+  "description": "During testing, a standard user was able to access a second controlled test user's invoice by modifying the invoice_id parameter.",
+  "evidence": [
+    "burp/idor-positive.http",
+    "burp/idor-negative-control.http"
+  ],
+  "affected_assets": [
+    "GET /api/invoices/{id}"
+  ],
+  "recommendation": "Enforce server-side object authorization for every invoice request.",
+  "confirmed": true
+}
