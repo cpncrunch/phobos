@@ -14,6 +14,7 @@ from .agent_config import AgentAppConfig, ModelProviderConfig
 from .agent_gateway import AgentGateway
 from .agent_planner import AgentPlan, PlannedToolCall, plan_agent_actions
 from .agent_skills import LocalSkill, discover_skills, load_skill, render_loaded_skills
+from .agent_bridges import BridgeConfig, BridgeDispatchResult, BridgeMessage, chunk_text, default_bridge_configs, handle_bridge_message, run_bridge
 
 PhobosAgentRuntime = OffSecAgentRuntime
 
@@ -47,4 +48,11 @@ __all__ = [
     "discover_skills",
     "load_skill",
     "render_loaded_skills",
+    "BridgeConfig",
+    "BridgeDispatchResult",
+    "BridgeMessage",
+    "chunk_text",
+    "default_bridge_configs",
+    "handle_bridge_message",
+    "run_bridge",
 ]

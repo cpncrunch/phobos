@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .agent_config import AgentAppConfig
+from .agent_bridges import BridgeConfig, BridgeMessage, handle_bridge_message, run_bridge
 from .agent_gateway import AgentGateway
 from .agent_runtime import AgentRuntimeConfig, OffSecAgentRuntime
 from .agent_store import AgentStore
@@ -70,7 +71,46 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
 
+    discord = sub.add_parser("discord", help="Run a Discord bot bridge for an allowlisted channel/thread or DM")
+    discord.add_argument("--engagement", required=True)
+    _add_bridge_args(discord, token=True)
+
+    slack = sub.add_parser("slack", help="Run a Slack Socket Mode bridge for an allowlisted channel or DM")
+    slack.add_argument("--engagement", required=True)
+    _add_bridge_args(slack, slack=True)
+
+    telegram = sub.add_parser("telegram", help="Run a Telegram long-polling bridge for an allowlisted chat or private DM")
+    telegram.add_argument("--engagement", required=True)
+    _add_bridge_args(telegram, token=True)
+
+    bridge_test = sub.add_parser("bridge-test", help="Offline-test bridge filtering and runtime dispatch without platform network access")
+    bridge_test.add_argument("--engagement", required=True)
+    bridge_test.add_argument("--platform", required=True, choices=["discord", "slack", "telegram"])
+    bridge_test.add_argument("--message", required=True)
+    bridge_test.add_argument("--channel-id", required=True)
+    bridge_test.add_argument("--user-id", required=True)
+    bridge_test.add_argument("--message-id", default="offline-test")
+    bridge_test.add_argument("--bot-user-id", default="")
+    bridge_test.add_argument("--private", action="store_true", help="Treat the test message as a DM/private chat")
+    bridge_test.add_argument("--bot", action="store_true", help="Treat the test sender as a bot")
+    _add_bridge_args(bridge_test, token=True, slack=True)
+
     return parser
+
+
+def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, slack: bool = False) -> None:
+    parser.add_argument("--allow-channel", action="append", default=[], help="Allow a platform channel/thread/chat ID; repeatable")
+    parser.add_argument("--allow-user", action="append", default=[], help="Allow a platform user ID; repeatable")
+    parser.add_argument("--allow-all", action="store_true", help="Accept messages from any channel/user; unsafe outside a private deployment")
+    parser.add_argument("--prefix", help="Require and strip a command prefix, e.g. !phobos")
+    parser.add_argument("--mention-required", action="store_true", help="Require a bot mention outside private messages")
+    parser.add_argument("--max-response-chars", type=int, help="Per-message response chunk size")
+    parser.add_argument("--max-message-chars", type=int, help="Maximum incoming message length to process")
+    if token:
+        parser.add_argument("--token-env", help="Environment variable containing the platform bot token")
+    if slack:
+        parser.add_argument("--bot-token-env", help="Environment variable containing the Slack bot token (xoxb-...)")
+        parser.add_argument("--app-token-env", help="Environment variable containing the Slack app-level Socket Mode token (xapp-...)")
 
 
 def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
@@ -116,9 +156,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg = _config(args)
         store = AgentStore(args.db)
         session_id = store.get_or_create_session(args.session, args.engagement)
-        store.audit(session_id, "agent_init", {"engagement": roe.name, "scope": roe.in_scope_targets, "safety_mode": roe.safety_mode, "workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills)})
+        bridge_configs = {name: BridgeConfig.from_dict(name, data).sanitized() for name, data in (cfg.bridges or {}).items()}
+        store.audit(session_id, "agent_init", {"engagement": roe.name, "scope": roe.in_scope_targets, "safety_mode": roe.safety_mode, "workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "bridges": bridge_configs})
         store.close()
-        print(json.dumps({"db": args.db, "session_id": session_id, "engagement": roe.to_dict(), "runtime": {"workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "skill_bundles": {name: list(skills) for name, skills in (cfg.skill_bundles or {}).items()}, "provider_chain": list(cfg.model_providers) or [{"provider": cfg.provider, "model": cfg.model}]}}, indent=2))
+        print(json.dumps({"db": args.db, "session_id": session_id, "engagement": roe.to_dict(), "runtime": {"workspace_dir": cfg.workspace_dir, "plugin_dirs": list(cfg.plugin_dirs), "blocked_tools": list(cfg.blocked_tools), "confirm_tools": list(cfg.confirm_tools), "skill_dirs": list(cfg.skill_dirs), "preload_skills": list(cfg.preload_skills), "skill_bundles": {name: list(skills) for name, skills in (cfg.skill_bundles or {}).items()}, "bridges": bridge_configs, "provider_chain": list(cfg.model_providers) or [{"provider": cfg.provider, "model": cfg.model}]}}, indent=2))
         return 0
 
     runtime = OffSecAgentRuntime(_config(args))
@@ -161,9 +202,54 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 gateway.shutdown()
             return 0
+        if args.subcommand in {"discord", "slack", "telegram"}:
+            bridge_config = _bridge_config(args, runtime.config, args.subcommand)
+            print(json.dumps({"status": "bridge-starting", "platform": args.subcommand, "session_id": runtime.session_id, "bridge": bridge_config.sanitized()}, indent=2), flush=True)
+            run_bridge(args.subcommand, runtime, bridge_config)
+            return 0
+        if args.subcommand == "bridge-test":
+            bridge_config = _bridge_config(args, runtime.config, args.platform)
+            message = BridgeMessage(
+                platform=args.platform,
+                text=args.message,
+                channel_id=str(args.channel_id),
+                user_id=str(args.user_id),
+                message_id=str(args.message_id),
+                is_bot=bool(args.bot),
+                is_private=bool(args.private),
+            )
+            result = handle_bridge_message(runtime, message, bridge_config, bot_user_id=args.bot_user_id or None)
+            print(json.dumps({"bridge": bridge_config.sanitized(), "result": result.to_dict()}, indent=2))
+            return 0
     finally:
         runtime.close()
     return 1
+
+
+def _bridge_config(args: argparse.Namespace, runtime_config: AgentRuntimeConfig, platform: str) -> BridgeConfig:
+    bridges = runtime_config.bridges or {}
+    data = dict(bridges.get(platform, {})) if isinstance(bridges, dict) else {}
+    if getattr(args, "allow_channel", None):
+        data["allowed_channel_ids"] = list(data.get("allowed_channel_ids", [])) + [str(item) for item in args.allow_channel]
+    if getattr(args, "allow_user", None):
+        data["allowed_user_ids"] = list(data.get("allowed_user_ids", [])) + [str(item) for item in args.allow_user]
+    if getattr(args, "allow_all", False):
+        data["allow_all"] = True
+    if getattr(args, "prefix", None) is not None:
+        data["command_prefix"] = args.prefix
+    if getattr(args, "mention_required", False):
+        data["mention_required"] = True
+    if getattr(args, "token_env", None):
+        data["token_env"] = args.token_env
+    if getattr(args, "bot_token_env", None):
+        data["bot_token_env"] = args.bot_token_env
+    if getattr(args, "app_token_env", None):
+        data["app_token_env"] = args.app_token_env
+    if getattr(args, "max_response_chars", None):
+        data["max_response_chars"] = args.max_response_chars
+    if getattr(args, "max_message_chars", None):
+        data["max_message_chars"] = args.max_message_chars
+    return BridgeConfig.from_dict(platform, data)
 
 
 def _parse_cli_args(items: list[str]) -> dict[str, object]:

@@ -12,7 +12,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
 - **Finding Markdown exporter** — renders confirmed finding JSON into report-ready Markdown with risk metadata, evidence, affected assets, recommendations, evidence health, and candidate/non-reportable handling.
-- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, schema-versioned local state, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, localhost web/gateway, operator briefings, portable session handoffs, runtime tool policy, and redacted engagement-pack export.
+- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, schema-versioned local state, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, localhost web/gateway, Discord/Slack/Telegram bridges, operator briefings, portable session handoffs, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
 
@@ -272,7 +272,7 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-Current verification: 27 tests pass, covering guardrails, CLI, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, SQLite FTS recall, guarded auto-planning, local skills, task boards, tool policy, operator briefings, handoff export/import, pack export, gateway tool calls, and the standalone Hermes-like agent runtime.
+Current verification: 28 tests pass, covering guardrails, CLI, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, SQLite FTS recall, guarded auto-planning, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, gateway tool calls, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -300,6 +300,7 @@ This turns the harness into a standalone agent-style application with:
 - engagement workspace file tools;
 - operator briefing and portable session handoff export/import;
 - local HTTP gateway with JSON endpoints and a simple web dashboard;
+- Discord, Slack, and Telegram bridges with channel/user allowlists and env-var tokens;
 - redacted engagement-pack ZIP export;
 - interactive chat and single-message modes.
 
@@ -391,6 +392,25 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
   --engagement engagement.json \
   --host 127.0.0.1 \
   --port 8765
+
+# Offline-test Discord bridge filtering without network credentials.
+phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
+  --engagement engagement.json \
+  --platform discord \
+  --allow-channel <channel-or-thread-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos' \
+  --channel-id <channel-or-thread-id> \
+  --user-id <operator-user-id> \
+  --message '!phobos /status'
+
+# Run a live Discord bridge. Tokens stay in environment variables, not config/Git.
+export PHOBOS_DISCORD_TOKEN='...'
+phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
+  --engagement engagement.json \
+  --allow-channel <channel-or-thread-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos'
 ```
 
 See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, approval flow, and current limitations.
@@ -401,7 +421,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 27 tests in 3.545s
+Ran 28 tests in 3.882s
 OK
 ```
 
@@ -427,10 +447,11 @@ context_compacted=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
+bridges_offline_ok=True
 gateway_ok=True
 pack_exported_and_redacted=True
 db_exists=True
-artifact_count=76
+artifact_count=79
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

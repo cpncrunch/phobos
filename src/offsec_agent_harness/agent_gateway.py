@@ -13,9 +13,10 @@ from .agent_runtime import OffSecAgentRuntime
 class AgentGateway:
     """Minimal local HTTP gateway for the standalone Phobos Agent.
 
-    This mirrors the Hermes gateway idea without Discord-specific integration:
-    local clients can send a message, list tools, run due jobs, and health-check
-    the runtime. Bind to 127.0.0.1 by default.
+    This mirrors the Hermes gateway idea for local API access: local clients can
+    send a message, list tools, run due jobs, and health-check the runtime. The
+    Discord/Slack/Telegram bridges live in agent_bridges.py. Bind this gateway
+    to 127.0.0.1 by default.
     """
 
     def __init__(self, runtime: OffSecAgentRuntime, host: str = "127.0.0.1", port: int = 8765):

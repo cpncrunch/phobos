@@ -10,7 +10,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, EngagementROE, OffSecAgentRuntime, discover_skills, load_skill
+from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, OffSecAgentRuntime, chunk_text, discover_skills, handle_bridge_message, load_skill
 
 
 class AgentRuntimeTests(unittest.TestCase):
@@ -285,6 +285,81 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_bridge_allowlists_prefix_mentions_and_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                config = BridgeConfig(
+                    platform="discord",
+                    allowed_channel_ids=("C1",),
+                    allowed_user_ids=("U1",),
+                    command_prefix="!phobos",
+                    max_response_chars=240,
+                )
+                wrong_channel = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /status", channel_id="C2", user_id="U1"),
+                    config,
+                )
+                self.assertEqual(wrong_channel.status, "ignored")
+                self.assertEqual(wrong_channel.reason, "channel-not-allowed")
+
+                missing_prefix = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="/status", channel_id="C1", user_id="U1"),
+                    config,
+                )
+                self.assertEqual(missing_prefix.status, "ignored")
+                self.assertEqual(missing_prefix.reason, "prefix-required")
+
+                handled = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /status", channel_id="C1", user_id="U1", message_id="M1"),
+                    config,
+                )
+                self.assertEqual(handled.status, "handled", handled.to_dict())
+                self.assertEqual(handled.normalized_text, "/status")
+                self.assertIn('"safety_mode": "non_destructive"', handled.response)
+                self.assertTrue(handled.chunks)
+                self.assertTrue(all(len(chunk) <= 240 for chunk in handled.chunks))
+
+                ignored_bot = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /status", channel_id="C1", user_id="U1", is_bot=True),
+                    config,
+                )
+                self.assertEqual(ignored_bot.reason, "bot-message")
+
+                mention_config = BridgeConfig(platform="discord", allowed_channel_ids=("C1",), mention_required=True)
+                no_mention = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="/tools", channel_id="C1", user_id="U2"),
+                    mention_config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(no_mention.reason, "mention-required")
+                mentioned = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="<@BOT1> /tools", channel_id="C1", user_id="U2"),
+                    mention_config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(mentioned.status, "handled")
+                self.assertIn("Available tools", mentioned.response)
+
+                private_message = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="telegram", text="/status", channel_id="PRIVATE1", user_id="U3", is_private=True),
+                    BridgeConfig(platform="telegram"),
+                )
+                self.assertEqual(private_message.status, "handled")
+
+                chunks = chunk_text("word " * 120, 200)
+                self.assertGreater(len(chunks), 1)
+                self.assertTrue(all(len(chunk) <= 200 for chunk in chunks))
+            finally:
+                runtime.close()
+
     def test_plugin_config_and_gateway(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -387,6 +462,17 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("schema_version", status.stdout)
 
+            bridge = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"),
+                "bridge-test", "--engagement", str(engagement), "--platform", "discord",
+                "--allow-channel", "C1", "--allow-user", "U1", "--prefix", "!phobos",
+                "--channel-id", "C1", "--user-id", "U1", "--message", "!phobos /status",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(bridge.returncode, 0, bridge.stderr)
+            bridge_json = json.loads(bridge.stdout)
+            self.assertEqual(bridge_json["result"]["status"], "handled")
+            self.assertEqual(bridge_json["result"]["normalized_text"], "/status")
+
             once = subprocess.run([
                 sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "once", "--engagement", str(engagement), "--message", '/assess target=app.example.test type=web purpose=headers command="curl -I https://app.example.test"',
             ], cwd=project, env=env, text=True, capture_output=True)
@@ -412,6 +498,11 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(data["skill_dirs"], [])
             self.assertEqual(data["preload_skills"], [])
             self.assertEqual(data["skill_bundles"], {})
+            self.assertIn("discord", data["bridges"])
+            self.assertIn("slack", data["bridges"])
+            self.assertIn("telegram", data["bridges"])
+            self.assertEqual(data["bridges"]["discord"]["token_env"], "PHOBOS_DISCORD_TOKEN")
+            self.assertFalse(data["bridges"]["discord"]["enabled"])
 
 
 if __name__ == "__main__":

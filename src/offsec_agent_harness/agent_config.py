@@ -6,6 +6,7 @@ from typing import Any
 import json
 
 from .agent_runtime import AgentRuntimeConfig
+from .agent_bridges import default_bridge_configs
 
 
 @dataclass(slots=True)
@@ -46,6 +47,7 @@ class AgentAppConfig:
     skill_dirs: list[str] = field(default_factory=list)
     preload_skills: list[str] = field(default_factory=list)
     skill_bundles: dict[str, list[str]] = field(default_factory=dict)
+    bridges: dict[str, dict[str, Any]] = field(default_factory=default_bridge_configs)
     providers: list[ModelProviderConfig] = field(default_factory=lambda: [ModelProviderConfig()])
 
     @classmethod
@@ -69,6 +71,7 @@ class AgentAppConfig:
             skill_dirs=[str(item) for item in data.get("skill_dirs", [])],
             preload_skills=[str(item) for item in data.get("preload_skills", [])],
             skill_bundles={str(key): [str(item) for item in value] for key, value in dict(data.get("skill_bundles", {})).items()},
+            bridges=_load_bridge_configs(data.get("bridges")),
             providers=providers,
         )
 
@@ -100,5 +103,16 @@ class AgentAppConfig:
             skill_dirs=tuple(self.skill_dirs),
             preload_skills=tuple(self.preload_skills),
             skill_bundles={name: tuple(skills) for name, skills in self.skill_bundles.items()},
+            bridges={name: dict(config) for name, config in self.bridges.items()},
             model_providers=tuple(asdict(provider) for provider in self.providers),
         )
+
+
+def _load_bridge_configs(value: Any) -> dict[str, dict[str, Any]]:
+    configs = default_bridge_configs()
+    if not isinstance(value, dict):
+        return configs
+    for platform, data in value.items():
+        if isinstance(data, dict):
+            configs[str(platform)] = dict(configs.get(str(platform), {})) | dict(data)
+    return configs

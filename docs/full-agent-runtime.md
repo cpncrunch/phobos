@@ -23,6 +23,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
 - **Operator briefing and handoff:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs.
 - **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default.
+- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables and preserving ROE/tool-policy approvals.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
 
@@ -123,6 +124,11 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "skill_dirs": [],
   "preload_skills": [],
   "skill_bundles": {},
+  "bridges": {
+    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false},
+    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false},
+    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false}
+  },
   "providers": [
     {
       "provider": "heuristic",
@@ -144,7 +150,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
 ]
 ```
 
-Runtime policy and local skills are configured in the same file:
+Runtime policy, local skills, and chat bridge allowlists are configured in the same file:
 
 ```json
 {
@@ -152,7 +158,11 @@ Runtime policy and local skills are configured in the same file:
   "confirm_tools": ["operator_briefing"],
   "skill_dirs": ["./skills"],
   "preload_skills": ["finding-reporting"],
-  "skill_bundles": {"reporting": ["finding-reporting"]}
+  "skill_bundles": {"reporting": ["finding-reporting"]},
+  "bridges": {
+    "discord": {"allowed_channel_ids": ["123456789012345678"], "allowed_user_ids": ["234567890123456789"], "command_prefix": "!phobos"},
+    "telegram": {"allowed_channel_ids": ["-1001234567890"], "allowed_user_ids": ["123456789"]}
+  }
 }
 ```
 
@@ -311,6 +321,60 @@ phobos-agent --db imported/phobos-agent.db --config agent.config.json once \
   --message '/import-session path=evidence/<engagement>/agent/session-exports/session-handoff.json merge_memories=false'
 ```
 
+
+## Messaging bridges
+
+Phobos can run connector processes for Discord, Slack, and Telegram. The bridges do not create a second execution path: accepted messages are normalized and passed to the same `OffSecAgentRuntime.handle_message()` path used by CLI/gateway messages, so ROE guardrails, runtime tool policy, approvals, audit logging, workspace containment, and redaction still apply.
+
+Tokens are read only from environment variables:
+
+```bash
+export PHOBOS_DISCORD_TOKEN='...'        # Discord bot token
+export PHOBOS_SLACK_BOT_TOKEN='...'      # Slack bot token, xoxb-...
+export PHOBOS_SLACK_APP_TOKEN='...'      # Slack Socket Mode app token, xapp-...
+export PHOBOS_TELEGRAM_TOKEN='...'       # Telegram bot token
+```
+
+Offline bridge dispatch test, no network token required:
+
+```bash
+phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
+  --engagement engagement.json \
+  --platform discord \
+  --allow-channel <channel-or-thread-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos' \
+  --channel-id <channel-or-thread-id> \
+  --user-id <operator-user-id> \
+  --message '!phobos /status'
+```
+
+Run live bridges:
+
+```bash
+# Discord Gateway bridge. The bot needs the Message Content intent if you want normal text commands in guild channels.
+phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
+  --engagement engagement.json \
+  --allow-channel <channel-or-thread-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos'
+
+# Slack Socket Mode bridge. Enable Socket Mode on the Slack app and provide both xapp and xoxb tokens.
+phobos-agent --db data/phobos-agent.db --config agent.config.json slack \
+  --engagement engagement.json \
+  --allow-channel <channel-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos'
+
+# Telegram long-polling bridge.
+phobos-agent --db data/phobos-agent.db --config agent.config.json telegram \
+  --engagement engagement.json \
+  --allow-channel <chat-id> \
+  --allow-user <operator-user-id>
+```
+
+For non-private channels, use `--allow-channel`/`--allow-user` or explicit `--allow-all`; the safe default accepts only private messages when no allowlist is configured. `--prefix` and `--mention-required` reduce accidental activation in busy channels. Bot tokens and platform payloads are never written to config by `config-init`.
+
 ## Local HTTP gateway
 
 Start a local gateway:
@@ -349,7 +413,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 27 tests in 3.545s
+Ran 28 tests in 3.882s
 OK
 ```
 
@@ -381,10 +445,11 @@ context_compacted=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
+bridges_offline_ok=True
 gateway_ok=True
 pack_exported_and_redacted=True
 db_exists=True
-artifact_count=76
+artifact_count=79
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -412,6 +477,9 @@ plugin-echo.txt
 policy-approved.json
 policy-block.json
 policy-confirm.json
+bridge-discord.json
+bridge-slack.json
+bridge-telegram.json
 process-log.json
 process-poll.json
 process-start.json
@@ -437,11 +505,11 @@ workspace-write.txt
 
 This is now a real local Hermes-like offsec agent runtime, but it is still not a full production clone of Hermes. Missing or intentionally minimal areas include:
 
-- no Discord/Slack/Telegram bridge yet; only CLI and local HTTP gateway are implemented;
+- Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
 - web UI is intentionally minimal/local, not a production console;
 - deterministic slash-command grammar plus a guarded heuristic `/auto` planner, not a full LLM function-calling planner;
 - no distributed worker pool beyond local background processes and role subagent reviews;
 - no encrypted database layer yet;
 - context compaction is explicit via `/compact`, not a live long-context DAG comparable to Hermes LCM.
 
-The important pieces for a standalone pentest agent are working: sessions, memory, task board, local skills, context snapshots/compaction, tool schemas, plugin loading, runtime policy, approvals, foreground/background execution, jobs, model fallback, subagent role reviews, operator briefings, handoff export/import, local gateway/dashboard, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
+The important pieces for a standalone pentest agent are working: sessions, memory, task board, local skills, context snapshots/compaction, tool schemas, plugin loading, runtime policy, approvals, foreground/background execution, jobs, model fallback, subagent role reviews, operator briefings, handoff export/import, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
