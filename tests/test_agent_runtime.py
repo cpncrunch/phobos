@@ -330,6 +330,30 @@ class AgentRuntimeTests(unittest.TestCase):
                 )
                 self.assertEqual(ignored_bot.reason, "bot-message")
 
+                user_only_public = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /status", channel_id="C-anywhere", user_id="U1"),
+                    BridgeConfig(platform="discord", allowed_user_ids=("U1",), command_prefix="!phobos"),
+                )
+                self.assertEqual(user_only_public.status, "ignored")
+                self.assertEqual(user_only_public.reason, "channel-allowlist-required")
+
+                approval_blocked = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /approve id=1", channel_id="C1", user_id="U1"),
+                    config,
+                )
+                self.assertEqual(approval_blocked.status, "blocked")
+                self.assertEqual(approval_blocked.reason, "approval-action-disabled")
+
+                approval_allowed = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /approve id=999999", channel_id="C1", user_id="U1"),
+                    BridgeConfig(platform="discord", allowed_channel_ids=("C1",), allowed_user_ids=("U1",), command_prefix="!phobos", allow_approval_actions=True),
+                )
+                self.assertEqual(approval_allowed.status, "handled")
+                self.assertIn("not found", approval_allowed.response)
+
                 mention_config = BridgeConfig(platform="discord", allowed_channel_ids=("C1",), mention_required=True)
                 no_mention = handle_bridge_message(
                     runtime,
@@ -357,6 +381,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 chunks = chunk_text("word " * 120, 200)
                 self.assertGreater(len(chunks), 1)
                 self.assertTrue(all(len(chunk) <= 200 for chunk in chunks))
+                neutralized = "\n".join(chunk_text("@everyone @here <!channel> " + ("word " * 120), 200))
+                self.assertNotIn("@everyone", neutralized)
+                self.assertNotIn("@here", neutralized)
+                self.assertNotIn("<!channel>", neutralized)
+                self.assertIn("@\u200beveryone", neutralized)
             finally:
                 runtime.close()
 
@@ -503,6 +532,7 @@ class AgentCliTests(unittest.TestCase):
             self.assertIn("telegram", data["bridges"])
             self.assertEqual(data["bridges"]["discord"]["token_env"], "PHOBOS_DISCORD_TOKEN")
             self.assertFalse(data["bridges"]["discord"]["enabled"])
+            self.assertFalse(data["bridges"]["discord"]["allow_approval_actions"])
 
 
 if __name__ == "__main__":

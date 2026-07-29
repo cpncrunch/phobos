@@ -102,6 +102,7 @@ def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, sl
     parser.add_argument("--allow-channel", action="append", default=[], help="Allow a platform channel/thread/chat ID; repeatable")
     parser.add_argument("--allow-user", action="append", default=[], help="Allow a platform user ID; repeatable")
     parser.add_argument("--allow-all", action="store_true", help="Accept messages from any channel/user; unsafe outside a private deployment")
+    parser.add_argument("--allow-approval-actions", action="store_true", help="Allow /approve and /deny through this bridge; disabled by default")
     parser.add_argument("--prefix", help="Require and strip a command prefix, e.g. !phobos")
     parser.add_argument("--mention-required", action="store_true", help="Require a bot mention outside private messages")
     parser.add_argument("--max-response-chars", type=int, help="Per-message response chunk size")
@@ -235,6 +236,8 @@ def _bridge_config(args: argparse.Namespace, runtime_config: AgentRuntimeConfig,
         data["allowed_user_ids"] = list(data.get("allowed_user_ids", [])) + [str(item) for item in args.allow_user]
     if getattr(args, "allow_all", False):
         data["allow_all"] = True
+    if getattr(args, "allow_approval_actions", False):
+        data["allow_approval_actions"] = True
     if getattr(args, "prefix", None) is not None:
         data["command_prefix"] = args.prefix
     if getattr(args, "mention_required", False):

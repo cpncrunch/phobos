@@ -30,6 +30,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "command_prefix": "",
         "mention_required": False,
         "allow_all": False,
+        "allow_approval_actions": False,
         "ignore_bots": True,
         "max_response_chars": 1800,
         "max_message_chars": 4000,
@@ -44,6 +45,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "command_prefix": "",
         "mention_required": False,
         "allow_all": False,
+        "allow_approval_actions": False,
         "ignore_bots": True,
         "max_response_chars": 3000,
         "max_message_chars": 4000,
@@ -57,6 +59,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "command_prefix": "",
         "mention_required": False,
         "allow_all": False,
+        "allow_approval_actions": False,
         "ignore_bots": True,
         "max_response_chars": 3500,
         "max_message_chars": 4000,
@@ -77,6 +80,7 @@ class BridgeConfig:
     command_prefix: str = ""
     mention_required: bool = False
     allow_all: bool = False
+    allow_approval_actions: bool = False
     ignore_bots: bool = True
     max_response_chars: int = 1800
     max_message_chars: int = 4000
@@ -97,6 +101,7 @@ class BridgeConfig:
             "command_prefix",
             "mention_required",
             "allow_all",
+            "allow_approval_actions",
             "ignore_bots",
             "max_response_chars",
             "max_message_chars",
@@ -114,6 +119,7 @@ class BridgeConfig:
             command_prefix=str(merged.get("command_prefix", "")),
             mention_required=bool(merged.get("mention_required", False)),
             allow_all=bool(merged.get("allow_all", False)),
+            allow_approval_actions=bool(merged.get("allow_approval_actions", False)),
             ignore_bots=bool(merged.get("ignore_bots", True)),
             max_response_chars=max(200, int(merged.get("max_response_chars", 1800))),
             max_message_chars=max(200, int(merged.get("max_message_chars", 4000))),
@@ -199,6 +205,10 @@ def handle_bridge_message(
     if len(normalized) > config.max_message_chars:
         response = f"Message ignored: exceeds max_message_chars={config.max_message_chars}."
         return BridgeDispatchResult("error", reason="message-too-long", normalized_text="", response=response, chunks=chunk_text(response, config.max_response_chars))
+    if _is_approval_action(normalized) and not config.allow_approval_actions:
+        response = "Bridge approval actions are disabled by default; use the local CLI/gateway or set allow_approval_actions=true for this bridge."
+        runtime.store.audit(runtime.session_id, "bridge_message_blocked", message.audit_metadata() | {"reason": "approval-action-disabled"})
+        return BridgeDispatchResult("blocked", reason="approval-action-disabled", normalized_text=normalized, response=response, chunks=chunk_text(response, config.max_response_chars))
     metadata = message.audit_metadata() | {"normalized_preview": redact_secrets(normalized[:200])}
     runtime.store.audit(runtime.session_id, "bridge_message_received", metadata)
     try:
@@ -242,6 +252,7 @@ def chunk_text(text: str, limit: int = 1800) -> list[str]:
     if not text:
         return [""]
     limit = max(200, int(limit))
+    text = _neutralize_mass_mentions(text)
     chunks: list[str] = []
     remaining = text
     while remaining:
@@ -610,15 +621,38 @@ def _allow_message(message: BridgeMessage, config: BridgeConfig) -> tuple[bool, 
     allowed_users = set(config.allowed_user_ids)
     if config.allow_all:
         return True, "allow-all"
-    if allowed_channels and message.channel_id not in allowed_channels:
+    if message.is_private:
+        if allowed_users and message.user_id not in allowed_users:
+            return False, "user-not-allowed"
+        return True, "private-message"
+    if not allowed_channels:
+        if allowed_users:
+            return False, "channel-allowlist-required"
+        return False, "allowlist-required"
+    if message.channel_id not in allowed_channels:
         return False, "channel-not-allowed"
     if allowed_users and message.user_id not in allowed_users:
         return False, "user-not-allowed"
-    if allowed_channels or allowed_users:
-        return True, "allowlisted"
-    if message.is_private:
-        return True, "private-message"
-    return False, "bridge requires an allowlist or allow_all for non-private channels"
+    return True, "allowlisted"
+
+
+def _is_approval_action(text: str) -> bool:
+    return bool(re.match(r"^/(approve|deny)(?:\s|$)", text.strip(), flags=re.IGNORECASE))
+
+
+def _neutralize_mass_mentions(text: str) -> str:
+    replacements = {
+        "@everyone": "@\u200beveryone",
+        "@here": "@\u200bhere",
+        "@channel": "@\u200bchannel",
+        "@all": "@\u200ball",
+        "<!here>": "<!\u200bhere>",
+        "<!channel>": "<!\u200bchannel>",
+        "<!everyone>": "<!\u200beveryone>",
+    }
+    for needle, replacement in replacements.items():
+        text = text.replace(needle, replacement)
+    return text
 
 
 def _redact_value(value: Any) -> Any:

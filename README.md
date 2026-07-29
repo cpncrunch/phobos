@@ -300,7 +300,7 @@ This turns the harness into a standalone agent-style application with:
 - engagement workspace file tools;
 - operator briefing and portable session handoff export/import;
 - local HTTP gateway with JSON endpoints and a simple web dashboard;
-- Discord, Slack, and Telegram bridges with channel/user allowlists and env-var tokens;
+- Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export;
 - interactive chat and single-message modes.
 
@@ -451,7 +451,7 @@ bridges_offline_ok=True
 gateway_ok=True
 pack_exported_and_redacted=True
 db_exists=True
-artifact_count=79
+artifact_count=80
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

@@ -23,7 +23,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
 - **Operator briefing and handoff:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs.
 - **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default.
-- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables and preserving ROE/tool-policy approvals.
+- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
 
@@ -125,9 +125,9 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "preload_skills": [],
   "skill_bundles": {},
   "bridges": {
-    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false},
-    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false},
-    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false}
+    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false},
+    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false},
+    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false}
   },
   "providers": [
     {
@@ -373,7 +373,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json telegram \
   --allow-user <operator-user-id>
 ```
 
-For non-private channels, use `--allow-channel`/`--allow-user` or explicit `--allow-all`; the safe default accepts only private messages when no allowlist is configured. `--prefix` and `--mention-required` reduce accidental activation in busy channels. Bot tokens and platform payloads are never written to config by `config-init`.
+For non-private channels, use `--allow-channel` plus optional `--allow-user`, or explicit `--allow-all`; a user allowlist alone does not authorize arbitrary public channels. The safe default accepts only private messages when no allowlist is configured. `--prefix` and `--mention-required` reduce accidental activation in busy channels. `/approve` and `/deny` are blocked by default over bridges; opt in only with `allow_approval_actions=true` or `--allow-approval-actions` after weighing chat-account compromise risk. Bot tokens and platform payloads are never written to config by `config-init`.
 
 ## Local HTTP gateway
 
@@ -449,7 +449,7 @@ bridges_offline_ok=True
 gateway_ok=True
 pack_exported_and_redacted=True
 db_exists=True
-artifact_count=79
+artifact_count=80
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -480,6 +480,7 @@ policy-confirm.json
 bridge-discord.json
 bridge-slack.json
 bridge-telegram.json
+bridge-approval-block.json
 process-log.json
 process-poll.json
 process-start.json
