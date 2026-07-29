@@ -152,11 +152,27 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("acme-lcm-node", expanded)
                 queried = runtime.handle_message('/reflect query=acme-lcm-node')
                 self.assertIn("Context query answered", queried)
+                retained = runtime.handle_message('/hindsight-retain content="ACME hindsight marker" context=unit tags=hindsight')
+                self.assertIn("Retained Hindsight-style memory", retained)
+                hindsight = runtime.handle_message('/hindsight-recall query=ACME')
+                self.assertIn("ACME hindsight marker", hindsight)
+                reflected = runtime.handle_message('/hindsight query=acme-lcm-node')
+                self.assertIn("Context query answered", reflected)
+                self.assertIn("lcm_compact", runtime.handle_message('/schemas name=lcm_compact'))
 
-                delegated = runtime.handle_message('/delegate prompt="review lcm parity evidence" roles=scope,safety')
-                self.assertIn("Delegation", delegated)
+                delegated_result = runtime.registry.run("delegate_tasks", {"prompt": "review lcm parity evidence", "roles": "scope,safety"})
+                self.assertEqual(delegated_result.status, "ok", delegated_result.to_dict())
+                results = delegated_result.data["delegation"]["results"]
+                self.assertEqual(len(results), 2)
+                child_ids = {item["child_session_id"] for item in results}
+                self.assertEqual(len(child_ids), 2)
+                self.assertNotIn(runtime.session_id, child_ids)
                 delegations = runtime.handle_message('/delegations')
                 self.assertIn("review lcm parity evidence", delegations)
+                sessions = runtime.store.list_sessions(limit=20)
+                self.assertTrue(any(str(row["name"]).startswith("delegation-") for row in sessions))
+                child_search = runtime.store.search_all_messages("review lcm parity evidence", limit=10)
+                self.assertTrue(any(row.get("session_id") in child_ids for row in child_search))
 
                 started = runtime.registry.run("start_process", {
                     "target": "app.example.test",
@@ -461,6 +477,41 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(handled.chunks)
                 self.assertTrue(all(len(chunk) <= 240 for chunk in handled.chunks))
 
+                voice_note = Path(tmp) / "bridge-voice.ogg"
+                voice_note.write_bytes(b"OggS voice-note token=supersecret")
+                attachment_handled = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(
+                        platform="discord",
+                        text="!phobos /media-list",
+                        channel_id="C1",
+                        user_id="U1",
+                        message_id="M-media",
+                        attachments=[{"local_path": str(voice_note), "mime_type": "audio/ogg", "kind": "audio", "name": "voice.ogg"}],
+                    ),
+                    config,
+                )
+                self.assertEqual(attachment_handled.status, "handled", attachment_handled.to_dict())
+                self.assertEqual(attachment_handled.attachments[0]["status"], "ok")
+                self.assertEqual(attachment_handled.attachments[0]["kind"], "audio")
+                self.assertIn("audio", runtime.handle_message("/media-list"))
+
+                attachment_only = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(
+                        platform="telegram",
+                        text="",
+                        channel_id="PRIVATE1",
+                        user_id="U3",
+                        is_private=True,
+                        attachments=[{"url": "https://example.invalid/evidence.png", "mime_type": "image/png", "size": 123}],
+                    ),
+                    BridgeConfig(platform="telegram"),
+                )
+                self.assertEqual(attachment_only.status, "handled")
+                self.assertEqual(attachment_only.reason, "attachments")
+                self.assertEqual(attachment_only.attachments[0]["status"], "metadata-recorded")
+
                 ignored_bot = handle_bridge_message(
                     runtime,
                     BridgeMessage(platform="discord", text="!phobos /status", channel_id="C1", user_id="U1", is_bot=True),
@@ -567,6 +618,41 @@ class AgentRuntimeTests(unittest.TestCase):
                 with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
                     gateway_status = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(gateway_status["status"], "ok")
+
+                runtime.registry.run("schedule_job", {"name": "gateway-job", "prompt": "/status", "schedule": "manual"})
+                media_src = tmp_path / "gateway-proof.txt"
+                media_src.write_text("gateway media marker", encoding="utf-8")
+                runtime.registry.run("media_import", {"path": str(media_src)})
+                runtime.registry.run("delegate_tasks", {"prompt": "gateway delegation marker", "roles": "scope"})
+                process = runtime.registry.run("start_process", {"target": "app.example.test", "type": "host", "purpose": "gateway route process", "command": "printf gateway-process", "execute": True})
+                runtime.registry.run("wait_process", {"id": process.data["process_id"], "timeout": 5})
+
+                for route, marker in [
+                    ("/routes", "/schemas"),
+                    ("/schemas?name=start_process", "start_process"),
+                    ("/jobs", "gateway-job"),
+                    ("/processes", "gateway route process"),
+                    ("/delegations", "gateway delegation marker"),
+                    ("/media", "gateway-proof"),
+                    ("/auth", "secret_values_redacted"),
+                    ("/bridges", "discord"),
+                    ("/lcm", "nodes"),
+                ]:
+                    with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
+                        routed = response.read().decode("utf-8")
+                    self.assertIn(marker, routed, route)
+
+                approval = runtime.registry.run("run_command", {"target": "app.example.test", "type": "web", "purpose": "gateway deny approval", "command": "curl -X POST https://app.example.test/api", "execute": True})
+                self.assertEqual(approval.status, "needs_approval", approval.to_dict())
+                deny_req = urllib.request.Request(
+                    f"http://{host}:{port}/deny",
+                    data=json.dumps({"id": approval.data["approval_id"], "by": "unit", "reason": "gateway-test"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(deny_req, timeout=5) as response:
+                    deny_data = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(deny_data["result"]["status"], "denied")
                 req = urllib.request.Request(
                     f"http://{host}:{port}/message",
                     data=json.dumps({"message": "/schemas name=plugin_echo"}).encode("utf-8"),
@@ -654,6 +740,39 @@ class AgentCliTests(unittest.TestCase):
             ], cwd=project, env=env, text=True, capture_output=True)
             self.assertEqual(once.returncode, 0, once.stderr)
             self.assertIn("Guardrail decision: allow", once.stdout)
+
+            marker = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "once", "--engagement", str(engagement), "--message", '/remember key=db-at-rest value="DB_AT_REST_SECRET_MARKER"',
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(marker.returncode, 0, marker.stderr)
+            sealed_env = dict(env)
+            sealed_env["PHOBOS_TEST_DB_SEAL"] = "correct-passphrase"
+            sealed = tmp_path / "agent.db.sealed"
+            sealed_run = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "seal-db", "--out", str(sealed), "--passphrase-env", "PHOBOS_TEST_DB_SEAL", "--remove-plaintext",
+            ], cwd=project, env=sealed_env, text=True, capture_output=True)
+            self.assertEqual(sealed_run.returncode, 0, sealed_run.stderr)
+            sealed_json = json.loads(sealed_run.stdout)
+            self.assertEqual(sealed_json["status"], "sealed")
+            self.assertFalse((tmp_path / "agent.db").exists())
+            self.assertNotIn(b"DB_AT_REST_SECRET_MARKER", sealed.read_bytes())
+
+            wrong_env = dict(env)
+            wrong_env["PHOBOS_TEST_DB_SEAL_WRONG"] = "wrong-passphrase"
+            wrong = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "wrong.db"), "unseal-db", "--in", str(sealed), "--passphrase-env", "PHOBOS_TEST_DB_SEAL_WRONG", "--overwrite",
+            ], cwd=project, env=wrong_env, text=True, capture_output=True)
+            self.assertNotEqual(wrong.returncode, 0)
+
+            unsealed = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "unseal-db", "--in", str(sealed), "--passphrase-env", "PHOBOS_TEST_DB_SEAL", "--overwrite",
+            ], cwd=project, env=sealed_env, text=True, capture_output=True)
+            self.assertEqual(unsealed.returncode, 0, unsealed.stderr)
+            recalled = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "once", "--engagement", str(engagement), "--message", "/recall query=db-at-rest",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(recalled.returncode, 0, recalled.stderr)
+            self.assertIn("DB_AT_REST_SECRET_MARKER", recalled.stdout)
 
     def test_phobos_agent_profiles_cli(self):
         env = os.environ.copy()

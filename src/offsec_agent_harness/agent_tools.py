@@ -159,8 +159,14 @@ class OffSecToolRegistry:
         self.register_tool("context_compact_node", self.context_compact_node, _spec("context_compact_node", "Create an LCM-style context node from recent messages and optionally roll child nodes into a parent.", {"limit": {"type": "integer"}, "title": _string("Optional node title."), "parent": {"type": "boolean"}}, []))
         self.register_tool("context_describe", self.context_describe, _spec("context_describe", "Describe local LCM-style context nodes without expanding full sources.", {"id": {"type": "integer"}, "limit": {"type": "integer"}}, []))
         self.register_tool("context_expand", self.context_expand, _spec("context_expand", "Expand a local context node and recover its source messages/child summaries.", {"id": {"type": "integer"}, "source_limit": {"type": "integer"}}, ["id"]))
+        self.register_tool("lcm_compact", self.context_compact_node, _spec("lcm_compact", "Alias for context_compact_node.", {"limit": {"type": "integer"}, "title": _string("Optional node title."), "parent": {"type": "boolean"}}, []))
+        self.register_tool("lcm_describe", self.context_describe, _spec("lcm_describe", "Alias for context_describe.", {"id": {"type": "integer"}, "limit": {"type": "integer"}}, []))
+        self.register_tool("lcm_expand", self.context_expand, _spec("lcm_expand", "Alias for context_expand.", {"id": {"type": "integer"}, "source_limit": {"type": "integer"}}, ["id"]))
         self.register_tool("context_query", self.context_query, _spec("context_query", "Search memories, session history, and LCM-style context nodes, then synthesize an answer.", {"query": _string("Question or recall query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("reflect_memory", self.reflect_memory, _spec("reflect_memory", "Synthesize an answer from local memories and session/context recall without executing tools.", {"query": _string("Question to answer from memory/context."), "limit": {"type": "integer"}}, ["query"]))
+        self.register_tool("hindsight_retain", self.hindsight_retain, _spec("hindsight_retain", "Store a Hindsight-style durable local memory with context/tags metadata.", {"content": _string("Memory content to retain."), "context": _string("Short context label."), "tags": _string("Comma-separated tags."), "key": _string("Optional stable key.")}, ["content"]))
+        self.register_tool("hindsight_recall", self.hindsight_recall, _spec("hindsight_recall", "Recall Hindsight-style memory plus related session/context matches.", {"query": _string("Recall query."), "limit": {"type": "integer"}}, ["query"]))
+        self.register_tool("hindsight_reflect", self.hindsight_reflect, _spec("hindsight_reflect", "Synthesize an answer across retained memory, messages, and local LCM-style context nodes.", {"query": _string("Question to reflect on."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("workspace_read", self.workspace_read, _spec("workspace_read", "Read a text file inside the engagement workspace.", {"path": _string("Workspace-relative path."), "limit": {"type": "integer"}}, ["path"]))
         self.register_tool("workspace_write", self.workspace_write, _spec("workspace_write", "Write or append a text file inside the engagement workspace.", {"path": _string("Workspace-relative path."), "content": _string("Text content."), "append": {"type": "boolean"}}, ["path", "content"]))
         self.register_tool("workspace_search", self.workspace_search, _spec("workspace_search", "Search text files inside the engagement workspace.", {"query": _string("Substring/regex query."), "glob": _string("Glob like **/*.md."), "limit": {"type": "integer"}}, ["query"]))
@@ -169,7 +175,7 @@ class OffSecToolRegistry:
         self.register_tool("list_jobs", self.list_jobs, _spec("list_jobs", "List scheduled jobs.", {}))
         self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due jobs from tool-only context; runtime executes them.", {}))
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
-        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted.")}, []))
+        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted."), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
@@ -511,6 +517,32 @@ class OffSecToolRegistry:
     def reflect_memory(self, args: dict[str, Any]) -> ToolResult:
         return self.context_query(args)
 
+    def hindsight_retain(self, args: dict[str, Any]) -> ToolResult:
+        content = str(args.get("content") or args.get("value") or "").strip()
+        if not content:
+            return ToolResult("error", "content is required.")
+        context = str(args.get("context") or "").strip()
+        tags = str(args.get("tags") or "hindsight").strip()
+        key = str(args.get("key") or "").strip()
+        if not key:
+            digest = hashlib.sha256(f"{context}\n{content}".encode("utf-8")).hexdigest()[:16]
+            key = f"hindsight-{digest}"
+        value = content if not context else f"[{context}] {content}"
+        mem_id = self.store.remember(key, value, tags=tags)
+        self.store.audit(self.session_id, "hindsight_retain", {"key": key, "context": context, "tags": tags})
+        return ToolResult("ok", f"Retained Hindsight-style memory {mem_id}: {key}", {"id": mem_id, "key": key, "context": context, "tags": tags})
+
+    def hindsight_recall(self, args: dict[str, Any]) -> ToolResult:
+        query = str(args.get("query") or "")
+        limit = int(args.get("limit", 10))
+        memories = self.store.recall(query, limit=limit)
+        messages = self.store.search_all_messages(query, limit=limit) if query else []
+        nodes = self.store.search_context_nodes(self.session_id, query, limit=limit) if query else []
+        return ToolResult("ok", f"Found {len(memories)} memories, {len(messages)} messages, and {len(nodes)} context node(s).", {"memories": memories, "messages": messages, "context_nodes": nodes})
+
+    def hindsight_reflect(self, args: dict[str, Any]) -> ToolResult:
+        return self.context_query(args)
+
     def workspace_read(self, args: dict[str, Any]) -> ToolResult:
         path = self._workspace_path(str(args.get("path", "")))
         if not path.exists() or not path.is_file():
@@ -607,36 +639,53 @@ class OffSecToolRegistry:
         task_specs = _parse_delegate_tasks(args)
         if not task_specs:
             return ToolResult("error", "Provide tasks as JSON/list/newline text, or roles plus prompt.")
+        isolate = bool(args.get("isolate", True))
         delegation_id = self.store.create_delegation(self.session_id, prompt, task_specs)
         out_dir = self.harness.store.root / "agent" / "delegations" / f"delegation-{delegation_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
+        parent_session = self.store.get_session(self.session_id) or {}
+        engagement_path = str(parent_session.get("engagement_path") or self.roe.name)
+        prepared: list[dict[str, Any]] = []
+        for idx, task in enumerate(task_specs, 1):
+            role = str(task.get("role") or "impact")
+            task_prompt = str(task.get("prompt") or task.get("goal") or prompt)
+            task_context = str(task.get("context") or prompt)
+            child_session_id = ""
+            child_session_name = ""
+            if isolate:
+                child_session_name = f"delegation-{delegation_id}-task-{idx}-{_safe_filename(role)}"
+                child_session_id = self.store.get_or_create_session(child_session_name, engagement_path)
+                self.store.append_message(child_session_id, "user", task_prompt, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role})
+            prepared.append({"index": idx, "role": role, "prompt": task_prompt, "context": task_context, "child_session_id": child_session_id, "child_session_name": child_session_name})
         results: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(6, len(task_specs))) as pool:
-            future_map = {}
-            for idx, task in enumerate(task_specs, 1):
-                role = str(task.get("role") or "impact")
-                task_prompt = str(task.get("prompt") or task.get("goal") or prompt)
-                task_context = str(task.get("context") or prompt)
-                future_map[pool.submit(self.model_adapter.generate, role, task_prompt, task_context)] = (idx, role, task_prompt)
+        with ThreadPoolExecutor(max_workers=min(6, len(prepared))) as pool:
+            future_map = {pool.submit(self.model_adapter.generate, item["role"], item["prompt"], item["context"]): item for item in prepared}
             for future in as_completed(future_map):
-                idx, role, task_prompt = future_map[future]
+                item = future_map[future]
+                idx = int(item["index"])
+                role = str(item["role"])
+                task_prompt = str(item["prompt"])
                 try:
                     content = redact_secrets(future.result().content) or ""
                     status = "ok"
                 except Exception as exc:
                     content = f"ERROR: {exc}"
                     status = "error"
+                if item.get("child_session_id"):
+                    self.store.append_message(str(item["child_session_id"]), "assistant", content, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role, "status": status})
                 path = out_dir / f"task-{idx}-{_safe_filename(role)}.md"
-                path.write_text(f"# Delegated Task {idx}: {role}\n\nPrompt: {redact_secrets(task_prompt)}\n\n{content}\n", encoding="utf-8")
-                results.append({"index": idx, "role": role, "prompt": redact_secrets(task_prompt), "status": status, "content": content, "artifact": str(path)})
+                child_line = f"Child session: {item.get('child_session_id') or 'none'}\n\n"
+                path.write_text(f"# Delegated Task {idx}: {role}\n\n{child_line}Prompt: {redact_secrets(task_prompt)}\n\n{content}\n", encoding="utf-8")
+                results.append({"index": idx, "role": role, "prompt": redact_secrets(task_prompt), "status": status, "content": content, "artifact": str(path), "child_session_id": item.get("child_session_id") or "", "child_session_name": item.get("child_session_name") or ""})
         results.sort(key=lambda item: int(item["index"]))
         summary_path = out_dir / "SUMMARY.md"
-        summary_lines = ["# Phobos Local Delegation", "", f"Delegation: {delegation_id}", f"Prompt: {redact_secrets(prompt)}", ""]
+        summary_lines = ["# Phobos Local Delegation", "", f"Delegation: {delegation_id}", f"Parent session: {self.session_id}", f"Isolated child sessions: {isolate}", f"Prompt: {redact_secrets(prompt)}", ""]
         for result in results:
-            summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']})", "", str(result["content"])[:4000], ""]
+            session_note = f" — child session `{result.get('child_session_id')}`" if result.get("child_session_id") else ""
+            summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']}){session_note}", "", str(result["content"])[:4000], ""]
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
         status = "ok" if all(result["status"] == "ok" for result in results) else "error"
-        delegation = self.store.complete_delegation(delegation_id, status, results, {"summary": str(summary_path), "dir": str(out_dir)})
+        delegation = self.store.complete_delegation(delegation_id, status, results, {"summary": str(summary_path), "dir": str(out_dir), "isolated_child_sessions": isolate})
         return ToolResult(status, f"Delegation {delegation_id} completed with {len(results)} task(s).", {"delegation": delegation}, {"summary": str(summary_path), "directory": str(out_dir)})
 
     def list_delegations(self, args: dict[str, Any]) -> ToolResult:

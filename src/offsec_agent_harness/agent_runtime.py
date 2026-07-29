@@ -252,14 +252,22 @@ class OffSecAgentRuntime:
             "context": "context_snapshot",
             "compact": "compact_context",
             "lcm-compact": "context_compact_node",
+            "lcm_compact": "lcm_compact",
             "context-node": "context_compact_node",
             "lcm-describe": "context_describe",
+            "lcm_describe": "lcm_describe",
             "context-describe": "context_describe",
             "lcm-expand": "context_expand",
+            "lcm_expand": "lcm_expand",
             "context-expand": "context_expand",
             "lcm-query": "context_query",
             "context-query": "context_query",
             "reflect": "reflect_memory",
+            "hindsight": "hindsight_reflect",
+            "hindsight-retain": "hindsight_retain",
+            "hindsight-recall": "hindsight_recall",
+            "hindsight-reflect": "hindsight_reflect",
+            "hindsight-search": "search_all_sessions",
             "read": "workspace_read",
             "write": "workspace_write",
             "workspace-read": "workspace_read",
@@ -471,6 +479,9 @@ HELP_TEXT = """Phobos Agent commands:
 /remember key=<name> value=<fact> tags=<optional>
 /recall query=<text>
 /reflect query=<question>
+/hindsight-retain content=<fact> context=<label> tags=<tags>
+/hindsight-recall query=<text>
+/hindsight-reflect query=<question>
 /search query=<text>
 /search-all query=<text>
 /context query=<optional> limit=8

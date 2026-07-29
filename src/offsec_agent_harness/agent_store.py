@@ -797,6 +797,7 @@ def next_run_for_schedule(schedule: str) -> str:
 def _message_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
+        "session_id": row["session_id"],
         "role": row["role"],
         "content": row["content"],
         "metadata": json.loads(row["metadata_json"] or "{}"),

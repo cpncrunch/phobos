@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 from pathlib import Path
 
 from .agent_config import AgentAppConfig
 from .agent_bridges import BridgeConfig, BridgeMessage, handle_bridge_message, run_bridge
+from .agent_crypto import MAGIC as SEALED_MAGIC, seal_bytes, unseal_bytes
 from .agent_gateway import AgentGateway
 from .agent_runtime import AgentRuntimeConfig, OffSecAgentRuntime
 from .agent_store import AgentStore
@@ -44,6 +47,30 @@ def build_parser() -> argparse.ArgumentParser:
     profile_init.add_argument("--name", required=True)
 
     sub.add_parser("profiles", help="List local Phobos profiles")
+
+    sub.add_parser("db-status", help="Show plaintext DB/WAL/SHM file presence and sizes without reading secrets")
+
+    db_seal = sub.add_parser("db-seal", help="Seal a SQLite DB file into an authenticated encrypted at-rest backup using a passphrase env var")
+    db_seal.add_argument("--out", required=True, help="Output sealed DB JSON file")
+    db_seal.add_argument("--passphrase-env", required=True, help="Environment variable containing the sealing passphrase")
+    db_seal.add_argument("--remove-plaintext", action="store_true", help="After successful seal, remove plaintext DB/WAL/SHM files; use only after closing runtimes")
+
+    seal_db = sub.add_parser("seal-db", help="Alias for db-seal")
+    seal_db.add_argument("--out", required=True, help="Output sealed DB JSON file")
+    seal_db.add_argument("--passphrase-env", required=True, help="Environment variable containing the sealing passphrase")
+    seal_db.add_argument("--remove-plaintext", action="store_true", help="After successful seal, remove plaintext DB/WAL/SHM files; use only after closing runtimes")
+
+    db_unseal = sub.add_parser("db-unseal", help="Unseal an encrypted DB backup into a SQLite DB file using a passphrase env var")
+    db_unseal.add_argument("--in", dest="sealed_path", required=True, help="Input sealed DB JSON file")
+    db_unseal.add_argument("--out", help="Output DB path; defaults to --db")
+    db_unseal.add_argument("--passphrase-env", required=True, help="Environment variable containing the sealing passphrase")
+    db_unseal.add_argument("--overwrite", action="store_true", help="Overwrite output DB if it already exists")
+
+    unseal_db = sub.add_parser("unseal-db", help="Alias for db-unseal")
+    unseal_db.add_argument("--in", dest="sealed_path", required=True, help="Input sealed DB JSON file")
+    unseal_db.add_argument("--out", help="Output DB path; defaults to --db")
+    unseal_db.add_argument("--passphrase-env", required=True, help="Environment variable containing the sealing passphrase")
+    unseal_db.add_argument("--overwrite", action="store_true", help="Overwrite output DB if it already exists")
 
     init = sub.add_parser("init", help="Initialize an agent DB/session for an engagement")
     init.add_argument("--engagement", required=True)
@@ -107,6 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
     bridge_test.add_argument("--bot-user-id", default="")
     bridge_test.add_argument("--private", action="store_true", help="Treat the test message as a DM/private chat")
     bridge_test.add_argument("--bot", action="store_true", help="Treat the test sender as a bot")
+    bridge_test.add_argument("--attachment-local-path", action="append", default=[], help="Offline bridge-test attachment local path to import as media evidence; repeatable")
+    bridge_test.add_argument("--attachment-url", action="append", default=[], help="Offline bridge-test remote attachment URL metadata to record; repeatable")
+    bridge_test.add_argument("--attachment-mime", default="application/octet-stream", help="MIME type for offline bridge-test attachments")
+    bridge_test.add_argument("--attachment-kind", default="", help="Optional kind for offline bridge-test attachments: image/audio/video/file")
     _add_bridge_args(bridge_test, token=True, slack=True)
 
     return parser
@@ -206,6 +237,12 @@ def main(argv: list[str] | None = None) -> int:
                 profiles.append({"name": path.name, "dir": str(path), "config_exists": (path / "agent.config.json").exists(), "db_exists": (path / "phobos-agent.db").exists()})
         print(json.dumps({"profiles_root": str(root), "profiles": profiles}, indent=2))
         return 0
+    if args.subcommand == "db-status":
+        return _db_status(args)
+    if args.subcommand in {"db-seal", "seal-db"}:
+        return _db_seal(args)
+    if args.subcommand in {"db-unseal", "unseal-db"}:
+        return _db_unseal(args)
 
     if args.subcommand == "init":
         roe = EngagementROE.load(args.engagement)
@@ -269,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.subcommand == "bridge-test":
             bridge_config = _bridge_config(args, runtime.config, args.platform)
+            attachments = []
+            for path in getattr(args, "attachment_local_path", []) or []:
+                attachments.append({"local_path": str(path), "mime_type": args.attachment_mime, "kind": args.attachment_kind or None, "name": Path(str(path)).name})
+            for url in getattr(args, "attachment_url", []) or []:
+                attachments.append({"url": str(url), "mime_type": args.attachment_mime, "kind": args.attachment_kind or None, "name": Path(str(url)).name or "remote-attachment"})
             message = BridgeMessage(
                 platform=args.platform,
                 text=args.message,
@@ -277,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                 message_id=str(args.message_id),
                 is_bot=bool(args.bot),
                 is_private=bool(args.private),
+                attachments=attachments,
             )
             result = handle_bridge_message(runtime, message, bridge_config, bot_user_id=args.bot_user_id or None)
             print(json.dumps({"bridge": bridge_config.sanitized(), "result": result.to_dict()}, indent=2))
@@ -284,6 +327,71 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         runtime.close()
     return 1
+
+
+def _db_seal(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser()
+    passphrase = os.environ.get(str(args.passphrase_env), "")
+    if not passphrase:
+        raise SystemExit("passphrase env var is not set; secret values must be supplied through the environment")
+    if not db_path.exists() or not db_path.is_file():
+        raise SystemExit(f"DB file not found: {db_path}")
+    _checkpoint_sqlite(db_path)
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sealed = seal_bytes(db_path.read_bytes(), passphrase, aad=b"phobos-agent-sealed-db")
+    out.write_bytes(sealed)
+    removed = []
+    if getattr(args, "remove_plaintext", False):
+        for path in _db_plaintext_paths(db_path):
+            if path.exists():
+                path.unlink()
+                removed.append(str(path))
+    print(json.dumps({"status": "sealed", "db": str(db_path), "sealed": str(out), "format": SEALED_MAGIC, "passphrase_env": str(args.passphrase_env), "plaintext_db_still_exists": db_path.exists(), "removed_plaintext": removed}, indent=2))
+    return 0
+
+
+def _db_unseal(args: argparse.Namespace) -> int:
+    passphrase = os.environ.get(str(args.passphrase_env), "")
+    if not passphrase:
+        raise SystemExit("passphrase env var is not set; secret values must be supplied through the environment")
+    sealed_path = Path(args.sealed_path).expanduser()
+    if not sealed_path.exists() or not sealed_path.is_file():
+        raise SystemExit(f"Sealed DB file not found: {sealed_path}")
+    out = Path(args.out or args.db).expanduser()
+    if out.exists() and not args.overwrite:
+        raise SystemExit(f"Output DB already exists: {out}; pass --overwrite to replace it")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(unseal_bytes(sealed_path.read_bytes(), passphrase, aad=b"phobos-agent-sealed-db"))
+    print(json.dumps({"status": "unsealed", "sealed": str(sealed_path), "db": str(out), "passphrase_env": str(args.passphrase_env)}, indent=2))
+    return 0
+
+
+def _db_status(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser()
+    files = []
+    for path in _db_plaintext_paths(db_path):
+        files.append({"path": str(path), "exists": path.exists(), "bytes": path.stat().st_size if path.exists() else 0})
+    print(json.dumps({"db": str(db_path), "plaintext_files": files}, indent=2))
+    return 0
+
+
+def _db_plaintext_paths(db_path: Path) -> list[Path]:
+    return [db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]
+
+
+def _checkpoint_sqlite(db_path: Path) -> None:
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # If checkpointing fails, sealing the main DB is still useful; callers can
+        # re-run with the runtime closed or inspect db-status for leftover WAL.
+        return
 
 
 def _bridge_config(args: argparse.Namespace, runtime_config: AgentRuntimeConfig, platform: str) -> BridgeConfig:

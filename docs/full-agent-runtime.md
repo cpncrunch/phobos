@@ -5,9 +5,9 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 ## Runtime components
 
 - **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v4.
-- **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; memory and current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
+- **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; Hindsight-style aliases (`/hindsight-retain`, `/hindsight-recall`, `/hindsight-reflect`) store/search/synthesize through the same local memory and context stores; memory and current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
-- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, and `/lcm-query` add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
+- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
@@ -19,13 +19,13 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; run via `phobos-agent run-due` or external cron.
-- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with per-task artifacts.
+- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with per-task artifacts and child session records by default.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
-- **Operator briefing, handoff, and sealed snapshots:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots.
-- **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default.
-- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
+- **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
+- **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default, including route discovery and views for schemas, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
+- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
 
@@ -46,6 +46,9 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /remember key=<name> value=<fact> tags=<optional>
 /recall query=<text>
 /reflect query=<question>
+/hindsight-retain content=<fact> context=<label> tags=<optional>
+/hindsight-recall query=<text>
+/hindsight-reflect query=<question>
 /search query=<text>
 /search-all query=<text>
 /context query=<optional> limit=8
@@ -144,9 +147,9 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "preload_skills": [],
   "skill_bundles": {},
   "bridges": {
-    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false},
-    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false},
-    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false}
+    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000},
+    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000},
+    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000}
   },
   "providers": [
     {
@@ -293,6 +296,13 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once --engagem
 # Compact and recover session context.
 phobos-agent --db data/phobos-agent.db --config agent.config.json once --engagement engagement.json --message '/compact limit=60'
 phobos-agent --db data/phobos-agent.db --config agent.config.json once --engagement engagement.json --message '/context limit=6'
+
+# Local Hindsight/LCM-style aliases over the same SQLite memory/context layer.
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/hindsight-retain content="ACME durable operator note" context=engagement tags=memory'
+phobos-agent --db data/phobos-agent.db --config agent.config.json once --engagement engagement.json --message '/hindsight-recall query=ACME'
+phobos-agent --db data/phobos-agent.db --config agent.config.json once --engagement engagement.json --message '/hindsight-reflect query="what do we know about ACME?"'
 ```
 
 ## Job example
@@ -340,6 +350,29 @@ phobos-agent --db imported/phobos-agent.db --config agent.config.json once \
   --message '/import-session path=evidence/<engagement>/agent/session-exports/session-handoff.json merge_memories=false'
 ```
 
+## Sealed DB backup/restore
+
+`seal-db`/`unseal-db` protect a closed SQLite DB backup with the stdlib authenticated sealed format used by Phobos snapshots. Passphrases come from environment variables and are never printed. This is useful for archiving or moving a local Phobos DB, but it is **not** transparent live SQLite page encryption.
+
+```bash
+export PHOBOS_DB_SEAL='...'
+
+# Close running Phobos runtimes before using --remove-plaintext.
+phobos-agent --db data/phobos-agent.db seal-db \
+  --out data/phobos-agent.db.sealed \
+  --passphrase-env PHOBOS_DB_SEAL \
+  --remove-plaintext
+
+phobos-agent --db data/phobos-agent.db unseal-db \
+  --in data/phobos-agent.db.sealed \
+  --passphrase-env PHOBOS_DB_SEAL \
+  --overwrite
+
+phobos-agent --db data/phobos-agent.db db-status
+```
+
+Use filesystem encryption, SQLCipher, or an equivalent deployment control if the active working DB itself must remain encrypted while the agent is running.
+
 
 ## Messaging bridges
 
@@ -367,6 +400,25 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
   --user-id <operator-user-id> \
   --message '!phobos /status'
 ```
+
+Offline bridge media/voice test, still no platform token required:
+
+```bash
+phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
+  --engagement engagement.json \
+  --platform discord \
+  --allow-channel <channel-or-thread-id> \
+  --allow-user <operator-user-id> \
+  --prefix '!phobos' \
+  --channel-id <channel-or-thread-id> \
+  --user-id <operator-user-id> \
+  --message '!phobos /media-list' \
+  --attachment-local-path ./operator-note.ogg \
+  --attachment-mime audio/ogg \
+  --attachment-kind voice
+```
+
+Local attachment paths are imported through the existing `media_import` tool. Remote-only platform attachment references are recorded as redacted metadata and are not downloaded automatically.
 
 Run live bridges:
 
@@ -410,15 +462,26 @@ Endpoints:
 ```text
 GET  /              local web dashboard
 GET  /health
+GET  /routes
 GET  /status
 GET  /tools
+GET  /schemas?name=<optional-tool>
 GET  /sessions
 GET  /context
-GET  /approvals
-GET  /audit
+GET  /lcm
 GET  /tasks
+GET  /jobs
+GET  /processes
+GET  /approvals
+GET  /delegations
+GET  /media
+GET  /auth
+GET  /bridges
+GET  /audit
 POST /message   {"message": "/tools"}
 POST /tool      {"name": "tool_name", "args": {}}
+POST /approve   {"id": 1, "by": "gateway"}
+POST /deny      {"id": 1, "by": "gateway", "reason": "outside window"}
 POST /run-due   {}
 ```
 
@@ -432,7 +495,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 31 tests in 5.956s
+Ran 31 tests
 OK
 ```
 
@@ -466,21 +529,25 @@ jobs_and_subagents=True
 task_board_roundtrip=True
 context_compacted=True
 lcm_context_nodes_ok=True
+hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
+isolated_delegation_sessions_ok=True
 auth_status_redacted_ok=True
 media_artifacts_ok=True
 sealed_snapshot_roundtrip_ok=True
+db_seal_at_rest_roundtrip_ok=True
 redacted_exports_not_db_encryption_ok=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
 bridges_offline_ok=True
+bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=113
+artifact_count=140
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -498,6 +565,8 @@ auto-plan.txt
 auto-recall.txt
 bridge-approval-block.json
 bridge-discord.json
+bridge-media.json
+bridge-remote-metadata.json
 bridge-slack.json
 bridge-telegram.json
 compact.txt
@@ -505,6 +574,10 @@ config-init.stdout.txt
 context.txt
 delegation.json
 delegations.json
+db-seal.stdout.txt
+db-unseal.stdout.txt
+db-unseal-recall.stdout.txt
+db-unseal-wrong.stderr.txt
 destructive-block.txt
 dos-block.txt
 gateway-dashboard.html
@@ -512,6 +585,10 @@ gateway-health.json
 gateway-routes.json
 gateway-status.json
 gateway-tool.json
+hindsight-retain.json
+hindsight-recall.json
+hindsight-reflect.json
+lcm-alias.json
 lcm-compact.json
 lcm-describe.json
 lcm-expand.json
@@ -557,11 +634,11 @@ workspace-write.txt
 This is now a real local Hermes-like offsec agent runtime, but it is still not a full production Hermes replacement. Missing or intentionally minimal areas include:
 
 - Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
+- bridge media handling imports explicit local files and records remote platform attachment metadata, but does not blindly download remote attachments or transcribe voice/audio;
 - web UI is intentionally minimal/local, not a production console;
 - `/auto` has deterministic planning plus optional model-returned JSON plans and a bounded `/auto-loop`, but it is not Hermes' full native function-calling autonomy or general-purpose task computer;
-- local `/delegate` persists batches and artifacts, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
-- sealed exports provide authenticated passphrase-env protected portable snapshots; the live SQLite database remains plaintext unless the operator uses filesystem encryption, SQLCipher, or another deployment control;
-- Phobos now has explicit LCM-style context nodes, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
-- local media import records operator-supplied files, but there is no native chat attachment ingestion, voice, or TTS UX.
+- local `/delegate` persists batches, artifacts, and child session records, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
+- sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
+- Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
 
-The important pieces for a standalone pentest agent are working: sessions, memory, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches, media/artifact import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
+The important pieces for a standalone pentest agent are working: sessions, memory, Hindsight aliases, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches with child sessions, media/artifact import, bridge media metadata/import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, sealed DB backup/restore, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.

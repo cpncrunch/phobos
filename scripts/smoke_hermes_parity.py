@@ -60,7 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["HOME"] = str(root / "home")
     env["PHOBOS_SMOKE_SEAL"] = "smoke-passphrase-for-sealed-export"
+    env["PHOBOS_SMOKE_DB_SEAL"] = "smoke-passphrase-for-db-seal"
     os.environ["PHOBOS_SMOKE_SEAL"] = env["PHOBOS_SMOKE_SEAL"]
+    os.environ["PHOBOS_SMOKE_DB_SEAL"] = env["PHOBOS_SMOKE_DB_SEAL"]
 
     checks: dict[str, object] = {}
 
@@ -146,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
                 "auth_status",
                 "media_import",
                 "sealed_export",
+                "hindsight_retain",
+                "lcm_compact",
                 "wait_process",
                 "add_task",
                 "example_echo",
@@ -242,11 +246,23 @@ def main(argv: list[str] | None = None) -> int:
         write("lcm-query.json", json.dumps(lcm_query.to_dict(), indent=2))
         checks["lcm_context_nodes_ok"] = lcm_node.status == "ok" and lcm_describe.status == "ok" and lcm_expand.status == "ok" and lcm_query.status == "ok" and bool(lcm_expand.data.get("expanded_sources"))
 
+        hindsight_retain = runtime.registry.run("hindsight_retain", {"content": "Smoke Hindsight ACME durable marker", "context": "smoke", "tags": "hindsight,smoke"})
+        hindsight_recall = runtime.registry.run("hindsight_recall", {"query": "Hindsight ACME"})
+        hindsight_reflect = runtime.registry.run("hindsight_reflect", {"query": "smoke-client"})
+        lcm_alias = runtime.registry.run("lcm_describe", {"id": node_id})
+        write("hindsight-retain.json", json.dumps(hindsight_retain.to_dict(), indent=2))
+        write("hindsight-recall.json", json.dumps(hindsight_recall.to_dict(), indent=2))
+        write("hindsight-reflect.json", json.dumps(hindsight_reflect.to_dict(), indent=2))
+        write("lcm-alias.json", json.dumps(lcm_alias.to_dict(), indent=2))
+        checks["hindsight_lcm_aliases_ok"] = hindsight_retain.status == "ok" and "Smoke Hindsight ACME" in json.dumps(hindsight_recall.to_dict()) and hindsight_reflect.status == "ok" and lcm_alias.status == "ok"
+
         delegation = runtime.registry.run("delegate_tasks", {"prompt": "Review smoke parity evidence", "roles": "scope,safety"})
         delegation_list = runtime.registry.run("list_delegations", {})
         write("delegation.json", json.dumps(delegation.to_dict(), indent=2))
         write("delegations.json", json.dumps(delegation_list.to_dict(), indent=2))
+        child_session_ids = [item.get("child_session_id") for item in delegation.data.get("delegation", {}).get("results", [])]
         checks["delegation_batches_ok"] = delegation.status == "ok" and delegation_list.data.get("delegations") and Path(delegation.artifacts.get("summary", "")).exists()
+        checks["isolated_delegation_sessions_ok"] = len([sid for sid in child_session_ids if sid]) == 2 and all(sid != runtime.session_id for sid in child_session_ids)
 
         auth = runtime.registry.run("auth_status", {})
         write("auth-status.json", json.dumps(auth.to_dict(), indent=2))
@@ -272,6 +288,22 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             sealed_import_runtime.close()
         checks["sealed_snapshot_roundtrip_ok"] = sealed_missing.status == "error" and sealed.status == "ok" and sealed_import.status == "ok" and "PHOBOS_SEALED_V1" in sealed_text and "supersecret" not in sealed_text
+
+        db_seal_path = data / "db-seal-agent.db"
+        db_sealed_path = data / "db-seal-agent.db.sealed"
+        run_cmd("db-seal-init", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_seal_path), "init", "--engagement", str(engagement_path)])
+        run_cmd("db-seal-marker", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_seal_path), "once", "--engagement", str(engagement_path), "--message", '/remember key=db-at-rest-smoke value="DB_AT_REST_SMOKE_MARKER"'])
+        db_seal_stdout = run_cmd("db-seal", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_seal_path), "seal-db", "--out", str(db_sealed_path), "--passphrase-env", "PHOBOS_SMOKE_DB_SEAL", "--remove-plaintext"])
+        wrong_env = dict(env)
+        wrong_env["PHOBOS_SMOKE_DB_SEAL_WRONG"] = "wrong-smoke-passphrase"
+        wrong_unseal = subprocess.run([sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(data / "wrong-db-seal-agent.db"), "unseal-db", "--in", str(db_sealed_path), "--passphrase-env", "PHOBOS_SMOKE_DB_SEAL_WRONG", "--overwrite"], cwd=REPO, env=wrong_env, text=True, capture_output=True, check=False)
+        write("db-unseal-wrong.stdout.txt", wrong_unseal.stdout)
+        write("db-unseal-wrong.stderr.txt", wrong_unseal.stderr)
+        db_unseal_stdout = run_cmd("db-unseal", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_seal_path), "unseal-db", "--in", str(db_sealed_path), "--passphrase-env", "PHOBOS_SMOKE_DB_SEAL", "--overwrite"])
+        db_recall_stdout = run_cmd("db-unseal-recall", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_seal_path), "once", "--engagement", str(engagement_path), "--message", "/recall query=db-at-rest-smoke"])
+        db_seal_json = json.loads(db_seal_stdout)
+        db_unseal_json = json.loads(db_unseal_stdout)
+        checks["db_seal_at_rest_roundtrip_ok"] = db_seal_json.get("status") == "sealed" and db_unseal_json.get("status") == "unsealed" and db_seal_path.exists() and wrong_unseal.returncode != 0 and b"DB_AT_REST_SMOKE_MARKER" not in db_sealed_path.read_bytes() and "DB_AT_REST_SMOKE_MARKER" in db_recall_stdout
         checks["redacted_exports_not_db_encryption_ok"] = True
 
         briefing = runtime.registry.run("operator_briefing", {"query": "smoke-client"})
@@ -335,6 +367,33 @@ def main(argv: list[str] | None = None) -> int:
             BridgeMessage(platform="telegram", text="/status", channel_id="private-smoke", user_id="U-smoke", message_id="42", is_private=True),
             BridgeConfig(platform="telegram", max_response_chars=300),
         )
+        bridge_voice = root / "bridge-voice.ogg"
+        bridge_voice.write_bytes(b"OggS bridge voice token=supersecret")
+        bridge_media = handle_bridge_message(
+            runtime,
+            BridgeMessage(
+                platform="discord",
+                text="!phobos /media-list",
+                channel_id="C-smoke",
+                user_id="U-smoke",
+                message_id="M-media",
+                attachments=[{"local_path": str(bridge_voice), "mime_type": "audio/ogg", "kind": "voice", "name": "bridge-voice.ogg"}],
+            ),
+            BridgeConfig(platform="discord", allowed_channel_ids=("C-smoke",), allowed_user_ids=("U-smoke",), command_prefix="!phobos", max_response_chars=300),
+        )
+        bridge_remote_metadata = handle_bridge_message(
+            runtime,
+            BridgeMessage(
+                platform="telegram",
+                text="",
+                channel_id="private-smoke",
+                user_id="U-smoke",
+                message_id="43",
+                is_private=True,
+                attachments=[{"url": "https://example.invalid/proof.png", "mime_type": "image/png", "size": 123}],
+            ),
+            BridgeConfig(platform="telegram", max_response_chars=300),
+        )
         bridge_approval_block = handle_bridge_message(
             runtime,
             BridgeMessage(platform="discord", text="!phobos /approve id=1", channel_id="C-smoke", user_id="U-smoke", message_id="M-approve"),
@@ -343,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         write("bridge-discord.json", json.dumps(discord_bridge.to_dict(), indent=2))
         write("bridge-slack.json", json.dumps(slack_bridge.to_dict(), indent=2))
         write("bridge-telegram.json", json.dumps(telegram_bridge.to_dict(), indent=2))
+        write("bridge-media.json", json.dumps(bridge_media.to_dict(), indent=2))
+        write("bridge-remote-metadata.json", json.dumps(bridge_remote_metadata.to_dict(), indent=2))
         write("bridge-approval-block.json", json.dumps(bridge_approval_block.to_dict(), indent=2))
         checks["bridges_offline_ok"] = (
             discord_bridge.status == "handled"
@@ -352,6 +413,14 @@ def main(argv: list[str] | None = None) -> int:
             and telegram_bridge.status == "handled"
             and bridge_approval_block.status == "blocked"
             and bridge_approval_block.reason == "approval-action-disabled"
+        )
+        checks["bridge_media_voice_ok"] = (
+            bridge_media.status == "handled"
+            and bridge_media.attachments
+            and bridge_media.attachments[0].get("status") == "ok"
+            and bridge_remote_metadata.status == "handled"
+            and bridge_remote_metadata.attachments
+            and bridge_remote_metadata.attachments[0].get("status") == "metadata-recorded"
         )
 
         gateway = AgentGateway(runtime, port=0)
@@ -365,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/tools", "/sessions", "/context", "/approvals", "/audit", "/tasks"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -398,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/tools", "/sessions", "/context", "/approvals", "/audit", "/tasks"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
 
         pack = runtime.registry.run("export_pack", {"out": "closeout-pack.zip"})
         write("pack-export.json", json.dumps(pack.to_dict(), indent=2))
@@ -411,7 +480,8 @@ def main(argv: list[str] | None = None) -> int:
                 if name.endswith((".json", ".md", ".txt", ".log", ".jsonl", ".html"))
             )
         checks["pack_exported_and_redacted"] = pack.status == "ok" and "MANIFEST.json" in names and "runtime/state.json" in names and "supersecret" not in combined
-        grep = subprocess.run(["git", "grep", "-ni", "packet", "HEAD"], cwd=REPO, env=env, text=True, capture_output=True, check=False)
+        legacy_pattern = "pack" + "et"
+        grep = subprocess.run(["git", "grep", "-ni", legacy_pattern], cwd=REPO, env=env, text=True, capture_output=True, check=False)
         write("legacy-term-grep.txt", grep.stdout + grep.stderr)
         checks["no_legacy_public_terms_ok"] = grep.returncode == 1 and not grep.stdout.strip()
         checks["db_exists"] = db_path.exists()

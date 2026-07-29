@@ -5,9 +5,10 @@ from typing import Any
 import html
 import json
 import threading
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .agent_runtime import OffSecAgentRuntime
+from .agent_bridges import BridgeConfig
 
 
 class AgentGateway:
@@ -56,8 +57,16 @@ class AgentGateway:
                     if path == "/health":
                         _write_json(self, {"ok": True, "session_id": runtime.session_id, "engagement": runtime.roe.name})
                         return
+                    if path == "/routes":
+                        _write_json(self, {"paths": _gateway_paths()})
+                        return
                     if path == "/tools":
                         _write_json(self, {"tools": [spec.to_dict() for spec in runtime.registry.specs()]})
+                        return
+                    if path == "/schemas":
+                        query = parse_qs(parsed.query)
+                        name = (query.get("name") or [""])[0]
+                        _write_json(self, runtime.registry.run("tool_schemas", {"name": name}).to_dict())
                         return
                     if path == "/status":
                         _write_json(self, runtime.registry.run("runtime_status", {}).to_dict())
@@ -77,7 +86,29 @@ class AgentGateway:
                     if path == "/tasks":
                         _write_json(self, runtime.registry.run("list_tasks", {"status": "all"}).to_dict())
                         return
-                _write_json(self, {"error": "not found", "paths": ["/", "/health", "/status", "/tools", "/sessions", "/context", "/approvals", "/audit", "/tasks", "/message", "/tool", "/run-due"]}, status=404)
+                    if path == "/jobs":
+                        _write_json(self, runtime.registry.run("list_jobs", {}).to_dict())
+                        return
+                    if path == "/processes":
+                        _write_json(self, runtime.registry.run("list_processes", {}).to_dict())
+                        return
+                    if path == "/lcm":
+                        _write_json(self, runtime.registry.run("context_describe", {}).to_dict())
+                        return
+                    if path == "/delegations":
+                        _write_json(self, runtime.registry.run("list_delegations", {}).to_dict())
+                        return
+                    if path == "/media":
+                        _write_json(self, runtime.registry.run("media_list", {}).to_dict())
+                        return
+                    if path == "/auth":
+                        _write_json(self, runtime.registry.run("auth_status", {}).to_dict())
+                        return
+                    if path == "/bridges":
+                        bridge_configs = {name: BridgeConfig.from_dict(name, data).sanitized() for name, data in (runtime.config.bridges or {}).items()}
+                        _write_json(self, {"bridges": bridge_configs})
+                        return
+                _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
                 runtime: OffSecAgentRuntime = self.server.runtime  # type: ignore[attr-defined]
@@ -108,7 +139,23 @@ class AgentGateway:
                         if self.path == "/run-due":
                             _write_json(self, {"jobs_run": runtime.run_due_jobs()})
                             return
-                    _write_json(self, {"error": "not found"}, status=404)
+                        if self.path == "/approve":
+                            approval_id = payload.get("id") or payload.get("approval_id")
+                            if approval_id is None:
+                                _write_json(self, {"error": "id is required"}, status=400)
+                                return
+                            result = runtime.registry.run("approve", {"id": approval_id, "by": payload.get("by", "gateway")})
+                            _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
+                            return
+                        if self.path == "/deny":
+                            approval_id = payload.get("id") or payload.get("approval_id")
+                            if approval_id is None:
+                                _write_json(self, {"error": "id is required"}, status=400)
+                                return
+                            result = runtime.registry.run("deny", {"id": approval_id, "by": payload.get("by", "gateway"), "reason": payload.get("reason", "")})
+                            _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
+                            return
+                    _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
                 except Exception as exc:  # pragma: no cover - defensive gateway boundary
                     _write_json(self, {"error": str(exc)}, status=500)
 
@@ -119,6 +166,34 @@ class AgentGateway:
                     runtime.store.audit(runtime.session_id, "gateway_access", {"client": self.address_string(), "message": fmt % args})
 
         return Handler
+
+
+def _gateway_paths() -> list[str]:
+    return [
+        "/",
+        "/health",
+        "/routes",
+        "/status",
+        "/tools",
+        "/schemas",
+        "/sessions",
+        "/context",
+        "/lcm",
+        "/tasks",
+        "/jobs",
+        "/processes",
+        "/approvals",
+        "/delegations",
+        "/media",
+        "/auth",
+        "/bridges",
+        "/audit",
+        "/message",
+        "/tool",
+        "/approve",
+        "/deny",
+        "/run-due",
+    ]
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -152,10 +227,15 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     tasks = runtime.store.list_tasks(runtime.session_id, status="all", limit=20)
     approvals = runtime.store.list_approvals(runtime.session_id, status="pending")
     recent = runtime.store.recent_messages(runtime.session_id, limit=8)
+    media = runtime.store.list_media_artifacts(runtime.session_id, limit=8)
+    delegations = runtime.store.list_delegations(runtime.session_id, limit=8)
     tool_count = len(runtime.registry.specs())
     task_items = "\n".join(f"<li><code>{html.escape(task['status'])}</code> #{task['id']} {html.escape(task['content'])}</li>" for task in tasks) or "<li>No tasks yet.</li>"
     approval_items = "\n".join(f"<li>#{approval['id']} <code>{html.escape(approval['tool_name'])}</code> {html.escape(str(approval.get('requested_at', '')))}</li>" for approval in approvals) or "<li>No pending approvals.</li>"
     recent_items = "\n".join(f"<li><code>{html.escape(msg['role'])}</code> {html.escape(str(msg['content'])[:300])}</li>" for msg in recent) or "<li>No messages yet.</li>"
+    media_items = "\n".join(f"<li><code>{html.escape(item['kind'])}</code> {html.escape(str(item.get('mime_type', '')))} {html.escape(str(item.get('artifact_path') or item.get('source_path') or ''))}</li>" for item in media) or "<li>No media artifacts yet.</li>"
+    delegation_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(str(item.get('prompt', ''))[:160])}</li>" for item in delegations) or "<li>No delegations yet.</li>"
+    api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/tool", "/approve", "/deny", "/run-due"})
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -178,6 +258,8 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     <section><h2>Status</h2><pre>{html.escape(json.dumps(status, indent=2)[:1600])}</pre></section>
     <section><h2>Task Board</h2><ul>{task_items}</ul></section>
     <section><h2>Pending Approvals</h2><ul>{approval_items}</ul></section>
+    <section><h2>Media / Voice Artifacts</h2><ul>{media_items}</ul></section>
+    <section><h2>Local Delegations</h2><ul>{delegation_items}</ul></section>
     <section><h2>Recent Messages</h2><ul>{recent_items}</ul></section>
   </div>
   <section>
@@ -188,7 +270,7 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
   </section>
   <section>
     <h2>API Links</h2>
-    <p>Tools registered: {tool_count}. JSON endpoints: <a href="/health">/health</a>, <a href="/status">/status</a>, <a href="/tools">/tools</a>, <a href="/sessions">/sessions</a>, <a href="/context">/context</a>, <a href="/tasks">/tasks</a>, <a href="/approvals">/approvals</a>, <a href="/audit">/audit</a>.</p>
+    <p>Tools registered: {tool_count}. JSON endpoints: {api_links}. POST endpoints: <code>/message</code>, <code>/tool</code>, <code>/approve</code>, <code>/deny</code>, <code>/run-due</code>.</p>
   </section>
   <script>
     async function sendMessage() {{

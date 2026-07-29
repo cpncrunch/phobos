@@ -31,6 +31,8 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "mention_required": False,
         "allow_all": False,
         "allow_approval_actions": False,
+        "import_attachments": True,
+        "max_attachment_bytes": 10_000_000,
         "ignore_bots": True,
         "max_response_chars": 1800,
         "max_message_chars": 4000,
@@ -46,6 +48,8 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "mention_required": False,
         "allow_all": False,
         "allow_approval_actions": False,
+        "import_attachments": True,
+        "max_attachment_bytes": 10_000_000,
         "ignore_bots": True,
         "max_response_chars": 3000,
         "max_message_chars": 4000,
@@ -60,6 +64,8 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "mention_required": False,
         "allow_all": False,
         "allow_approval_actions": False,
+        "import_attachments": True,
+        "max_attachment_bytes": 10_000_000,
         "ignore_bots": True,
         "max_response_chars": 3500,
         "max_message_chars": 4000,
@@ -81,6 +87,8 @@ class BridgeConfig:
     mention_required: bool = False
     allow_all: bool = False
     allow_approval_actions: bool = False
+    import_attachments: bool = True
+    max_attachment_bytes: int = 10_000_000
     ignore_bots: bool = True
     max_response_chars: int = 1800
     max_message_chars: int = 4000
@@ -102,6 +110,8 @@ class BridgeConfig:
             "mention_required",
             "allow_all",
             "allow_approval_actions",
+            "import_attachments",
+            "max_attachment_bytes",
             "ignore_bots",
             "max_response_chars",
             "max_message_chars",
@@ -120,6 +130,8 @@ class BridgeConfig:
             mention_required=bool(merged.get("mention_required", False)),
             allow_all=bool(merged.get("allow_all", False)),
             allow_approval_actions=bool(merged.get("allow_approval_actions", False)),
+            import_attachments=bool(merged.get("import_attachments", True)),
+            max_attachment_bytes=max(0, int(merged.get("max_attachment_bytes", 10_000_000))),
             ignore_bots=bool(merged.get("ignore_bots", True)),
             max_response_chars=max(200, int(merged.get("max_response_chars", 1800))),
             max_message_chars=max(200, int(merged.get("max_message_chars", 4000))),
@@ -155,6 +167,7 @@ class BridgeMessage:
     user_name: str = ""
     is_bot: bool = False
     is_private: bool = False
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def audit_metadata(self) -> dict[str, Any]:
@@ -166,6 +179,7 @@ class BridgeMessage:
             "user_name": self.user_name,
             "is_bot": self.is_bot,
             "is_private": self.is_private,
+            "attachment_count": len(self.attachments),
         }
 
 
@@ -176,6 +190,7 @@ class BridgeDispatchResult:
     normalized_text: str = ""
     response: str = ""
     chunks: list[str] = field(default_factory=list)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -201,6 +216,15 @@ def handle_bridge_message(
         return BridgeDispatchResult("ignored", reason=reason)
     normalized, trigger_reason = normalize_bridge_text(message.text, config, bot_user_id=bot_user_id, is_private=message.is_private)
     if not normalized:
+        if message.attachments and config.import_attachments:
+            imported = _import_bridge_attachments(runtime, message, config)
+            if _attachment_import_blocked(imported):
+                response = "Bridge attachment rejected before dispatch; no text command was executed."
+                runtime.store.audit(runtime.session_id, "bridge_attachment_blocked", message.audit_metadata() | {"attachments": _redact_value(imported)})
+                return BridgeDispatchResult("blocked", reason="attachment-too-large", normalized_text="", response=response, chunks=chunk_text(response, config.max_response_chars), attachments=imported)
+            response = f"Imported/listed {len(imported)} bridge media/voice attachment(s); no text command was executed."
+            runtime.store.audit(runtime.session_id, "bridge_attachments_handled", message.audit_metadata() | {"attachments": _redact_value(imported)})
+            return BridgeDispatchResult("handled", reason="attachments", normalized_text="", response=response, chunks=chunk_text(response, config.max_response_chars), attachments=imported)
         return BridgeDispatchResult("ignored", reason=trigger_reason or "empty-message")
     if len(normalized) > config.max_message_chars:
         response = f"Message ignored: exceeds max_message_chars={config.max_message_chars}."
@@ -209,7 +233,14 @@ def handle_bridge_message(
         response = "Bridge approval actions are disabled by default; use the local CLI/gateway or set allow_approval_actions=true for this bridge."
         runtime.store.audit(runtime.session_id, "bridge_message_blocked", message.audit_metadata() | {"reason": "approval-action-disabled"})
         return BridgeDispatchResult("blocked", reason="approval-action-disabled", normalized_text=normalized, response=response, chunks=chunk_text(response, config.max_response_chars))
+    imported_attachments = _import_bridge_attachments(runtime, message, config)
+    if _attachment_import_blocked(imported_attachments):
+        response = "Bridge attachment rejected before dispatch; no text command was executed."
+        runtime.store.audit(runtime.session_id, "bridge_attachment_blocked", message.audit_metadata() | {"attachments": _redact_value(imported_attachments)})
+        return BridgeDispatchResult("blocked", reason="attachment-too-large", normalized_text=normalized, response=response, chunks=chunk_text(response, config.max_response_chars), attachments=imported_attachments)
     metadata = message.audit_metadata() | {"normalized_preview": redact_secrets(normalized[:200])}
+    if imported_attachments:
+        metadata["attachments"] = _redact_value(imported_attachments)
     runtime.store.audit(runtime.session_id, "bridge_message_received", metadata)
     try:
         response = runtime.handle_message(normalized)
@@ -220,7 +251,77 @@ def handle_bridge_message(
         status = "error"
         runtime.store.audit(runtime.session_id, "bridge_message_error", message.audit_metadata() | {"error": str(exc)})
     chunks = chunk_text(response, config.max_response_chars)
-    return BridgeDispatchResult(status, reason=trigger_reason, normalized_text=normalized, response=response, chunks=chunks)
+    return BridgeDispatchResult(status, reason=trigger_reason, normalized_text=normalized, response=response, chunks=chunks, attachments=imported_attachments)
+
+
+def _import_bridge_attachments(runtime: "OffSecAgentRuntime", message: BridgeMessage, config: BridgeConfig) -> list[dict[str, Any]]:
+    if not config.import_attachments or not message.attachments:
+        return []
+    imported: list[dict[str, Any]] = []
+    for index, attachment in enumerate(message.attachments, 1):
+        size = _int_value(attachment.get("size"), 0)
+        name = str(attachment.get("name") or attachment.get("filename") or f"attachment-{index}")
+        mime_type = str(attachment.get("mime_type") or attachment.get("content_type") or attachment.get("mimetype") or "application/octet-stream")
+        kind = str(attachment.get("kind") or _kind_from_mime(mime_type)).strip() or "file"
+        metadata = {
+            "platform": message.platform,
+            "channel_id": message.channel_id,
+            "message_id": message.message_id,
+            "user_id": message.user_id,
+            "name": name,
+            "mime_type": mime_type,
+            "kind": kind,
+            "size": size,
+        }
+        if size and config.max_attachment_bytes and size > config.max_attachment_bytes:
+            imported.append(metadata | {"status": "skipped", "reason": "attachment-too-large"})
+            continue
+        local_path = str(attachment.get("local_path") or "").strip()
+        if local_path:
+            result = runtime.registry.run("media_import", {"path": local_path, "kind": kind})
+            item = metadata | {"status": result.status, "tool_message": result.message}
+            if result.data.get("media"):
+                item["media"] = result.data["media"]
+            imported.append(_redact_value(item) if isinstance(_redact_value(item), dict) else item)
+            continue
+        source = str(attachment.get("url") or attachment.get("url_private_download") or attachment.get("file_id") or attachment.get("source") or "")
+        if not source:
+            imported.append(metadata | {"status": "skipped", "reason": "no-local-path-or-source"})
+            continue
+        source_redacted = redact_secrets(source) or ""
+        media_id = runtime.store.create_media_artifact(
+            runtime.session_id,
+            kind,
+            source_redacted,
+            "",
+            mime_type,
+            str(attachment.get("sha256") or ""),
+            size,
+            metadata | {"source_kind": "remote-metadata-only", "downloaded": False},
+        )
+        imported.append(metadata | {"status": "metadata-recorded", "media_id": media_id, "source": source_redacted})
+    return imported
+
+
+def _attachment_import_blocked(imported: list[dict[str, Any]]) -> bool:
+    return any(item.get("status") == "skipped" and item.get("reason") == "attachment-too-large" for item in imported)
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _kind_from_mime(mime_type: str) -> str:
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    if mime_type.startswith("video/"):
+        return "video"
+    return "file"
 
 
 def normalize_bridge_text(text: str, config: BridgeConfig, *, bot_user_id: str | None = None, is_private: bool = False) -> tuple[str, str]:
@@ -362,6 +463,7 @@ class DiscordGatewayBridge:
             user_name=str(author.get("username", "")),
             is_bot=bool(author.get("bot", False)),
             is_private=not bool(data.get("guild_id")),
+            attachments=_discord_attachments(data),
             raw={"guild_id": data.get("guild_id")},
         )
         result = handle_bridge_message(self.runtime, message, self.config, bot_user_id=self.bot_user_id)
@@ -431,6 +533,7 @@ class SlackSocketModeBridge:
             message_id=str(event.get("ts", "")),
             is_bot=bool(event.get("bot_id")) or user_id == self.bot_user_id,
             is_private=str(event.get("channel_type", "")) == "im" or str(event.get("channel", "")).startswith("D"),
+            attachments=_slack_attachments(event),
             raw={"thread_ts": event.get("thread_ts")},
         )
         result = handle_bridge_message(self.runtime, message, self.config, bot_user_id=self.bot_user_id)
@@ -487,6 +590,7 @@ class TelegramPollingBridge:
             user_name=str(user.get("username", "")),
             is_bot=bool(user.get("is_bot", False)),
             is_private=str(chat.get("type", "")) == "private",
+            attachments=_telegram_attachments(data),
             raw={"chat_type": chat.get("type")},
         )
         result = handle_bridge_message(self.runtime, message, self.config, bot_user_id=self.bot_user_id)
@@ -612,6 +716,72 @@ class SimpleWebSocket:
         if masked:
             payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
         return fin, opcode, payload
+
+
+def _discord_attachments(data: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for item in data.get("attachments", []) or []:
+        if not isinstance(item, dict):
+            continue
+        attachments.append({
+            "platform": "discord",
+            "id": str(item.get("id", "")),
+            "name": str(item.get("filename") or item.get("name") or "attachment"),
+            "url": str(item.get("url") or item.get("proxy_url") or ""),
+            "mime_type": str(item.get("content_type") or "application/octet-stream"),
+            "size": _int_value(item.get("size"), 0),
+            "kind": _kind_from_mime(str(item.get("content_type") or "")),
+        })
+    return attachments
+
+
+def _slack_attachments(event: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for item in event.get("files", []) or []:
+        if not isinstance(item, dict):
+            continue
+        mime_type = str(item.get("mimetype") or item.get("filetype") or "application/octet-stream")
+        attachments.append({
+            "platform": "slack",
+            "id": str(item.get("id", "")),
+            "name": str(item.get("name") or item.get("title") or "attachment"),
+            "url_private_download": str(item.get("url_private_download") or item.get("url_private") or ""),
+            "mime_type": mime_type,
+            "size": _int_value(item.get("size"), 0),
+            "kind": _kind_from_mime(mime_type),
+        })
+    return attachments
+
+
+def _telegram_attachments(data: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for key in ("voice", "audio", "video", "document", "animation"):
+        item = data.get(key)
+        if isinstance(item, dict):
+            mime_type = str(item.get("mime_type") or ("audio/ogg" if key == "voice" else "application/octet-stream"))
+            attachments.append({
+                "platform": "telegram",
+                "id": str(item.get("file_id", "")),
+                "file_id": str(item.get("file_id", "")),
+                "name": str(item.get("file_name") or key),
+                "mime_type": mime_type,
+                "size": _int_value(item.get("file_size"), 0),
+                "kind": "audio" if key in {"voice", "audio"} else _kind_from_mime(mime_type),
+            })
+    photos = data.get("photo") or []
+    if isinstance(photos, list) and photos:
+        item = max((photo for photo in photos if isinstance(photo, dict)), key=lambda photo: _int_value(photo.get("file_size"), 0), default={})
+        if item:
+            attachments.append({
+                "platform": "telegram",
+                "id": str(item.get("file_id", "")),
+                "file_id": str(item.get("file_id", "")),
+                "name": "photo",
+                "mime_type": "image/jpeg",
+                "size": _int_value(item.get("file_size"), 0),
+                "kind": "image",
+            })
+    return attachments
 
 
 def _allow_message(message: BridgeMessage, config: BridgeConfig) -> tuple[bool, str]:
