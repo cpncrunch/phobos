@@ -331,9 +331,17 @@ def normalize_bridge_text(text: str, config: BridgeConfig, *, bot_user_id: str |
     mentioned = False
     stripped = original
     if bot_user_id:
-        pattern = re.compile(rf"^<@!?{re.escape(str(bot_user_id))}>[:,]?\s*")
-        stripped, count = pattern.subn("", stripped, count=1)
-        mentioned = count > 0
+        pattern = re.compile(rf"<@!?{re.escape(str(bot_user_id))}>[:,]?\s*")
+        match = pattern.search(original)
+        if match:
+            mentioned = True
+            after = original[match.end() :].strip()
+            before = original[: match.start()].strip()
+            # Discord users often type "hey @Phobos /status" or put the mention
+            # at the end of a sentence. Treat the bot's own mention as the
+            # trigger wherever Discord places it, preferring the text after the
+            # mention when present and falling back to the text before it.
+            stripped = after or before
     prefixed = False
     if config.command_prefix:
         if stripped.startswith(config.command_prefix):

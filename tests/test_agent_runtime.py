@@ -664,6 +664,27 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(mentioned.status, "handled")
                 self.assertIn("Available tools", mentioned.response)
 
+                inline_mention = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="hey <@BOT1> /status", channel_id="C1", user_id="U1"),
+                    config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(inline_mention.status, "handled")
+                self.assertEqual(inline_mention.reason, "mentioned")
+                self.assertEqual(inline_mention.normalized_text, "/status")
+                self.assertIn('"safety_mode": "non_destructive"', inline_mention.response)
+
+                trailing_mention = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="/tools <@BOT1>", channel_id="C1", user_id="U2"),
+                    mention_config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(trailing_mention.status, "handled")
+                self.assertEqual(trailing_mention.normalized_text, "/tools")
+                self.assertIn("Available tools", trailing_mention.response)
+
                 private_message = handle_bridge_message(
                     runtime,
                     BridgeMessage(platform="telegram", text="/status", channel_id="PRIVATE1", user_id="U3", is_private=True),
