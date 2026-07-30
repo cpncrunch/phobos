@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .agent_config import AgentAppConfig
 from .agent_bridges import BridgeConfig, BridgeMessage, bridge_doctor, handle_bridge_message, run_bridge
@@ -16,6 +18,74 @@ from .models import EngagementROE
 
 
 DEFAULT_DB = "data/phobos-agent.db"
+_SAFE_SYSTEMD_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,96}$")
+_SAFE_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}\$?$")
+_SAFE_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_SAFE_ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9._/@+-]+$")
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _validate_hostname(value: str) -> str:
+    hostname = str(value).strip().rstrip(".")
+    if not hostname or len(hostname) > 253 or any(ch.isspace() or ord(ch) < 32 for ch in hostname) or "/" in hostname:
+        raise SystemExit("--domain must be a single hostname")
+    labels = hostname.split(".")
+    if any(not _HOST_LABEL_RE.match(label) for label in labels):
+        raise SystemExit("--domain must contain only DNS hostname labels")
+    return hostname
+
+
+def _validate_systemd_name(value: str) -> str:
+    service_name = str(value).strip()
+    if not _SAFE_SYSTEMD_NAME_RE.match(service_name) or service_name.startswith("-") or service_name in {".", ".."}:
+        raise SystemExit("--service-name may contain only letters, numbers, '.', '_', '@', and '-' and must not start with '-'")
+    return service_name
+
+
+def _validate_user(value: str) -> str:
+    user = str(value).strip()
+    if not _SAFE_USER_RE.match(user):
+        raise SystemExit("--user must be a simple local service account name")
+    return user
+
+
+def _validate_env_name(value: str) -> str:
+    env_name = str(value).strip()
+    if not _SAFE_ENV_RE.match(env_name):
+        raise SystemExit("--token-env must be a shell-safe environment variable name")
+    return env_name
+
+
+def _validate_install_dir(value: str) -> str:
+    install_dir = str(value).strip().rstrip("/") or "/opt/phobos-agent"
+    if not _SAFE_ABS_PATH_RE.match(install_dir) or "//" in install_dir:
+        raise SystemExit("--install-dir must be an absolute path without whitespace or shell metacharacters")
+    return install_dir
+
+
+def _validate_port(value: int) -> int:
+    port = int(value)
+    if port < 1 or port > 65535:
+        raise SystemExit("--port must be between 1 and 65535")
+    return port
+
+
+def _validate_http_url(value: str, flag: str, *, allow_wildcard: bool = False, origin_only: bool = False) -> str:
+    url = str(value).strip()
+    if allow_wildcard and url == "*":
+        return url
+    if not url or any(ch.isspace() or ord(ch) < 32 for ch in url):
+        raise SystemExit(f"{flag} must be an http(s) URL without whitespace")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        raise SystemExit(f"{flag} must be an http(s) URL without credentials")
+    if parsed.query or parsed.fragment:
+        raise SystemExit(f"{flag} must not include query strings or fragments")
+    if origin_only and parsed.path not in {"", "/"}:
+        raise SystemExit(f"{flag} must be an origin only, for example https://ui.example.com")
+    if origin_only:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url.rstrip("/")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -504,18 +574,18 @@ if __name__ == "__main__":
 
 def _write_deploy_kit(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser()
+    domain = _validate_hostname(args.domain)
+    service_name = _validate_systemd_name(args.service_name or "phobos-agent")
+    user = _validate_user(args.user or "phobos")
+    install_dir = _validate_install_dir(args.install_dir or "/opt/phobos-agent")
+    port = _validate_port(args.port)
+    token_env = _validate_env_name(args.token_env or "PHOBOS_GATEWAY_TOKEN")
+    origins = [_validate_http_url(origin, "--allow-origin", allow_wildcard=True, origin_only=True) for origin in (args.allow_origin or [])]
+    if not origins:
+        origins = [f"https://{domain}"]
+    agent_url = _validate_http_url(str(args.agent_url or f"https://{domain}"), "--agent-url")
     out.mkdir(parents=True, exist_ok=True)
-    domain = str(args.domain).strip()
-    if not domain or any(ch.isspace() for ch in domain):
-        raise SystemExit("--domain must be a single hostname")
-    service_name = str(args.service_name).strip() or "phobos-agent"
-    user = str(args.user).strip() or "phobos"
-    install_dir = str(args.install_dir).rstrip("/") or "/opt/phobos-agent"
-    port = int(args.port)
-    token_env = str(args.token_env).strip() or "PHOBOS_GATEWAY_TOKEN"
-    origins = list(args.allow_origin or []) or [f"https://{domain}"]
     origin_flags = " ".join(f"--allow-origin {origin}" for origin in origins)
-    agent_url = str(args.agent_url or f"https://{domain}")
     files: dict[str, str] = {}
     files[f"{service_name}.service"] = f"""[Unit]
 Description=Phobos Agent authenticated gateway
@@ -607,5 +677,5 @@ This kit keeps Phobos local-first while allowing an authenticated browser UI to 
         if path.suffix == ".sh":
             path.chmod(0o755)
         written.append(str(path))
-    print(json.dumps({"status": "written", "dir": str(out), "files": written, "token_value_written": False, "agent_url": agent_url}, indent=2))
+    print(json.dumps({"status": "written", "dir": str(out), "files": written, "token_value_written": False, "auth_required": True, "bind_host": "127.0.0.1", "agent_url": agent_url, "allow_origins": origins}, indent=2))
     return 0

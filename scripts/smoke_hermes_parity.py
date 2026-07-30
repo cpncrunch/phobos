@@ -640,6 +640,69 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         ui_client_stdout = run_cmd("ui-client", [sys.executable, "-m", "phobos_agent.agent_cli", "ui-client", "--out", str(output / "phobos-remote-ui.html"), "--agent-url", "https://phobos-vps.example"])
+        deploy_kit_dir = root / "deploy-kit"
+        deploy_kit_stdout = run_cmd(
+            "deploy-kit",
+            [
+                sys.executable,
+                "-m",
+                "phobos_agent.agent_cli",
+                "deploy-kit",
+                "--out",
+                str(deploy_kit_dir),
+                "--domain",
+                "phobos-vps.example",
+                "--agent-url",
+                "https://phobos-vps.example",
+                "--allow-origin",
+                "https://ui.example",
+                "--token-env",
+                "PHOBOS_SMOKE_GATEWAY_TOKEN",
+            ],
+        )
+        deploy_kit = json.loads(deploy_kit_stdout)
+        bad_deploy_kit_dir = root / "bad-deploy-kit"
+        bad_deploy_kit = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "phobos_agent.agent_cli",
+                "deploy-kit",
+                "--out",
+                str(bad_deploy_kit_dir),
+                "--domain",
+                "phobos-vps.example",
+                "--token-env",
+                "BAD-NAME;--unsafe-no-auth",
+            ],
+            cwd=REPO,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        write("deploy-kit-invalid.stdout.txt", bad_deploy_kit.stdout)
+        write("deploy-kit-invalid.stderr.txt", bad_deploy_kit.stderr)
+        deploy_service = (deploy_kit_dir / "phobos-agent.service").read_text(encoding="utf-8")
+        deploy_env = (deploy_kit_dir / "phobos-agent.env.template").read_text(encoding="utf-8")
+        deploy_ui = (deploy_kit_dir / "phobos-remote-ui.html").read_text(encoding="utf-8")
+        deploy_readme = (deploy_kit_dir / "README.md").read_text(encoding="utf-8")
+        checks["deploy_kit_ok"] = (
+            deploy_kit.get("status") == "written"
+            and deploy_kit.get("auth_required") is True
+            and deploy_kit.get("bind_host") == "127.0.0.1"
+            and deploy_kit.get("token_value_written") is False
+            and "--host 127.0.0.1" in deploy_service
+            and "--token-env PHOBOS_SMOKE_GATEWAY_TOKEN" in deploy_service
+            and "--allow-origin https://ui.example" in deploy_service
+            and "PHOBOS_SMOKE_GATEWAY_TOKEN=REPLACE_WITH_LONG_RANDOM_SECRET" in deploy_env
+            and "smoke-gateway-token" not in deploy_service + deploy_env + deploy_ui + deploy_readme
+            and "Phobos Agent Remote Client" in deploy_ui
+            and "Authorization: Bearer &lt;token&gt;</code>" in deploy_ui
+            and "not a multi-user RBAC console" in deploy_readme
+            and bad_deploy_kit.returncode != 0
+            and not bad_deploy_kit_dir.exists()
+        )
         remote_gateway = None
         try:
             try:

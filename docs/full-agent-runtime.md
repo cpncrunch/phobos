@@ -26,7 +26,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
-- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, timelines, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
+- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, timelines, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default while raw runtime output is retained in local session/audit state.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
@@ -599,6 +599,8 @@ phobos-agent ui-client \
 
 # Generate a deploy kit with static UI, systemd unit, nginx reverse-proxy stub,
 # .env.example, and operator README. This writes files; it does not install them.
+# Inputs are validated as simple hostnames/URLs/service identifiers before any
+# templates are written, and only token env-var names/placeholders are emitted.
 phobos-agent deploy-kit \
   --out phobos-deploy-kit \
   --domain phobos-vps.example \
@@ -635,7 +637,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 36 tests
+Ran 37 tests
 OK
 ```
 
@@ -693,11 +695,12 @@ bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
 granular_guardrail_ui_ok=True
+deploy_kit_ok=True
 remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=177
+artifact_count=189
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -741,6 +744,8 @@ config-init.stdout.txt
 context.txt
 delegation.json
 delegations.json
+deploy-kit.stdout.txt
+deploy-kit-invalid.stderr.txt
 db-seal.stdout.txt
 db-unseal.stdout.txt
 db-unseal-recall.stdout.txt

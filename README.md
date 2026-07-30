@@ -12,7 +12,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
 - **Finding Markdown exporter + QA review** — renders confirmed finding JSON into report-ready Markdown and reviews stored finding records for blocking/advisory evidence gaps before operator/client delivery.
-- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
+- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
 
@@ -452,6 +452,8 @@ phobos-agent ui-client \
 
 # Generate a deploy kit with static UI, systemd unit, nginx reverse-proxy stub,
 # .env.example, and operator README. This writes files; it does not install them.
+# Inputs are validated as simple hostnames/URLs/service identifiers before any
+# templates are written, and only token env-var names/placeholders are emitted.
 phobos-agent deploy-kit \
   --out phobos-deploy-kit \
   --domain phobos-vps.example \
@@ -536,7 +538,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 36 tests
+Ran 37 tests
 OK
 ```
 
@@ -588,11 +590,12 @@ bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
 granular_guardrail_ui_ok=True
+deploy_kit_ok=True
 remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=177
+artifact_count=189
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
