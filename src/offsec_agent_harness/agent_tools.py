@@ -153,7 +153,7 @@ class OffSecToolRegistry:
         self.register_tool("export_finding", self.export_finding, _spec("export_finding", "Report-ready finding Markdown exporter for a finding JSON file.", {"finding_file": _string("Finding JSON path."), "out": _string("Optional output path.")}))
         self.register_tool("nmap_scan", self.nmap_scan, _spec("nmap_scan", "ROE-gated nmap-style service enumeration wrapper with structured parsing and evidence artifacts.", {"target": _string("In-scope host/IP/CIDR."), "ports": _string("Optional comma/range ports, e.g. 80,443,8000-8010."), "profile": _string("safe|version|quick; default version."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["target"]))
         self.register_tool("httpx_probe", self.httpx_probe, _spec("httpx_probe", "ROE-gated httpx-style HTTP probing wrapper with JSON/plaintext parsing and evidence artifacts.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
-        self.register_tool("nuclei_scan", self.nuclei_scan, _spec("nuclei_scan", "ROE-gated nuclei wrapper using safe default exclusions for intrusive/destructive/dos/fuzz templates.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "rate_limit": {"type": "integer"}, "stdout": _string("Optional captured JSONL/plain output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
+        self.register_tool("nuclei_scan", self.nuclei_scan, _spec("nuclei_scan", "ROE-gated nuclei wrapper. Real execution requires an explicit safe template path; parser/dry-run paths remain available without nuclei installed.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "templates": _string("Template file/directory for execution; required when execute=true."), "template": _string("Alias for templates."), "rate_limit": {"type": "integer"}, "stdout": _string("Optional captured JSONL/plain output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
         self.register_tool("ffuf_scan", self.ffuf_scan, _spec("ffuf_scan", "ROE-gated ffuf-style content discovery wrapper with conservative rate limits and structured evidence.", {"url": _string("In-scope URL containing FUZZ or base URL where /FUZZ is appended."), "wordlist": _string("Wordlist path required for execution."), "rate": {"type": "integer"}, "stdout": _string("Optional captured JSON output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["url"]))
         self.register_tool("list_tool_runs", self.list_tool_runs, _spec("list_tool_runs", "List structured wrapper runs and their parsed evidence artifacts.", {"limit": {"type": "integer"}, "tool_name": _string("Optional wrapper tool name filter.")}, []))
         self.register_tool("get_tool_run", self.get_tool_run, _spec("get_tool_run", "Get one structured wrapper run by id.", {"id": {"type": "integer"}}, ["id"]))
@@ -436,8 +436,11 @@ class OffSecToolRegistry:
         if not target:
             return ToolResult("error", "url or target is required.")
         rate_limit = max(1, min(25, int(args.get("rate_limit") or args.get("rate") or 5)))
-        command = _build_nuclei_command(target, rate_limit)
-        return self._structured_tool_run(args, "nuclei_scan", target, command, "vulnerability-scan", str(args.get("purpose") or "Structured nuclei validation with intrusive templates excluded."), _parse_nuclei_output)
+        templates = str(args.get("templates") or args.get("template") or "").strip()
+        if args.get("execute") and not templates:
+            return ToolResult("error", "templates/template is required when execute=true for nuclei_scan; use stdout/input_file for parser-only imports.")
+        command = _build_nuclei_command(target, rate_limit, templates)
+        return self._structured_tool_run(args, "nuclei_scan", target, command, "vulnerability-scan", str(args.get("purpose") or "Structured nuclei validation with explicit operator-selected templates."), _parse_nuclei_output)
 
     def ffuf_scan(self, args: dict[str, Any]) -> ToolResult:
         target = _normalize_url(str(args.get("url") or args.get("target") or "").strip())
@@ -1376,10 +1379,16 @@ def _build_httpx_command(url: str) -> str:
     return " ".join(shlex.quote(part) for part in ["httpx", "-json", "-status-code", "-title", "-tech-detect", "-follow-redirects", "-u", url])
 
 
-def _build_nuclei_command(url: str, rate_limit: int) -> str:
+def _build_nuclei_command(url: str, rate_limit: int, templates: str = "") -> str:
     # Keep prohibited words such as DoS/destructive out of the shell command text
     # itself so the ROE guardrail does not false-positive on a safety exclusion.
-    args = ["nuclei", "-jsonl", "-silent", "-u", url, "-rl", str(rate_limit), "-severity", "info,low,medium,high,critical", "-etags", "intrusive,fuzz"]
+    # Real execution requires an explicit operator-selected template path; this
+    # prevents accidental broad default-template runs in smoke/VPS contexts.
+    args = ["nuclei", "-jsonl", "-silent", "-duc", "-u", url, "-rl", str(rate_limit)]
+    if templates:
+        args.extend(["-t", templates])
+    else:
+        args.extend(["-severity", "info,low,medium,high,critical", "-etags", "intrusive,fuzz"])
     return " ".join(shlex.quote(part) for part in args)
 
 

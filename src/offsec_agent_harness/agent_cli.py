@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from .agent_config import AgentAppConfig
-from .agent_bridges import BridgeConfig, BridgeMessage, handle_bridge_message, run_bridge
+from .agent_bridges import BridgeConfig, BridgeMessage, bridge_doctor, handle_bridge_message, run_bridge
 from .agent_crypto import MAGIC as SEALED_MAGIC, seal_bytes, unseal_bytes
 from .agent_gateway import AgentGateway, remote_client_html
 from .agent_runtime import AgentRuntimeConfig, OffSecAgentRuntime
@@ -118,6 +118,21 @@ def build_parser() -> argparse.ArgumentParser:
     ui_client = sub.add_parser("ui-client", help="Write a standalone browser UI that can connect to a local or VPS-hosted Phobos gateway")
     ui_client.add_argument("--out", default="phobos-remote-ui.html")
     ui_client.add_argument("--agent-url", default="", help="Optional default gateway URL to prefill, e.g. https://agent.example.com")
+
+    bridge_doctor_parser = sub.add_parser("bridge-doctor", help="Check live bridge token/auth readiness without sending messages")
+    bridge_doctor_parser.add_argument("--platform", action="append", choices=["all", "discord", "slack", "telegram"], default=[], help="Platform to check; repeatable; default all")
+    bridge_doctor_parser.add_argument("--timeout", type=float, default=15.0, help="Per-platform auth-check timeout in seconds")
+
+    deploy = sub.add_parser("deploy-kit", help="Write systemd/nginx/env/firewall templates for a token-authenticated VPS deployment")
+    deploy.add_argument("--out", required=True, help="Output directory for deployment templates")
+    deploy.add_argument("--domain", required=True, help="Public HTTPS hostname, e.g. phobos.example.com")
+    deploy.add_argument("--user", default="phobos", help="Service user on the VPS")
+    deploy.add_argument("--install-dir", default="/opt/phobos-agent", help="Project checkout/install directory on the VPS")
+    deploy.add_argument("--service-name", default="phobos-agent", help="systemd service name")
+    deploy.add_argument("--port", type=int, default=8765, help="Local gateway port behind reverse proxy")
+    deploy.add_argument("--token-env", default="PHOBOS_GATEWAY_TOKEN", help="Environment variable name used by the service for bearer auth")
+    deploy.add_argument("--allow-origin", action="append", default=[], help="Allowed browser UI origin; repeatable; defaults to https://<domain>")
+    deploy.add_argument("--agent-url", help="URL prefilled in generated browser client; defaults to https://<domain>")
 
     discord = sub.add_parser("discord", help="Run a Discord bot bridge for an allowlisted channel/thread or DM")
     discord.add_argument("--engagement", required=True)
@@ -256,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         out.write_text(remote_client_html(default_base_url=args.agent_url), encoding="utf-8")
         print(json.dumps({"status": "written", "ui": str(out), "agent_url_prefilled": bool(args.agent_url)}, indent=2))
         return 0
+    if args.subcommand == "bridge-doctor":
+        result = bridge_doctor(args.platform or None, timeout=float(args.timeout))
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 2
+    if args.subcommand == "deploy-kit":
+        return _write_deploy_kit(args)
 
     if args.subcommand == "init":
         roe = EngagementROE.load(args.engagement)
@@ -463,3 +484,112 @@ def _coerce(value: str) -> object:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _write_deploy_kit(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    domain = str(args.domain).strip()
+    if not domain or any(ch.isspace() for ch in domain):
+        raise SystemExit("--domain must be a single hostname")
+    service_name = str(args.service_name).strip() or "phobos-agent"
+    user = str(args.user).strip() or "phobos"
+    install_dir = str(args.install_dir).rstrip("/") or "/opt/phobos-agent"
+    port = int(args.port)
+    token_env = str(args.token_env).strip() or "PHOBOS_GATEWAY_TOKEN"
+    origins = list(args.allow_origin or []) or [f"https://{domain}"]
+    origin_flags = " ".join(f"--allow-origin {origin}" for origin in origins)
+    agent_url = str(args.agent_url or f"https://{domain}")
+    files: dict[str, str] = {}
+    files[f"{service_name}.service"] = f"""[Unit]
+Description=Phobos Agent authenticated gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+WorkingDirectory={install_dir}
+EnvironmentFile=/etc/phobos-agent/{service_name}.env
+ExecStart={install_dir}/.venv/bin/phobos-agent --db /var/lib/phobos-agent/phobos-agent.db --config /etc/phobos-agent/agent.config.json serve --engagement /etc/phobos-agent/engagement.json --host 127.0.0.1 --port {port} --token-env {token_env} {origin_flags}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/phobos-agent /var/log/phobos-agent
+
+[Install]
+WantedBy=multi-user.target
+"""
+    files["nginx-phobos-agent.conf"] = f"""server {{
+    listen 443 ssl http2;
+    server_name {domain};
+
+    # Install certificates with certbot/acme.sh or your existing TLS workflow.
+    ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+
+    location / {{
+        proxy_pass http://127.0.0.1:{port};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }}
+}}
+
+server {{
+    listen 80;
+    server_name {domain};
+    return 301 https://$host$request_uri;
+}}
+"""
+    files[f"{service_name}.env.template"] = f"""# Copy to /etc/phobos-agent/{service_name}.env with mode 0600 and set a long random secret.
+{token_env}=REPLACE_WITH_LONG_RANDOM_SECRET
+"""
+    files["ufw-commands.sh"] = f"""#!/usr/bin/env bash
+set -euo pipefail
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw deny {port}/tcp || true
+ufw status verbose
+"""
+    files["ssh-tunnel-example.sh"] = f"""#!/usr/bin/env bash
+set -euo pipefail
+# Alternative to public reverse-proxy access: keep Phobos bound to 127.0.0.1 on the VPS
+# and tunnel the gateway to your workstation.
+ssh -L {port}:127.0.0.1:{port} {user}@{domain}
+"""
+    files["phobos-remote-ui.html"] = remote_client_html(default_base_url=agent_url)
+    files["README.md"] = f"""# Phobos Agent VPS Deployment Kit
+
+This kit keeps Phobos local-first while allowing an authenticated browser UI to connect to a VPS-hosted agent.
+
+## Files
+
+- `{service_name}.service` — hardened-ish systemd unit that binds Phobos to `127.0.0.1:{port}` and requires bearer auth from `{token_env}`.
+- `nginx-phobos-agent.conf` — TLS reverse-proxy example for `{domain}`.
+- `{service_name}.env.template` — token env template; replace the placeholder on the VPS, never commit the real value.
+- `ufw-commands.sh` — firewall sketch: expose SSH/HTTP/HTTPS only; deny direct gateway port access.
+- `ssh-tunnel-example.sh` — VPN/SSH-tunnel alternative.
+- `phobos-remote-ui.html` — standalone browser client prefilled with `{agent_url}`.
+
+## Security posture
+
+- Do not expose the stdlib gateway directly to the internet.
+- Keep Phobos bound to `127.0.0.1` behind nginx/Caddy/Traefik or access it over VPN/SSH tunnel.
+- Use HTTPS, a long random `{token_env}`, firewall rules, and least-privilege service user permissions.
+- The UI is single-operator/minimal; it is not a multi-user RBAC console.
+"""
+    written = []
+    for rel, content in files.items():
+        path = out / rel
+        path.write_text(content, encoding="utf-8")
+        if path.suffix == ".sh":
+            path.chmod(0o755)
+        written.append(str(path))
+    print(json.dumps({"status": "written", "dir": str(out), "files": written, "token_value_written": False, "agent_url": agent_url}, indent=2))
+    return 0

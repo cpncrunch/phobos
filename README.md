@@ -276,7 +276,7 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-Current verification: 32 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter and lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 33 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter and lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -293,7 +293,7 @@ This turns the harness into a standalone agent-style application with:
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, and audit log;
-- ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts;
+- ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
 - non-destructive-by-default command execution;
@@ -360,6 +360,15 @@ phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/nmap target=10.10.0.5 ports=80,443 stdout="80/tcp open http nginx"'
 
+# Live wrapper execution requires scanner binaries on PATH. On Ubuntu/Kali:
+#   apt-get install -y nmap ffuf golang-go
+#   GOBIN=/usr/local/bin go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+#   GOBIN=/usr/local/bin go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+# Nuclei execution also requires an explicit safe template file/directory.
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/nuclei url=https://app.example.test templates=./safe-templates/ execute=true rate_limit=1'
+
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/finding-create title="Exposed administrative interface" severity=Medium status=needs-evidence tool_run_ids=1'
@@ -422,6 +431,14 @@ phobos-agent ui-client \
   --out phobos-remote-ui.html \
   --agent-url https://phobos-vps.example
 
+# Generate a deploy kit with static UI, systemd unit, nginx reverse-proxy stub,
+# .env.example, and operator README. This writes files; it does not install them.
+phobos-agent deploy-kit \
+  --out phobos-deploy-kit \
+  --domain phobos-vps.example \
+  --agent-url https://phobos-vps.example \
+  --port 8765
+
 # VPS mode: bind publicly only with a bearer token env var and CORS policy.
 export PHOBOS_GATEWAY_TOKEN='use-a-long-random-secret-from-your-password-manager'
 phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
@@ -469,6 +486,9 @@ phobos-agent --db data/phobos-agent.db unseal-db \
   --passphrase-env PHOBOS_DB_SEAL \
   --overwrite
 
+# Check bridge token/API readiness without sending chat messages.
+phobos-agent bridge-doctor --platform discord --platform slack --platform telegram
+
 # Run a live Discord bridge. Tokens stay in environment variables, not config/Git.
 export PHOBOS_DISCORD_TOKEN='...'
 phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
@@ -476,6 +496,11 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
   --allow-channel <channel-or-thread-id> \
   --allow-user <operator-user-id> \
   --prefix '!phobos'
+
+# Optional live-but-safe local integration smoke. It scans only a local test HTTP
+# server, uses a generated one-request Nuclei template, and never sends bridge
+# messages. Add --require-bridge-tokens only after setting real token env vars.
+python scripts/smoke_live_integrations.py --require-scanners
 ```
 
 See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, approval flow, and current limitations.
@@ -486,7 +511,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 32 tests
+Ran 33 tests
 OK
 ```
 
@@ -538,4 +563,19 @@ db_exists=True
 artifact_count=159
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
+
+Live local integration smoke is available as `scripts/smoke_live_integrations.py`. It verifies scanner binary resolution and real wrapper execution against only a temporary `127.0.0.1` HTTP server; it uses a generated one-request Nuclei template and never sends chat messages. Current local run with scanner execution required produced:
+
+```text
+PHOBOS LIVE INTEGRATION SMOKE SUMMARY
+bridge_doctor_ran=True
+live_bridge_auth_ready=missing-or-error
+live_bridge_no_message_send=True
+scanner_binaries_present=True
+scanner_wrapper_live_execution_ok=True
+scanner_wrapper_live_artifacts_ok=True
+safety_posture_preserved=True
+```
+
+`live_bridge_auth_ready=missing-or-error` reflects this machine's current environment: Discord/Slack/Telegram token env vars were not set during verification. Re-run with `--require-bridge-tokens` after setting `PHOBOS_DISCORD_TOKEN`, `PHOBOS_SLACK_BOT_TOKEN`, `PHOBOS_SLACK_APP_TOKEN`, and/or `PHOBOS_TELEGRAM_TOKEN` to make live platform auth mandatory.
 

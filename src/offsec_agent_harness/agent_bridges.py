@@ -370,6 +370,92 @@ def chunk_text(text: str, limit: int = 1800) -> list[str]:
     return chunks
 
 
+def bridge_doctor(platforms: list[str] | tuple[str, ...] | None = None, *, timeout: float = 15.0) -> dict[str, Any]:
+    """Check live bridge token/auth readiness without joining streams or sending messages.
+
+    This intentionally performs only no-message auth/readiness calls. It never
+    returns token values or websocket URLs. A platform with missing env vars is
+    reported as ``missing`` rather than raising, so it is safe for CI/smoke use.
+    """
+    requested = [str(item).lower() for item in (platforms or ("discord", "slack", "telegram"))]
+    if "all" in requested:
+        requested = ["discord", "slack", "telegram"]
+    checks: list[dict[str, Any]] = []
+    for platform in requested:
+        if platform == "discord":
+            checks.append(_bridge_doctor_discord(timeout))
+        elif platform == "slack":
+            checks.append(_bridge_doctor_slack(timeout))
+        elif platform == "telegram":
+            checks.append(_bridge_doctor_telegram(timeout))
+        else:
+            checks.append({"platform": platform, "status": "unsupported", "ok": False})
+    ok = all(item.get("ok") for item in checks) if checks else False
+    return {"status": "ok" if ok else "attention", "ok": ok, "message_sending": False, "checks": checks}
+
+
+def _bridge_doctor_discord(timeout: float) -> dict[str, Any]:
+    env_name = str(BRIDGE_DEFAULTS["discord"].get("token_env") or "PHOBOS_DISCORD_TOKEN")
+    token = os.environ.get(env_name, "")
+    base = {"platform": "discord", "env": env_name, "message_sending": False}
+    if not token:
+        return base | {"status": "missing", "ok": False, "reason": "token env var is not set"}
+    try:
+        me = _http_json("GET", "https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bot {token}"}, timeout=timeout)
+        gateway = _http_json("GET", "https://discord.com/api/v10/gateway/bot", headers={"Authorization": f"Bot {token}"}, timeout=timeout)
+        return base | {
+            "status": "ok",
+            "ok": True,
+            "bot_user_id": str(me.get("id", "")),
+            "username_present": bool(me.get("username")),
+            "gateway_url_present": bool(gateway.get("url")),
+            "session_start_limit_present": bool(gateway.get("session_start_limit")),
+        }
+    except Exception as exc:  # pragma: no cover - live network/API boundary
+        return base | {"status": "error", "ok": False, "error": redact_secrets(str(exc))}
+
+
+def _bridge_doctor_slack(timeout: float) -> dict[str, Any]:
+    bot_env = str(BRIDGE_DEFAULTS["slack"].get("bot_token_env") or "PHOBOS_SLACK_BOT_TOKEN")
+    app_env = str(BRIDGE_DEFAULTS["slack"].get("app_token_env") or "PHOBOS_SLACK_APP_TOKEN")
+    bot_token = os.environ.get(bot_env, "")
+    app_token = os.environ.get(app_env, "")
+    base = {"platform": "slack", "bot_token_env": bot_env, "app_token_env": app_env, "message_sending": False}
+    if not bot_token or not app_token:
+        missing = [name for name, value in ((bot_env, bot_token), (app_env, app_token)) if not value]
+        return base | {"status": "missing", "ok": False, "missing_env": missing}
+    try:
+        auth = _http_json("GET", "https://slack.com/api/auth.test", headers={"Authorization": f"Bearer {bot_token}"}, timeout=timeout)
+        opened = _http_json("POST", "https://slack.com/api/apps.connections.open", payload={}, headers={"Authorization": f"Bearer {app_token}"}, timeout=timeout)
+        ok = bool(auth.get("ok")) and bool(opened.get("ok"))
+        return base | {
+            "status": "ok" if ok else "error",
+            "ok": ok,
+            "team_id": str(auth.get("team_id", "")),
+            "user_id": str(auth.get("user_id", "")),
+            "socket_mode_url_present": bool(opened.get("url")),
+            "auth_error": "" if auth.get("ok") else str(auth.get("error", "")),
+            "socket_error": "" if opened.get("ok") else str(opened.get("error", "")),
+        }
+    except Exception as exc:  # pragma: no cover - live network/API boundary
+        return base | {"status": "error", "ok": False, "error": redact_secrets(str(exc))}
+
+
+def _bridge_doctor_telegram(timeout: float) -> dict[str, Any]:
+    env_name = str(BRIDGE_DEFAULTS["telegram"].get("token_env") or "PHOBOS_TELEGRAM_TOKEN")
+    token = os.environ.get(env_name, "")
+    base = {"platform": "telegram", "env": env_name, "message_sending": False}
+    if not token:
+        return base | {"status": "missing", "ok": False, "reason": "token env var is not set"}
+    try:
+        me = _http_json("GET", f"https://api.telegram.org/bot{token}/getMe", timeout=timeout)
+        result = me.get("result") or {}
+        ok = bool(me.get("ok"))
+        return base | {"status": "ok" if ok else "error", "ok": ok, "bot_user_id": str(result.get("id", "")), "username_present": bool(result.get("username")), "api_error": "" if ok else str(me.get("description", ""))}
+    except Exception as exc:  # pragma: no cover - live network/API boundary
+        return base | {"status": "error", "ok": False, "error": redact_secrets(str(exc))}
+
+
 def run_bridge(platform: str, runtime: "OffSecAgentRuntime", config: BridgeConfig) -> None:
     platform = platform.lower()
     if platform == "discord":

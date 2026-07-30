@@ -9,7 +9,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`.
-- **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable `tool_runs` records and redacted evidence artifacts.
+- **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable `tool_runs` records and redacted evidence artifacts. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, and Markdown exports for report drafting.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
@@ -80,7 +80,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /cve component=<product> version=<version> catalog=<catalog.json> online=false
 /nmap target=<host> ports=80,443 stdout=<optional-captured-output> execute=false
 /httpx url=<url> stdout=<optional-jsonl-output> execute=false
-/nuclei url=<url> stdout=<optional-jsonl-output> execute=false
+/nuclei url=<url> templates=<safe-template-or-dir> stdout=<optional-jsonl-output> execute=false
 /ffuf url=<url/FUZZ> wordlist=<path> stdout=<optional-json-output> execute=false
 /tool-runs limit=20 tool_name=<optional>
 /tool-run id=<run-id>
@@ -287,7 +287,7 @@ If you want the original conservative behaviour where active scans also require 
 
 ## Structured scanner wrappers and finding lifecycle
 
-The productized runtime includes scanner-style wrapper tools for common pentest enumeration outputs. They are structured tools, not raw remote shells: target-affecting execution is still ROE-gated and requires explicit `execute=true`; parser/demo paths can pass captured `stdout` or `input_file` and do not require the scanner binary to be installed.
+The productized runtime includes scanner-style wrapper tools for common pentest enumeration outputs. They are structured tools, not raw remote shells: target-affecting execution is still ROE-gated and requires explicit `execute=true`; parser/demo paths can pass captured `stdout` or `input_file` and do not require the scanner binary to be installed. Real scanner execution requires the binary on `PATH` (`nmap`, ProjectDiscovery `httpx`, ProjectDiscovery `nuclei`, and/or `ffuf`). `nuclei_scan` additionally requires `templates=`/`template=` when `execute=true`, which prevents accidental execution of the broad default public template set.
 
 ```bash
 # Parse captured nmap-style output into a durable tool run and evidence artifact.
@@ -302,8 +302,20 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
+  --message '/nuclei url=https://app.example.test templates=./safe-templates/ execute=true rate_limit=1'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
   --message '/tool-runs limit=20'
 ```
+
+For a local binary/readiness check that avoids customer targets, run:
+
+```bash
+python scripts/smoke_live_integrations.py --require-scanners
+```
+
+The live smoke creates a temporary local HTTP server, runs the four wrappers only against `127.0.0.1`, generates a one-request Nuclei template, writes artifacts under `demo-phobos-live/`, and checks bridge auth readiness without sending any platform messages. If real bridge token env vars are present and should be mandatory, add `--require-bridge-tokens`.
 
 When a scanner run supports a finding, create and promote a lifecycle record instead of treating every scanner hit as report-ready:
 
@@ -552,6 +564,14 @@ phobos-agent ui-client \
   --out phobos-remote-ui.html \
   --agent-url https://phobos-vps.example
 
+# Generate a deploy kit with static UI, systemd unit, nginx reverse-proxy stub,
+# .env.example, and operator README. This writes files; it does not install them.
+phobos-agent deploy-kit \
+  --out phobos-deploy-kit \
+  --domain phobos-vps.example \
+  --agent-url https://phobos-vps.example \
+  --port 8765
+
 # On the VPS, bind publicly only with a long random token from an env var.
 export PHOBOS_GATEWAY_TOKEN='use-a-long-random-secret-from-your-password-manager'
 phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
@@ -564,6 +584,16 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
 
 `/health` remains unauthenticated so load balancers and operators can confirm liveness, but operational endpoints require `Authorization: Bearer <token>` when a token is configured. Non-local binds refuse to start without `--token-env` unless `--unsafe-no-auth` is supplied; that override is only for isolated throwaway test networks. For real VPS deployments, put the stdlib gateway behind a firewall plus TLS reverse proxy, VPN, or SSH tunnel. Do not expose it directly as a multi-user production web application.
 
+### Bridge doctor
+
+`bridge-doctor` checks platform token/API readiness without connecting long-lived bridge streams or sending chat messages:
+
+```bash
+phobos-agent bridge-doctor --platform discord --platform slack --platform telegram
+```
+
+It reports token env presence and basic auth metadata using redacted output. Missing token env vars are reported as `status: missing`; this is expected on machines where live bridge credentials have not been supplied.
+
 ## Verified smoke coverage
 
 Final verification for the standalone runtime was run from `/root/Documents/Tools/phobos-agent`:
@@ -572,7 +602,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 32 tests
+Ran 33 tests
 OK
 ```
 
@@ -630,6 +660,23 @@ db_exists=True
 artifact_count=159
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
+
+
+
+Live local integration smoke is available as `scripts/smoke_live_integrations.py`. It verifies scanner binary resolution and real wrapper execution against only a temporary `127.0.0.1` HTTP server; it uses a generated one-request Nuclei template and never sends chat messages. Current local run with scanner execution required produced:
+
+```text
+PHOBOS LIVE INTEGRATION SMOKE SUMMARY
+bridge_doctor_ran=True
+live_bridge_auth_ready=missing-or-error
+live_bridge_no_message_send=True
+scanner_binaries_present=True
+scanner_wrapper_live_execution_ok=True
+scanner_wrapper_live_artifacts_ok=True
+safety_posture_preserved=True
+```
+
+`live_bridge_auth_ready=missing-or-error` reflects this machine's current environment: Discord/Slack/Telegram token env vars were not set during verification. Re-run with `--require-bridge-tokens` after setting `PHOBOS_DISCORD_TOKEN`, `PHOBOS_SLACK_BOT_TOKEN`, `PHOBOS_SLACK_APP_TOKEN`, and/or `PHOBOS_TELEGRAM_TOKEN` to make live platform auth mandatory.
 
 Representative smoke outputs are stored under `demo-phobos-parity/output/`:
 

@@ -8,10 +8,11 @@ import time
 import urllib.error
 import urllib.request
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
-from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, OffSecAgentRuntime, chunk_text, discover_skills, handle_bridge_message, load_skill
+from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, OffSecAgentRuntime, bridge_doctor, chunk_text, discover_skills, handle_bridge_message, load_skill
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
 
@@ -780,6 +781,38 @@ PORT    STATE SERVICE VERSION
                 runtime.close()
 
 
+
+    def test_bridge_doctor_sanitizes_live_auth_checks(self):
+        import offsec_agent_harness.agent_bridges as bridges
+
+        def fake_http_json(method, url, *, payload=None, headers=None, timeout=30.0):
+            self.assertTrue(headers or url.startswith("https://api.telegram.org"))
+            if "discord.com/api/v10/users/@me" in url:
+                return {"id": "D-BOT", "username": "phobos"}
+            if "discord.com/api/v10/gateway/bot" in url:
+                return {"url": "wss://gateway.example", "session_start_limit": {"remaining": 100}}
+            if "slack.com/api/auth.test" in url:
+                return {"ok": True, "team_id": "T1", "user_id": "U-BOT"}
+            if "slack.com/api/apps.connections.open" in url:
+                return {"ok": True, "url": "wss://socket-mode-secret.example"}
+            if "api.telegram.org" in url:
+                return {"ok": True, "result": {"id": 42, "username": "phobos_bot"}}
+            raise AssertionError(url)
+
+        env = {
+            "PHOBOS_DISCORD_TOKEN": "discord-secret",
+            "PHOBOS_SLACK_BOT_TOKEN": "slack-bot-secret",
+            "PHOBOS_SLACK_APP_TOKEN": "slack-app-secret",
+            "PHOBOS_TELEGRAM_TOKEN": "telegram-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(bridges, "_http_json", fake_http_json):
+            result = bridge_doctor(["discord", "slack", "telegram"])
+        self.assertTrue(result["ok"])
+        serialized = json.dumps(result)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("socket-mode-secret", serialized)
+        self.assertTrue(all(item["message_sending"] is False for item in result["checks"]))
+
 class AgentCliTests(unittest.TestCase):
     def test_phobos_agent_cli_once_and_tools(self):
         env = os.environ.copy()
@@ -826,6 +859,21 @@ class AgentCliTests(unittest.TestCase):
             self.assertTrue(ui_client.exists())
             self.assertIn("Phobos Agent Remote Client", ui_client.read_text(encoding="utf-8"))
             self.assertIn("https://agent.example.test", ui_client.read_text(encoding="utf-8"))
+
+            deploy_dir = tmp_path / "deploy-kit"
+            deploy = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "deploy-kit", "--out", str(deploy_dir), "--domain", "phobos.example.test", "--allow-origin", "https://ui.example.test",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(deploy.returncode, 0, deploy.stderr)
+            deploy_json = json.loads(deploy.stdout)
+            self.assertFalse(deploy_json["token_value_written"])
+            self.assertTrue((deploy_dir / "phobos-agent.service").exists())
+            self.assertTrue((deploy_dir / "nginx-phobos-agent.conf").exists())
+            deploy_text = "\n".join(path.read_text(encoding="utf-8") for path in deploy_dir.iterdir() if path.is_file())
+            self.assertIn("--token-env PHOBOS_GATEWAY_TOKEN", deploy_text)
+            self.assertIn("127.0.0.1", deploy_text)
+            self.assertIn("phobos.example.test", deploy_text)
+            self.assertNotIn("use-a-long-random-secret", deploy_text)
 
             auth_env = dict(env)
             auth_env["PHOBOS_DISCORD_TOKEN"] = "discord-secret-value"
