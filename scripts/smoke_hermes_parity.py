@@ -1403,8 +1403,21 @@ def main(argv: list[str] | None = None) -> int:
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
+        invalid_gateway_expected = {
+            "/timeline?limit=not-an-int": "limit must be an integer",
+            "/timeline?include_audit=maybe": "include_audit must be a boolean",
+            "/manifest?max_bytes=not-an-int": "max_bytes must be an integer",
+            "/manifest?include_agent=perhaps": "include_agent must be a boolean",
+            "/manifest-verify?path=smoke-manifest.json&detect_new=sometimes": "detect_new must be a boolean",
+            f"/finding-bundle?id={finding_id}&max_bytes=not-an-int": "max_bytes must be an integer",
+            "/task?id=not-an-int": "id must be an integer",
+            "/tool-run?run_id=not-an-int": "id must be an integer",
+            "/media-detail?media_id=not-an-int": "id must be an integer",
+            "/ref?kind=artifact&id=not-an-int": "id must be an integer",
+            "/ref?ref=artifact:agent/preflight/report.md&max_bytes=not-an-int": "max_bytes must be an integer",
+        }
         invalid_gateway_queries: dict[str, dict[str, object]] = {}
-        for route in ["/timeline?limit=not-an-int", "/manifest?max_bytes=not-an-int", f"/finding-bundle?id={finding_id}&max_bytes=not-an-int"]:
+        for route in invalid_gateway_expected:
             try:
                 with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                     invalid_gateway_queries[route] = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
@@ -1504,9 +1517,10 @@ def main(argv: list[str] | None = None) -> int:
         checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and guardrail_route_data.get("no_target_activity") is True and guardrail_route_data.get("readiness") == "ready" and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(guardrail_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         invalid_gateway_blob = json.dumps(invalid_gateway_queries)
         invalid_gateway_ok = True
-        for item in invalid_gateway_queries.values():
+        for route, item in invalid_gateway_queries.items():
             payload_obj = item.get("payload")
-            if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or "must be an integer" not in str(payload_obj.get("error", "")):
+            expected_error = invalid_gateway_expected.get(route)
+            if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or payload_obj.get("error") != expected_error:
                 invalid_gateway_ok = False
         checks["gateway_invalid_query_handling_ok"] = invalid_gateway_ok and "Traceback" not in invalid_gateway_blob
         checks["gateway_audit_detail_route_ok"] = audit_route_payload.get("status") == "ok" and audit_route_data.get("no_target_activity") is True and "storage-audit-secret" not in json.dumps(audit_route_payload) and "storage-audit-bearer" not in json.dumps(audit_route_payload)

@@ -152,7 +152,13 @@ class AgentGateway:
                         if not memory_id and not key:
                             _write_json(self, {"error": "id or key is required"}, status=400)
                             return
-                        args = {"id": memory_id} if memory_id else {"key": key}
+                        if memory_id:
+                            parsed_id = _query_required_int(self, query, "id", "memory_id", label="id")
+                            if parsed_id is None:
+                                return
+                            args = {"id": parsed_id}
+                        else:
+                            args = {"key": key}
                         _write_json(self, runtime.registry.run("get_memory", args).to_dict())
                         return
                     if path == "/approvals":
@@ -168,9 +174,8 @@ class AgentGateway:
                         return
                     if path in {"/approval", "/approval-detail"}:
                         query = parse_qs(parsed.query)
-                        approval_id = (query.get("id") or query.get("approval_id") or [""])[0]
-                        if not approval_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        approval_id = _query_required_int(self, query, "id", "approval_id", label="id")
+                        if approval_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_approval", {"id": approval_id}).to_dict())
                         return
@@ -183,9 +188,8 @@ class AgentGateway:
                         return
                     if path in {"/audit-detail", "/audit-event"}:
                         query = parse_qs(parsed.query)
-                        audit_id = (query.get("id") or query.get("audit_id") or [""])[0]
-                        if not audit_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        audit_id = _query_required_int(self, query, "id", "audit_id", label="id")
+                        if audit_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_audit", {"id": audit_id}).to_dict())
                         return
@@ -198,7 +202,10 @@ class AgentGateway:
                         if (query.get("category") or [""])[0]:
                             args["category"] = (query.get("category") or [""])[0]
                         if (query.get("include_audit") or [""])[0]:
-                            args["include_audit"] = (query.get("include_audit") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                            include_audit = _query_bool(self, query, "include_audit")
+                            if include_audit is None:
+                                return
+                            args["include_audit"] = include_audit
                         _write_json(self, runtime.registry.run("evidence_timeline", args).to_dict())
                         return
                     if path in {"/manifest", "/evidence-manifest"}:
@@ -213,7 +220,10 @@ class AgentGateway:
                                 return
                             args["max_bytes"] = max_bytes
                         if (query.get("include_agent") or [""])[0]:
-                            args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                            include_agent = _query_bool(self, query, "include_agent")
+                            if include_agent is None:
+                                return
+                            args["include_agent"] = include_agent
                         _write_json(self, runtime.registry.run("evidence_manifest", args).to_dict())
                         return
                     if path in {"/manifest-verify", "/evidence-manifest-verify"}:
@@ -233,7 +243,10 @@ class AgentGateway:
                                 return
                             args["max_bytes"] = max_bytes
                         if (query.get("detect_new") or [""])[0]:
-                            args["detect_new"] = (query.get("detect_new") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                            detect_new = _query_bool(self, query, "detect_new")
+                            if detect_new is None:
+                                return
+                            args["detect_new"] = detect_new
                         _write_json(self, runtime.registry.run("evidence_manifest_verify", args).to_dict())
                         return
                     if path in {"/secret-scan", "/evidence-secret-scan"}:
@@ -250,7 +263,10 @@ class AgentGateway:
                                 return
                             args["max_bytes"] = max_bytes
                         if (query.get("include_agent") or [""])[0]:
-                            args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                            include_agent = _query_bool(self, query, "include_agent")
+                            if include_agent is None:
+                                return
+                            args["include_agent"] = include_agent
                         _write_json(self, runtime.registry.run("evidence_secret_scan", args).to_dict())
                         return
                     if path in {"/closeout", "/closeout-review"}:
@@ -267,11 +283,17 @@ class AgentGateway:
                         if (query.get("kind") or [""])[0]:
                             args["kind"] = (query.get("kind") or [""])[0]
                         if (query.get("id") or [""])[0]:
-                            args["id"] = (query.get("id") or [""])[0]
+                            ref_id = _query_required_int(self, query, "id", label="id")
+                            if ref_id is None:
+                                return
+                            args["id"] = ref_id
                         if (query.get("path") or [""])[0]:
                             args["path"] = (query.get("path") or [""])[0]
                         if (query.get("max_bytes") or [""])[0]:
-                            args["max_bytes"] = (query.get("max_bytes") or ["50000000"])[0]
+                            max_bytes = _query_int(self, query, "max_bytes", 50000000)
+                            if max_bytes is None:
+                                return
+                            args["max_bytes"] = max_bytes
                         if not args:
                             _write_json(self, {"error": "ref or kind+id/path is required"}, status=400)
                             return
@@ -290,9 +312,8 @@ class AgentGateway:
                         return
                     if path in {"/task", "/task-detail"}:
                         query = parse_qs(parsed.query)
-                        task_id = (query.get("id") or query.get("task_id") or [""])[0]
-                        if not task_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        task_id = _query_required_int(self, query, "id", "task_id", label="id")
+                        if task_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_task", {"id": task_id}).to_dict())
                         return
@@ -305,17 +326,15 @@ class AgentGateway:
                         return
                     if path in {"/finding", "/finding-detail"}:
                         query = parse_qs(parsed.query)
-                        finding_id = (query.get("id") or query.get("finding_id") or [""])[0]
-                        if not finding_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        finding_id = _query_required_int(self, query, "id", "finding_id", label="id")
+                        if finding_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_finding", {"id": finding_id}).to_dict())
                         return
                     if path in {"/finding-bundle", "/finding-package"}:
                         query = parse_qs(parsed.query)
-                        finding_id = (query.get("id") or query.get("finding_id") or [""])[0]
-                        if not finding_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        finding_id = _query_required_int(self, query, "id", "finding_id", label="id")
+                        if finding_id is None:
                             return
                         args: dict[str, Any] = {"id": finding_id}
                         if (query.get("out") or [""])[0]:
@@ -339,9 +358,8 @@ class AgentGateway:
                         return
                     if path in {"/tool-run", "/tool-run-detail"}:
                         query = parse_qs(parsed.query)
-                        run_id = (query.get("id") or query.get("run_id") or [""])[0]
-                        if not run_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        run_id = _query_required_int(self, query, "id", "run_id", label="id")
+                        if run_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_tool_run", {"id": run_id}).to_dict())
                         return
@@ -350,9 +368,8 @@ class AgentGateway:
                         return
                     if path in {"/job", "/job-detail"}:
                         query = parse_qs(parsed.query)
-                        job_id = (query.get("id") or query.get("job_id") or [""])[0]
-                        if not job_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        job_id = _query_required_int(self, query, "id", "job_id", label="id")
+                        if job_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_job", {"id": job_id}).to_dict())
                         return
@@ -366,9 +383,8 @@ class AgentGateway:
                         return
                     if path in {"/process", "/process-detail"}:
                         query = parse_qs(parsed.query)
-                        process_id = (query.get("id") or query.get("process_id") or [""])[0]
-                        if not process_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        process_id = _query_required_int(self, query, "id", "process_id", label="id")
+                        if process_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_process", {"id": process_id}).to_dict())
                         return
@@ -380,9 +396,8 @@ class AgentGateway:
                         return
                     if path in {"/delegation", "/delegation-detail"}:
                         query = parse_qs(parsed.query)
-                        delegation_id = (query.get("id") or query.get("delegation_id") or [""])[0]
-                        if not delegation_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        delegation_id = _query_required_int(self, query, "id", "delegation_id", label="id")
+                        if delegation_id is None:
                             return
                         _write_json(self, runtime.registry.run("get_delegation", {"id": delegation_id}).to_dict())
                         return
@@ -391,9 +406,8 @@ class AgentGateway:
                         return
                     if path in {"/media-detail", "/media-artifact"}:
                         query = parse_qs(parsed.query)
-                        media_id = (query.get("id") or query.get("media_id") or [""])[0]
-                        if not media_id:
-                            _write_json(self, {"error": "id is required"}, status=400)
+                        media_id = _query_required_int(self, query, "id", "media_id", label="id")
+                        if media_id is None:
                             return
                         _write_json(self, runtime.registry.run("media_get", {"id": media_id}).to_dict())
                         return
@@ -555,6 +569,14 @@ def _gateway_paths() -> list[str]:
     ]
 
 
+def _query_first(query: dict[str, list[str]], *names: str) -> Any:
+    for name in names:
+        values = query.get(name) or []
+        if values:
+            return values[0]
+    return ""
+
+
 def _query_int(handler: BaseHTTPRequestHandler, query: dict[str, list[str]], name: str, default: int) -> int | None:
     raw = (query.get(name) or [default])[0]
     if raw == "":
@@ -564,6 +586,31 @@ def _query_int(handler: BaseHTTPRequestHandler, query: dict[str, list[str]], nam
     except (TypeError, ValueError):
         _write_json(handler, {"error": f"{name} must be an integer"}, status=400)
         return None
+
+
+def _query_required_int(handler: BaseHTTPRequestHandler, query: dict[str, list[str]], *names: str, label: str = "id") -> int | None:
+    raw = _query_first(query, *names)
+    if raw == "":
+        _write_json(handler, {"error": f"{label} is required"}, status=400)
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _write_json(handler, {"error": f"{label} must be an integer"}, status=400)
+        return None
+
+
+def _query_bool(handler: BaseHTTPRequestHandler, query: dict[str, list[str]], name: str, default: bool = False) -> bool | None:
+    raw = (query.get(name) or [""])[0]
+    if raw == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    _write_json(handler, {"error": f"{name} must be a boolean"}, status=400)
+    return None
 
 
 def remote_client_html(default_base_url: str = "") -> str:

@@ -56,6 +56,37 @@ class AgentRuntimeTests(unittest.TestCase):
         runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(tmp_path / "agent.db"), session_name="unit"))
         return runtime, engagement
 
+    def test_gateway_rejects_invalid_typed_query_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                for route, expected_error in [
+                    ("/task?id=not-an-int", "id must be an integer"),
+                    ("/approval?approval_id=not-an-int", "id must be an integer"),
+                    ("/media-detail?media_id=not-an-int", "id must be an integer"),
+                    ("/timeline?include_audit=maybe", "include_audit must be a boolean"),
+                    ("/manifest?include_agent=perhaps", "include_agent must be a boolean"),
+                    ("/manifest-verify?detect_new=sometimes", "detect_new must be a boolean"),
+                    ("/ref?kind=artifact&id=not-an-int", "id must be an integer"),
+                    ("/ref?ref=artifact:agent/preflight/report.md&max_bytes=not-an-int", "max_bytes must be an integer"),
+                ]:
+                    with self.subTest(route=route):
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5)
+                        self.assertEqual(raised.exception.code, 400)
+                        payload = json.loads(raised.exception.read().decode("utf-8"))
+                        self.assertEqual(payload.get("error"), expected_error)
+                        self.assertNotIn("Traceback", json.dumps(payload))
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
     def test_scope_check_is_read_only_redacted_and_gateway_visible(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
