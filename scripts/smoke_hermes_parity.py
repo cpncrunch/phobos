@@ -157,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
                 "sealed_export",
                 "hindsight_retain",
                 "lcm_compact",
+                "list_memories",
+                "get_memory",
+                "forget_memory",
                 "wait_process",
                 "add_task",
                 "get_task",
@@ -206,6 +209,32 @@ def main(argv: list[str] | None = None) -> int:
         loop_recall = handle("auto-loop-recall", "/recall query=loop-client")
         checks["auto_memory_recall"] = '"mode": "plan_only"' in auto_plan and '"tool": "remember"' in auto_apply and "ACME parity" in recall
         checks["auto_loop_ok"] = "Auto loop completed" in auto_loop and "ACME loop parity" in loop_recall
+        hygiene_memory = runtime.registry.run("remember", {"key": "smoke-forget", "value": "Temporary memory hygiene marker token=supersecret", "tags": "hygiene"})
+        hygiene_id = int(hygiene_memory.data.get("id", 0))
+        memory_list = handle("memory-list", "/memories query=smoke-forget")
+        memory_detail = handle("memory-detail", f"/memory id={hygiene_id}")
+        hygiene_detail_before = runtime.store.get_memory(memory_id=hygiene_id)
+        memory_forget = handle("memory-forget", "/forget key=smoke-forget")
+        memory_after_forget = handle("memory-after-forget", "/recall query=smoke-forget")
+        auto_forget_seed = runtime.registry.run("remember", {"key": "smoke-auto-forget", "value": "Auto forget marker", "tags": "hygiene"})
+        auto_forget = handle("auto-forget", '/auto apply=true prompt="forget memory smoke-auto-forget"')
+        memory_hygiene_payload = {
+            "created": hygiene_memory.to_dict(),
+            "detail_before_forget": hygiene_detail_before,
+            "after_forget": runtime.store.get_memory(memory_id=hygiene_id),
+            "auto_seed": auto_forget_seed.to_dict(),
+            "auto_after_forget": runtime.store.get_memory(key="smoke-auto-forget"),
+        }
+        write("memory-hygiene.json", json.dumps(memory_hygiene_payload, indent=2, sort_keys=True))
+        checks["memory_hygiene_forget_ok"] = (
+            hygiene_memory.status == "ok"
+            and "smoke-forget" in memory_list + memory_detail
+            and "Deleted memory" in memory_forget
+            and "Found 0 memory entries" in memory_after_forget
+            and '"tool": "forget_memory"' in auto_forget
+            and runtime.store.get_memory(key="smoke-auto-forget") is None
+            and "supersecret" not in memory_list + memory_detail + memory_forget + json.dumps(memory_hygiene_payload)
+        )
 
         storage_message_id = runtime.store.append_message(
             runtime.session_id,
@@ -1169,7 +1198,8 @@ def main(argv: list[str] | None = None) -> int:
         job_route = f"/job?id={job_id}"
         task_route = "/task?id=1"
         process_route = f"/process?id={process_id}"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        memory_route = f"/memory?id={storage_memory.data['id']}"
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1241,13 +1271,14 @@ def main(argv: list[str] | None = None) -> int:
         finding_route_payload = gateway_gets.get(finding_route) or {}
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
         task_route_payload = gateway_gets.get(task_route) or {}
+        memory_route_payload = gateway_gets.get(memory_route) or {}
         job_route_payload = gateway_gets.get(job_route) or {}
         process_route_payload = gateway_gets.get(process_route) or {}
         delegation_route_payload = gateway_gets.get(delegation_route) or {}
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(memory_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

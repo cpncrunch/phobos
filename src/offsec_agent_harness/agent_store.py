@@ -491,6 +491,35 @@ class AgentStore:
         ).fetchall()
         return [_memory_row(row) for row in rows]
 
+    def list_memories(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_memory_row(row) for row in rows]
+
+    def get_memory(self, memory_id: int | None = None, key: str | None = None) -> dict[str, Any] | None:
+        row: sqlite3.Row | None
+        if memory_id is not None:
+            row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        else:
+            safe_key = (redact_secrets(key or "") or "").strip()
+            if not safe_key:
+                return None
+            row = self.conn.execute("SELECT * FROM memories WHERE key=?", (safe_key,)).fetchone()
+        return _memory_row(row) if row else None
+
+    def delete_memory(self, memory_id: int | None = None, key: str | None = None) -> dict[str, Any] | None:
+        memory = self.get_memory(memory_id=memory_id, key=key)
+        if not memory:
+            return None
+        if memory_id is not None:
+            self.conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+        else:
+            self.conn.execute("DELETE FROM memories WHERE key=?", (memory["key"],))
+        self.conn.commit()
+        return memory
+
     def create_context_summary(self, session_id: str, source_from: int | None, source_to: int | None, summary: str) -> int:
         cur = self.conn.execute(
             "INSERT INTO context_summaries(session_id, source_from, source_to, summary, created_at) VALUES (?, ?, ?, ?, ?)",

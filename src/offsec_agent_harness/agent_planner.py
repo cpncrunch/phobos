@@ -75,6 +75,10 @@ def plan_agent_actions(prompt: str, *, allow_command_execution: bool = False) ->
     if recall_query:
         calls.append(PlannedToolCall("recall", {"query": recall_query, "limit": 10}, "Operator asked to recall local memory."))
 
+    forget_key = _extract_forget_memory(text)
+    if forget_key:
+        calls.append(PlannedToolCall("forget_memory", {"key": forget_key}, "Operator asked to delete a local memory entry."))
+
     session_query = _extract_session_query(text)
     if session_query:
         calls.append(PlannedToolCall("search_session", {"query": session_query, "limit": 10}, "Operator asked to search session history."))
@@ -153,6 +157,16 @@ def _extract_recall_query(text: str) -> str | None:
     if match:
         return match.group(1).strip().strip('"\'')
     return None
+
+
+def _extract_forget_memory(text: str) -> str | None:
+    match = re.search(r"(?is)\b(?:forget|delete memory|remove memory|purge memory)\s+(?:memory\s+)?(.+)$", text.strip())
+    if not match:
+        return None
+    key = match.group(1).strip().strip('"\'')
+    if not key:
+        return None
+    return _slug_key(key)
 
 
 def _extract_session_query(text: str) -> str | None:

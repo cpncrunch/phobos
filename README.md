@@ -295,7 +295,7 @@ phobos-agent
 This turns the harness into a standalone agent-style application with:
 
 - SQLite-backed sessions and task boards with secret-like chat message/metadata redaction before local storage;
-- local persistent memory and FTS-backed current/cross-session search, with memory keys/values/tags redacted before SQLite writes;
+- local persistent memory and FTS-backed current/cross-session search, with memory list/detail/delete hygiene controls and memory keys/values/tags redacted before SQLite writes;
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context; context summaries/nodes are redacted before storage and node describe/expand operations are scoped to the active session;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, redacted audit log with common Authorization/Cookie/cloud-OAuth/private-key scrubbing, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
@@ -315,7 +315,7 @@ This turns the harness into a standalone agent-style application with:
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import, listing, and session-bound metadata drill-down with SHA-256 hashes, redacted stored paths/original names, and no file-content reads;
 - redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories plus manifest verification reports, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, redacted task/process detail views, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, session-bound finding/tool-run/delegation/media/job/task/process detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/task-detail/findings/finding-detail/tool-runs/tool-run-detail/jobs/job-detail/processes/process-detail/approvals/redacted approval detail/delegations/delegation-detail/media/media-detail/auth/bridges/guardrails/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, memory hygiene views, session-bound finding/tool-run/delegation/media/job/task/process detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/memories/memory/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/task-detail/findings/finding-detail/tool-runs/tool-run-detail/jobs/job-detail/processes/process-detail/approvals/redacted approval detail/delegations/delegation-detail/media/media-detail/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, size-checked local attachment import, remote metadata-only recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -349,6 +349,14 @@ Examples:
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/remember key=client value="ACME internal assessment" tags=engagement'
+
+# Review or delete stale/sensitive local memory without touching targets.
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/memories query=client'
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/forget key=client'
 
 # ROE-gated command execution.
 phobos-agent --db data/phobos-agent.db once \
@@ -580,6 +588,7 @@ plugin_loaded_and_executed=True
 natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
+memory_hygiene_forget_ok=True
 message_memory_context_media_storage_redaction_ok=True
 workspace_roundtrip_and_escape_block=True
 workspace_symlink_escape_block=True
@@ -639,7 +648,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=244
+artifact_count=250
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

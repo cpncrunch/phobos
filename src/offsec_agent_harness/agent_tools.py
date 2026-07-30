@@ -168,6 +168,9 @@ class OffSecToolRegistry:
         self.register_tool("finding_review", self.finding_review, _spec("finding_review", "Deterministically review a stored finding for report-readiness gaps without executing target actions.", {"id": {"type": "integer"}, "out": _string("Optional Markdown output path; relative paths go under agent/findings.")}, ["id"]))
         self.register_tool("remember", self.remember, _spec("remember", "Store local agent memory in SQLite.", {"key": _string("Memory key."), "value": _string("Memory value."), "tags": _string("Optional comma tags.")}, ["key", "value"]))
         self.register_tool("recall", self.recall, _spec("recall", "Search local agent memory.", {"query": _string("Memory search query."), "limit": {"type": "integer"}}, ["query"]))
+        self.register_tool("list_memories", self.list_memories, _spec("list_memories", "List redacted local agent memory keys/values for hygiene review.", {"query": _string("Optional memory search query."), "limit": {"type": "integer"}}, []))
+        self.register_tool("get_memory", self.get_memory, _spec("get_memory", "Get one redacted local agent memory by id or key.", {"id": {"type": "integer"}, "key": _string("Memory key.")}, []))
+        self.register_tool("forget_memory", self.forget_memory, _spec("forget_memory", "Delete one local agent memory by id or key; useful for removing stale or over-sensitive retained context.", {"id": {"type": "integer"}, "key": _string("Memory key.")}, []))
         self.register_tool("search_session", self.search_session, _spec("search_session", "Search current-session messages.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("search_all_sessions", self.search_all_sessions, _spec("search_all_sessions", "Search messages across all local Phobos sessions in this DB.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("context_snapshot", self.context_snapshot, _spec("context_snapshot", "Return latest compact summary, recent messages, and relevant memory.", {"query": _string("Optional relevance query."), "limit": {"type": "integer"}}))
@@ -788,6 +791,30 @@ class OffSecToolRegistry:
     def recall(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.recall(str(args.get("query", "")), limit=int(args.get("limit", 10)))
         return ToolResult("ok", f"Found {len(rows)} memory entries.", {"memories": rows})
+
+    def list_memories(self, args: dict[str, Any]) -> ToolResult:
+        limit = max(1, min(int(args.get("limit", 50)), 200))
+        query = str(args.get("query", "")).strip()
+        rows = self.store.recall(query, limit=limit) if query else self.store.list_memories(limit=limit)
+        return ToolResult("ok", f"Found {len(rows)} memory entries.", {"memories": rows, "secret_values_redacted": True})
+
+    def get_memory(self, args: dict[str, Any]) -> ToolResult:
+        raw_id = args.get("id") or args.get("memory_id")
+        key = str(args.get("key", "")).strip()
+        memory = self.store.get_memory(memory_id=int(raw_id) if raw_id else None, key=key or None)
+        if not memory:
+            return ToolResult("error", "Memory not found.")
+        return ToolResult("ok", f"Memory {memory['id']} retrieved.", {"memory": _redacted_mapping(memory), "secret_values_redacted": True})
+
+    def forget_memory(self, args: dict[str, Any]) -> ToolResult:
+        raw_id = args.get("id") or args.get("memory_id")
+        key = str(args.get("key", "")).strip()
+        if not raw_id and not key:
+            return ToolResult("error", "forget_memory requires id or key.")
+        memory = self.store.delete_memory(memory_id=int(raw_id) if raw_id else None, key=key or None)
+        if not memory:
+            return ToolResult("error", "Memory not found.")
+        return ToolResult("ok", f"Deleted memory {memory['id']}.", {"deleted": _redacted_mapping(memory), "secret_values_redacted": True})
 
     def search_session(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.search_messages(self.session_id, str(args.get("query", "")), limit=int(args.get("limit", 10)))

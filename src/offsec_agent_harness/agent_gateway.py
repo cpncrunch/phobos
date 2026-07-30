@@ -117,6 +117,23 @@ class AgentGateway:
                     if path == "/context":
                         _write_json(self, runtime.registry.run("context_snapshot", {}).to_dict())
                         return
+                    if path == "/memories":
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {"limit": int((query.get("limit") or [50])[0])}
+                        if (query.get("query") or [""])[0]:
+                            args["query"] = (query.get("query") or [""])[0]
+                        _write_json(self, runtime.registry.run("list_memories", args).to_dict())
+                        return
+                    if path in {"/memory", "/memory-detail"}:
+                        query = parse_qs(parsed.query)
+                        memory_id = (query.get("id") or query.get("memory_id") or [""])[0]
+                        key = (query.get("key") or [""])[0]
+                        if not memory_id and not key:
+                            _write_json(self, {"error": "id or key is required"}, status=400)
+                            return
+                        args = {"id": memory_id} if memory_id else {"key": key}
+                        _write_json(self, runtime.registry.run("get_memory", args).to_dict())
+                        return
                     if path == "/approvals":
                         query = parse_qs(parsed.query)
                         args: dict[str, Any] = {
@@ -363,6 +380,9 @@ def _gateway_paths() -> list[str]:
         "/schemas",
         "/sessions",
         "/context",
+        "/memories",
+        "/memory",
+        "/memory-detail",
         "/timeline",
         "/manifest",
         "/evidence-manifest",

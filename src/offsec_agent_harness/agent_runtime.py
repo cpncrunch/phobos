@@ -300,6 +300,12 @@ class OffSecAgentRuntime:
             "finding-qa": "finding_review",
             "remember": "remember",
             "recall": "recall",
+            "memories": "list_memories",
+            "memory-list": "list_memories",
+            "memory": "get_memory",
+            "memory-get": "get_memory",
+            "forget": "forget_memory",
+            "memory-forget": "forget_memory",
             "search": "search_session",
             "search-all": "search_all_sessions",
             "search-sessions": "search_all_sessions",
@@ -867,6 +873,9 @@ HELP_TEXT = """Phobos Agent commands:
 /sessions limit=20 recent=8
 /remember key=<name> value=<fact> tags=<optional>
 /recall query=<text>
+/memories query=<optional> limit=50
+/memory id=<memory-id> or key=<name>
+/forget id=<memory-id> or key=<name>
 /reflect query=<question>
 /hindsight-retain content=<fact> context=<label> tags=<tags>
 /hindsight-recall query=<text>
