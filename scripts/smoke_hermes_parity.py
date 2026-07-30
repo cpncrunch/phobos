@@ -199,6 +199,20 @@ def main(argv: list[str] | None = None) -> int:
         checks["schema_returned"] = "start_process" in schema and "execute" in schema
         plugin = handle("plugin-echo", "/tool name=example_echo value=plugin-ok")
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
+        invalid_tool_integer = runtime.registry.run("list_findings", {"limit": "not-an-int"})
+        valid_tool_integer = runtime.registry.run("list_findings", {"limit": "2"})
+        integer_validation_payload = {
+            "invalid": invalid_tool_integer.to_dict(),
+            "valid": valid_tool_integer.to_dict(),
+        }
+        write("tool-schema-integer-validation.json", json.dumps(integer_validation_payload, indent=2))
+        checks["tool_schema_integer_validation_ok"] = (
+            invalid_tool_integer.status == "error"
+            and invalid_tool_integer.message == "limit must be an integer."
+            and valid_tool_integer.status == "ok"
+            and "invalid literal" not in json.dumps(integer_validation_payload)
+            and "Traceback" not in json.dumps(integer_validation_payload)
+        )
 
         scope_summary = handle("scope-summary", "/scope")
         scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
@@ -1489,6 +1503,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         with urllib.request.urlopen(tool_req, timeout=5) as response:
             gateway_tool = json.loads(response.read().decode("utf-8"))
+        invalid_tool_req = urllib.request.Request(
+            f"http://{host}:{port}/tool",
+            data=json.dumps({"name": "list_findings", "args": {"limit": "not-an-int"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(invalid_tool_req, timeout=5) as response:
+            gateway_invalid_tool = json.loads(response.read().decode("utf-8"))
         guardrail_update_req = urllib.request.Request(
             f"http://{host}:{port}/guardrails",
             data=json.dumps({
@@ -1515,7 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-invalid-query.json", json.dumps(invalid_gateway_queries, indent=2))
         write("gateway-invalid-post.json", json.dumps(invalid_gateway_posts, indent=2))
         write("gateway-body-limit.json", json.dumps(gateway_body_limit, indent=2))
-        write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
+        write("gateway-tool.json", json.dumps({"valid": gateway_tool, "invalid_schema_integer": gateway_invalid_tool}, indent=2))
         preflight_route_obj = gateway_gets.get("/preflight")
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
         preflight_data_obj = preflight_route.get("data")
@@ -1557,7 +1579,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_route_data_obj = audit_route_payload.get("data") if isinstance(audit_route_payload, dict) else {}
         audit_route_data = audit_route_data_obj if isinstance(audit_route_data_obj, dict) else {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
-        checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
+        checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway" and gateway_invalid_tool["result"]["status"] == "error" and gateway_invalid_tool["result"]["message"] == "limit must be an integer."
         checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and guardrail_route_data.get("no_target_activity") is True and guardrail_route_data.get("readiness") == "ready" and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(guardrail_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         invalid_gateway_blob = json.dumps(invalid_gateway_queries)
         invalid_gateway_ok = True

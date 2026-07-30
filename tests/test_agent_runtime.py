@@ -120,6 +120,18 @@ class AgentRuntimeTests(unittest.TestCase):
                         payload = json.loads(raised.exception.read().decode("utf-8"))
                         self.assertEqual(payload.get("error"), expected_error)
                         self.assertNotIn("Traceback", json.dumps(payload))
+                tool_req = urllib.request.Request(
+                    f"http://{host}:{port}/tool",
+                    data=json.dumps({"name": "list_findings", "args": {"limit": "not-an-int"}}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(tool_req, timeout=5) as response:
+                    tool_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(tool_payload["result"]["status"], "error")
+                self.assertEqual(tool_payload["result"]["message"], "limit must be an integer.")
+                self.assertNotIn("invalid literal", json.dumps(tool_payload))
+                self.assertNotIn("Traceback", json.dumps(tool_payload))
                 oversized_req = urllib.request.Request(
                     f"http://{host}:{port}/message",
                     data=json.dumps({"message": "x" * 128}).encode("utf-8"),
@@ -151,6 +163,48 @@ class AgentRuntimeTests(unittest.TestCase):
                     with self.subTest(value=value):
                         with self.assertRaisesRegex(ValueError, expected_error):
                             AgentGateway(runtime, port=0, max_body_bytes=value)
+            finally:
+                runtime.close()
+
+    def test_tool_registry_validates_schema_integer_args_before_dispatch_or_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, engagement = self.make_runtime(tmp)
+            try:
+                invalid_cases = [
+                    ("get_job", {"id": "not-an-int"}, "id must be an integer."),
+                    ("poll_process", {"id": "not-an-int"}, "id must be an integer."),
+                    ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
+                    ("evidence_timeline", {"limit": True}, "limit must be an integer."),
+                ]
+                for tool_name, tool_args, expected_message in invalid_cases:
+                    with self.subTest(tool=tool_name):
+                        result = runtime.registry.run(tool_name, tool_args)
+                        serialized = json.dumps(result.to_dict())
+                        self.assertEqual(result.status, "error")
+                        self.assertEqual(result.message, expected_message)
+                        self.assertNotIn("invalid literal", serialized)
+                        self.assertNotIn("Traceback", serialized)
+
+                valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
+                self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
+
+                confirm_runtime = OffSecAgentRuntime(
+                    AgentRuntimeConfig(
+                        engagement_path=str(engagement),
+                        db_path=str(Path(tmp) / "confirm-agent.db"),
+                        session_name="confirm-validation",
+                        confirm_tools=("list_findings",),
+                    )
+                )
+                try:
+                    before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
+                    rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
+                    after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
+                    self.assertEqual(rejected.status, "error")
+                    self.assertEqual(rejected.message, "limit must be an integer.")
+                    self.assertEqual(before, after)
+                finally:
+                    confirm_runtime.close()
             finally:
                 runtime.close()
 

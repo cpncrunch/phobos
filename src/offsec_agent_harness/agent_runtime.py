@@ -852,12 +852,12 @@ def _parse_key_values(tokens: list[str]) -> dict[str, Any]:
 
 def _coerce(value: str) -> Any:
     lowered = value.lower()
-    if lowered in {"true", "yes", "1"}:
-        return True
-    if lowered in {"false", "no", "0"}:
-        return False
     if lowered.isdigit():
         return int(lowered)
+    if lowered in {"true", "yes"}:
+        return True
+    if lowered in {"false", "no"}:
+        return False
     if value.startswith("[") or value.startswith("{"):
         try:
             return json.loads(value)

@@ -104,10 +104,16 @@ class OffSecToolRegistry:
     def run(self, name: str, args: dict[str, Any]) -> ToolResult:
         if name not in self.tools:
             return ToolResult("error", f"Unknown tool: {name}", {"available": [spec.name for spec in self.specs()]})
+        if not isinstance(args, dict):
+            return ToolResult("error", "Tool args must be an object.")
         if name in self.blocked_tools and name not in self._policy_bypass_tools:
             result = ToolResult("blocked", f"Tool {name} is blocked by runtime policy.", {"tool": name})
             self.store.audit(self.session_id, "tool_blocked", {"tool": name, "args": _safe_json(args)})
             return result
+        args, arg_error = self._validated_tool_args(name, args)
+        if arg_error is not None:
+            self.store.audit(self.session_id, "tool_argument_error", {"tool": name, "error": arg_error.message})
+            return arg_error
         if name in self.confirm_tools and name not in self._policy_bypass_tools and not args.get("_policy_approved", False):
             approval_id = self.store.create_approval(self.session_id, name, args, {"status": "confirm", "reason": "Tool requires approval by runtime policy."})
             result = ToolResult("needs_approval", f"Tool {name} requires approval before execution. Approval ID: {approval_id}", {"approval_id": approval_id, "tool": name})
@@ -120,6 +126,36 @@ class OffSecToolRegistry:
             result = ToolResult("error", f"{name} failed: {exc}")
         self.store.audit(self.session_id, "tool_result", {"tool": name, "result": result.to_dict()})
         return result
+
+    def _validated_tool_args(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
+        """Validate schema-declared scalar arguments before dispatch/approval.
+
+        Tool handlers are still defensive, but malformed operator-controlled
+        integer fields should not fall through to Python ``ValueError`` strings
+        or get queued for later approval replay.  The registry owns the generic
+        ``/tool`` and gateway dispatch boundary, so normalize integer-looking
+        strings here and reject booleans/non-numeric values with clean errors.
+        """
+
+        spec = self.tool_specs.get(name)
+        schema = spec.schema if spec else {}
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        if not isinstance(properties, dict):
+            return dict(args), None
+        validated = dict(args)
+        for arg_name, arg_schema in properties.items():
+            if not isinstance(arg_schema, dict) or arg_schema.get("type") != "integer":
+                continue
+            if arg_name not in validated or validated.get(arg_name) in (None, ""):
+                continue
+            raw_value = validated.get(arg_name)
+            if raw_value is None or isinstance(raw_value, bool):
+                return validated, ToolResult("error", f"{arg_name} must be an integer.")
+            try:
+                validated[arg_name] = int(raw_value)
+            except (TypeError, ValueError):
+                return validated, ToolResult("error", f"{arg_name} must be an integer.")
+        return validated, None
 
     def _register_builtins(self) -> None:
         self.register_tool("assess_action", self.assess_action, _spec("assess_action", "Evaluate a proposed action/command against ROE guardrails without executing it.", {
@@ -338,13 +374,18 @@ class OffSecToolRegistry:
         return ToolResult("started", f"Background process {process_id} started with pid {proc.pid}.", {"process_id": process_id, "pid": proc.pid, "decision": decision.to_dict()}, {"stdout": str(stdout_path), "stderr": str(stderr_path), "return_code": str(rc_path), "decision_log": str(evidence_path)})
 
     def poll_process(self, args: dict[str, Any]) -> ToolResult:
-        process = self._refresh_process(int(args.get("id") or args.get("process_id")))
+        process_id = _first_int_arg(args, "id", "process_id")
+        if process_id is None:
+            return ToolResult("error", "Process id is required.")
+        process = self._refresh_process(process_id)
         if not process:
             return ToolResult("error", "Process not found in this session.")
         return ToolResult(process["status"], f"Process {process['id']} is {process['status']}.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
 
     def wait_process(self, args: dict[str, Any]) -> ToolResult:
-        process_id = int(args.get("id") or args.get("process_id"))
+        process_id = _first_int_arg(args, "id", "process_id")
+        if process_id is None:
+            return ToolResult("error", "Process id is required.")
         deadline = time.monotonic() + max(0, int(args.get("timeout", 30)))
         process = self._refresh_process(process_id)
         while process and process.get("status") in {"running", "starting"} and time.monotonic() < deadline:
@@ -356,7 +397,10 @@ class OffSecToolRegistry:
         return ToolResult(process["status"], f"Process {process_id} wait ended with status {process['status']}.", {"process": _redacted_mapping(process), "stdout": log.data.get("stdout", ""), "stderr": log.data.get("stderr", ""), "secret_values_redacted": True})
 
     def process_log(self, args: dict[str, Any]) -> ToolResult:
-        process = self._refresh_process(int(args.get("id") or args.get("process_id")))
+        process_id = _first_int_arg(args, "id", "process_id")
+        if process_id is None:
+            return ToolResult("error", "Process id is required.")
+        process = self._refresh_process(process_id)
         if not process:
             return ToolResult("error", "Process not found in this session.")
         limit = int(args.get("limit", 4000))
@@ -365,7 +409,10 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Process {process['id']} log tails.", {"process": _redacted_mapping(process), "stdout": stdout, "stderr": stderr, "secret_values_redacted": True})
 
     def kill_process(self, args: dict[str, Any]) -> ToolResult:
-        process = self._refresh_process(int(args.get("id") or args.get("process_id")))
+        process_id = _first_int_arg(args, "id", "process_id")
+        if process_id is None:
+            return ToolResult("error", "Process id is required.")
+        process = self._refresh_process(process_id)
         if not process:
             return ToolResult("error", "Process not found in this session.")
         pid = process.get("pid")
@@ -393,7 +440,9 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Process {process_id} returned.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
 
     def approve(self, args: dict[str, Any]) -> ToolResult:
-        approval_id = int(args.get("id") or args.get("approval_id"))
+        approval_id = _first_int_arg(args, "id", "approval_id")
+        if approval_id is None:
+            return ToolResult("error", "Approval id is required.")
         approval = self.store.get_approval(approval_id, session_id=self.session_id)
         if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
@@ -443,7 +492,9 @@ class OffSecToolRegistry:
         return ToolResult("approved", f"Approval {approval_id} approved.")
 
     def deny(self, args: dict[str, Any]) -> ToolResult:
-        approval_id = int(args.get("id") or args.get("approval_id"))
+        approval_id = _first_int_arg(args, "id", "approval_id")
+        if approval_id is None:
+            return ToolResult("error", "Approval id is required.")
         approval = self.store.get_approval(approval_id, session_id=self.session_id)
         if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
@@ -1155,20 +1206,18 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Found {len(jobs)} jobs.", {"jobs": jobs, "secret_values_redacted": True})
 
     def get_job(self, args: dict[str, Any]) -> ToolResult:
-        job_raw = args.get("id") or args.get("job_id")
-        if job_raw is None:
+        job_id = _first_int_arg(args, "id", "job_id")
+        if job_id is None:
             return ToolResult("error", "Job id is required.")
-        job_id = int(job_raw)
         job = self.store.get_job(job_id, session_id=self.session_id)
         if not job:
             return ToolResult("error", f"Job {job_id} not found in this session.")
         return ToolResult("ok", f"Job {job_id} returned.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
 
     def update_job(self, args: dict[str, Any]) -> ToolResult:
-        job_raw = args.get("id") or args.get("job_id")
-        if job_raw is None:
+        job_id = _first_int_arg(args, "id", "job_id")
+        if job_id is None:
             return ToolResult("error", "Job id is required.")
-        job_id = int(job_raw)
         updates: dict[str, Any] = {}
         if "name" in args:
             updates["name"] = str(args.get("name") or "")
@@ -1185,10 +1234,9 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Job {job_id} updated.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
 
     def enable_job(self, args: dict[str, Any]) -> ToolResult:
-        job_raw = args.get("id") or args.get("job_id")
-        if job_raw is None:
+        job_id = _first_int_arg(args, "id", "job_id")
+        if job_id is None:
             return ToolResult("error", "Job id is required.")
-        job_id = int(job_raw)
         job = self.store.update_job(job_id, session_id=self.session_id, enabled=True)
         if not job:
             return ToolResult("error", f"Job {job_id} not found in this session.")
@@ -1196,10 +1244,9 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Job {job_id} enabled.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
 
     def disable_job(self, args: dict[str, Any]) -> ToolResult:
-        job_raw = args.get("id") or args.get("job_id")
-        if job_raw is None:
+        job_id = _first_int_arg(args, "id", "job_id")
+        if job_id is None:
             return ToolResult("error", "Job id is required.")
-        job_id = int(job_raw)
         job = self.store.update_job(job_id, session_id=self.session_id, enabled=False)
         if not job:
             return ToolResult("error", f"Job {job_id} not found in this session.")
@@ -1673,10 +1720,9 @@ class OffSecToolRegistry:
         )
 
     def get_approval(self, args: dict[str, Any]) -> ToolResult:
-        approval_raw = args.get("id") or args.get("approval_id")
-        if approval_raw is None:
+        approval_id = _first_int_arg(args, "id", "approval_id")
+        if approval_id is None:
             return ToolResult("error", "Approval id is required.")
-        approval_id = int(approval_raw)
         approval = self.store.get_approval(approval_id, session_id=self.session_id)
         if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
@@ -2933,7 +2979,9 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Task {task_id} added.", {"task": _redacted_mapping(self.store.get_task(task_id, session_id=self.session_id) or {}), "secret_values_redacted": True})
 
     def update_task(self, args: dict[str, Any]) -> ToolResult:
-        task_id = int(args.get("id") or args.get("task_id"))
+        task_id = _first_int_arg(args, "id", "task_id")
+        if task_id is None:
+            return ToolResult("error", "task id is required.")
         content = args.get("content")
         status = args.get("status")
         normalized = _normalize_task_status(str(status)) if status is not None else None
