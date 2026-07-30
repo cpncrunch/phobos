@@ -434,6 +434,9 @@ class AgentGateway:
                     return
                 try:
                     payload = _read_json(self)
+                    if not isinstance(payload, dict):
+                        _write_json(self, {"error": "JSON body must be an object"}, status=400)
+                        return
                     with lock:
                         if path == "/guardrails":
                             result = _apply_guardrail_policy(runtime, payload)
@@ -467,17 +470,15 @@ class AgentGateway:
                             _write_json(self, {"jobs_run": runtime.run_due_jobs()})
                             return
                         if path == "/approve":
-                            approval_id = payload.get("id") or payload.get("approval_id")
+                            approval_id = _payload_required_int(self, payload, "id", "approval_id", label="id")
                             if approval_id is None:
-                                _write_json(self, {"error": "id is required"}, status=400)
                                 return
                             result = runtime.registry.run("approve", {"id": approval_id, "by": payload.get("by", "gateway")})
                             _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
                             return
                         if path == "/deny":
-                            approval_id = payload.get("id") or payload.get("approval_id")
+                            approval_id = _payload_required_int(self, payload, "id", "approval_id", label="id")
                             if approval_id is None:
-                                _write_json(self, {"error": "id is required"}, status=400)
                                 return
                             result = runtime.registry.run("deny", {"id": approval_id, "by": payload.get("by", "gateway"), "reason": payload.get("reason", "")})
                             _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
@@ -738,12 +739,37 @@ async function createFinding() {{ try {{ show('findingResult', await api('/findi
 """
 
 
-def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def _read_json(handler: BaseHTTPRequestHandler) -> Any:
     length = int(handler.headers.get("Content-Length", "0") or "0")
     raw = handler.rfile.read(length) if length else b"{}"
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def _payload_first(payload: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in payload:
+            return payload.get(name)
+    return None
+
+
+def _payload_required_int(handler: BaseHTTPRequestHandler, payload: dict[str, Any], *names: str, label: str = "id") -> int | None:
+    raw = _payload_first(payload, *names)
+    if raw is None or raw == "":
+        _write_json(handler, {"error": f"{label} is required"}, status=400)
+        return None
+    if isinstance(raw, bool):
+        _write_json(handler, {"error": f"{label} must be an integer"}, status=400)
+        return None
+    if isinstance(raw, float):
+        _write_json(handler, {"error": f"{label} must be an integer"}, status=400)
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _write_json(handler, {"error": f"{label} must be an integer"}, status=400)
+        return None
 
 
 def _write_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any], status: int = 200) -> None:

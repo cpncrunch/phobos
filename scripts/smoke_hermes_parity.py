@@ -1423,6 +1423,24 @@ def main(argv: list[str] | None = None) -> int:
                     invalid_gateway_queries[route] = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
             except urllib.error.HTTPError as exc:
                 invalid_gateway_queries[route] = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
+        invalid_gateway_post_expected = {
+            "/approve": ({"id": "not-an-int"}, "id must be an integer"),
+            "/deny": ({"approval_id": True}, "id must be an integer"),
+            "/message": (["/status"], "JSON body must be an object"),
+        }
+        invalid_gateway_posts: dict[str, dict[str, object]] = {}
+        for route, (body, _expected_error) in invalid_gateway_post_expected.items():
+            req = urllib.request.Request(
+                f"http://{host}:{port}{route}",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    invalid_gateway_posts[route] = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
+            except urllib.error.HTTPError as exc:
+                invalid_gateway_posts[route] = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
         message_req = urllib.request.Request(
             f"http://{host}:{port}/message",
             data=json.dumps({"message": "/status"}).encode("utf-8"),
@@ -1471,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-guardrails.json", json.dumps({"before": gateway_gets.get("/guardrails"), "after": gateway_guardrail_update}, indent=2))
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-invalid-query.json", json.dumps(invalid_gateway_queries, indent=2))
+        write("gateway-invalid-post.json", json.dumps(invalid_gateway_posts, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         preflight_route_obj = gateway_gets.get("/preflight")
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
@@ -1523,6 +1542,14 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or payload_obj.get("error") != expected_error:
                 invalid_gateway_ok = False
         checks["gateway_invalid_query_handling_ok"] = invalid_gateway_ok and "Traceback" not in invalid_gateway_blob
+        invalid_post_blob = json.dumps(invalid_gateway_posts)
+        invalid_post_ok = True
+        for route, item in invalid_gateway_posts.items():
+            payload_obj = item.get("payload")
+            expected_error = invalid_gateway_post_expected.get(route, ({}, ""))[1]
+            if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or payload_obj.get("error") != expected_error:
+                invalid_post_ok = False
+        checks["gateway_invalid_post_handling_ok"] = invalid_post_ok and "Traceback" not in invalid_post_blob
         checks["gateway_audit_detail_route_ok"] = audit_route_payload.get("status") == "ok" and audit_route_data.get("no_target_activity") is True and "storage-audit-secret" not in json.dumps(audit_route_payload) and "storage-audit-bearer" not in json.dumps(audit_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"

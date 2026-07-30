@@ -82,6 +82,24 @@ class AgentRuntimeTests(unittest.TestCase):
                         payload = json.loads(raised.exception.read().decode("utf-8"))
                         self.assertEqual(payload.get("error"), expected_error)
                         self.assertNotIn("Traceback", json.dumps(payload))
+                for route, body, expected_error in [
+                    ("/approve", {"id": "not-an-int"}, "id must be an integer"),
+                    ("/deny", {"approval_id": True}, "id must be an integer"),
+                    ("/message", ["/status"], "JSON body must be an object"),
+                ]:
+                    with self.subTest(route=route, body=body):
+                        req = urllib.request.Request(
+                            f"http://{host}:{port}{route}",
+                            data=json.dumps(body).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            urllib.request.urlopen(req, timeout=5)
+                        self.assertEqual(raised.exception.code, 400)
+                        payload = json.loads(raised.exception.read().decode("utf-8"))
+                        self.assertEqual(payload.get("error"), expected_error)
+                        self.assertNotIn("Traceback", json.dumps(payload))
             finally:
                 if gateway is not None:
                     gateway.shutdown()
