@@ -181,6 +181,53 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_runtime_artifact_outputs_block_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            old_seal = os.environ.get("PHOBOS_TEST_ARTIFACT_SEAL")
+            os.environ["PHOBOS_TEST_ARTIFACT_SEAL"] = "artifact containment passphrase"
+            try:
+                created = runtime.registry.run("create_finding", {"title": "Artifact containment finding", "severity": "Low"})
+                self.assertEqual(created.status, "ok", created.to_dict())
+                finding_id = created.data["finding"]["id"]
+
+                good = runtime.registry.run("finding_review", {"id": finding_id, "out": "nested/review"})
+                self.assertEqual(good.status, "ok", good.to_dict())
+                good_path = Path(good.artifacts["markdown"]).resolve()
+                findings_dir = (Path(runtime.registry.harness.store.root) / "agent" / "findings").resolve()
+                self.assertEqual(os.path.commonpath([str(findings_dir), str(good_path)]), str(findings_dir))
+
+                escape_cases = [
+                    ("finding_review", {"id": finding_id, "out": str(Path(tmp) / "outside-review.md")}, Path(tmp) / "outside-review.md"),
+                    ("operator_briefing", {"out": str(Path(tmp) / "outside-briefing.md")}, Path(tmp) / "outside-briefing.md"),
+                    ("export_session", {"out": str(Path(tmp) / "outside-handoff.json")}, Path(tmp) / "outside-handoff.json"),
+                    ("export_pack", {"out": str(Path(tmp) / "outside-pack.zip")}, Path(tmp) / "outside-pack.zip"),
+                    ("sealed_export", {"passphrase_env": "PHOBOS_TEST_ARTIFACT_SEAL", "out": str(Path(tmp) / "outside-sealed.json")}, Path(tmp) / "outside-sealed.json"),
+                ]
+                for tool, args, outside_path in escape_cases:
+                    blocked = runtime.registry.run(tool, args)
+                    self.assertEqual(blocked.status, "error", blocked.to_dict())
+                    self.assertIn("escapes", blocked.message)
+                    self.assertFalse(outside_path.exists(), f"{tool} wrote outside artifact dir")
+
+                symlink_target = Path(tmp) / "outside-symlink-write.md"
+                symlink_target.write_text("ORIGINAL OUTSIDE CONTENT", encoding="utf-8")
+                link = findings_dir / "symlink-review.md"
+                try:
+                    link.symlink_to(symlink_target)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+                symlink_block = runtime.registry.run("finding_export", {"id": finding_id, "out": "symlink-review.md"})
+                self.assertEqual(symlink_block.status, "error", symlink_block.to_dict())
+                self.assertIn("escapes", symlink_block.message)
+                self.assertEqual(symlink_target.read_text(encoding="utf-8"), "ORIGINAL OUTSIDE CONTENT")
+            finally:
+                runtime.close()
+                if old_seal is None:
+                    os.environ.pop("PHOBOS_TEST_ARTIFACT_SEAL", None)
+                else:
+                    os.environ["PHOBOS_TEST_ARTIFACT_SEAL"] = old_seal
+
     def test_evidence_timeline_tool_slash_and_gateway_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)

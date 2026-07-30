@@ -28,7 +28,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
 - **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, timelines, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default while raw runtime output is retained in local session/audit state.
-- **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root.
+- **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
 
 ## Agent commands
@@ -635,7 +635,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 35 tests
+Ran 36 tests
 OK
 ```
 
@@ -668,6 +668,7 @@ guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
+artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -696,7 +697,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=174
+artifact_count=177
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -775,6 +776,8 @@ finding-update.json
 findings.json
 finding-export.json
 finding-review.json
+artifact-output-escape.json
+artifact-output-scoped.json
 operator-briefing.json
 pack-export.json
 plugin-echo.txt

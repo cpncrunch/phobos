@@ -598,13 +598,13 @@ class OffSecToolRegistry:
             confirmed=finding.get("status") in {"confirmed", "accepted-risk", "resolved"},
             limitations=[] if finding.get("status") == "confirmed" else [f"Current lifecycle status is {finding.get('status')}; validate evidence before client delivery."],
         )
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out = Path(out_arg)
-            if not out.is_absolute():
-                out = self.harness.store.root / "agent" / "findings" / out
-        else:
-            out = self.harness.store.root / "agent" / "findings" / f"finding-{finding['id']}-{safe_report_filename(finding['title'])}.md"
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "findings",
+            str(args.get("out") or "").strip(),
+            f"finding-{finding['id']}-{safe_report_filename(finding['title'])}.md",
+            suffix=".md",
+        )
         path = FindingMarkdownExporter().write_finding(report, out)
         return ToolResult("ok", f"Finding #{finding['id']} exported: {path}", {"finding": _redacted_mapping(finding), "path": str(path)}, {"markdown": str(path)})
 
@@ -615,13 +615,13 @@ class OffSecToolRegistry:
         if not finding:
             return ToolResult("error", "Finding not found.")
         review = self._build_finding_review(finding)
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out = Path(out_arg)
-            if not out.is_absolute():
-                out = self.harness.store.root / "agent" / "findings" / out
-        else:
-            out = self.harness.store.root / "agent" / "findings" / f"finding-{finding['id']}-review-{safe_report_filename(finding['title'])}.md"
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "findings",
+            str(args.get("out") or "").strip(),
+            f"finding-{finding['id']}-review-{safe_report_filename(finding['title'])}.md",
+            suffix=".md",
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
         markdown = _finding_review_markdown(finding, review)
         out.write_text(markdown, encoding="utf-8")
@@ -1050,6 +1050,13 @@ class OffSecToolRegistry:
         passphrase = os.environ.get(passphrase_env, "") if passphrase_env else ""
         if not passphrase:
             return ToolResult("error", "passphrase_env must name an environment variable containing the passphrase; no secret value is accepted in args.")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "sealed",
+            str(args.get("out") or "").strip(),
+            f"session-{uuid.uuid4().hex[:10]}.sealed.json",
+            suffix=".json",
+        )
         handoff = self.export_session({"out": f"sealed-source-{uuid.uuid4().hex[:8]}.json", "message_limit": int(args.get("message_limit", 1000))})
         if handoff.status != "ok":
             return handoff
@@ -1059,10 +1066,6 @@ class OffSecToolRegistry:
             pack = self.export_pack({"out": f"sealed-source-{uuid.uuid4().hex[:8]}.zip"})
             payload["pack_manifest"] = pack.data.get("manifest", {}) if pack.status == "ok" else {"error": pack.message}
         sealed = seal_bytes(json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"), passphrase, aad=b"phobos-agent-sealed-export")
-        out_arg = str(args.get("out") or "").strip()
-        out = Path(out_arg) if out_arg else self.harness.store.root / "agent" / "sealed" / f"session-{uuid.uuid4().hex[:10]}.sealed.json"
-        if not out.is_absolute():
-            out = self.harness.store.root / "agent" / "sealed" / out
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(sealed)
         source_path.unlink(missing_ok=True)
@@ -1274,14 +1277,14 @@ class OffSecToolRegistry:
         for entry in entries:
             category = str(entry.get("category") or "unknown")
             counts[category] = counts.get(category, 0) + 1
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out = Path(out_arg)
-            if not out.is_absolute():
-                out = self.harness.store.root / "agent" / "timelines" / out
-        else:
-            stamp = utc_now().replace(":", "").replace("+00:00", "Z")
-            out = self.harness.store.root / "agent" / "timelines" / f"evidence-timeline-{stamp}.md"
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "timelines",
+            str(args.get("out") or "").strip(),
+            f"evidence-timeline-{stamp}.md",
+            suffix=".md",
+        )
         if out.suffix.lower() != ".md":
             out = out.with_suffix(".md")
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1290,18 +1293,14 @@ class OffSecToolRegistry:
 
     def export_pack(self, args: dict[str, Any]) -> ToolResult:
         export_dir = self.harness.store.root / "agent" / "exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out_path = Path(out_arg)
-            if not out_path.is_absolute():
-                out_path = export_dir / out_path
-        else:
-            stamp = utc_now().replace(":", "").replace("+0000", "Z").replace("+00:00", "Z")
-            out_path = export_dir / f"phobos-agent-pack-{stamp}.zip"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.suffix.lower() != ".zip":
-            out_path = out_path.with_suffix(".zip")
+        stamp = utc_now().replace(":", "").replace("+0000", "Z").replace("+00:00", "Z")
+        out_path = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "exports",
+            str(args.get("out") or "").strip(),
+            f"phobos-agent-pack-{stamp}.zip",
+            suffix=".zip",
+        )
 
         evidence_root = self.harness.store.root.resolve()
         manifest: dict[str, Any] = {
@@ -1437,33 +1436,28 @@ class OffSecToolRegistry:
         lines.append(f"- Jobs configured: {len(jobs)}")
         lines.append(f"- Processes tracked: {len(processes)}")
         text = "\n".join(lines) + "\n"
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out = Path(out_arg)
-            if not out.is_absolute():
-                out = self.harness.store.root / "agent" / out
-        else:
-            stamp = utc_now().replace(":", "").replace("+00:00", "Z")
-            out = self.harness.store.root / "agent" / f"operator-briefing-{stamp}.md"
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "briefings",
+            str(args.get("out") or "").strip(),
+            f"operator-briefing-{stamp}.md",
+            suffix=".md",
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
         redacted_tasks = [_redacted_mapping(task) for task in tasks]
         return ToolResult("ok", f"Operator briefing written: {out}", {"status": status, "tasks": redacted_tasks, "findings": [_redacted_mapping(row) for row in findings], "pending_approvals": [_redacted_mapping(row) for row in approvals], "briefing": text[:6000]}, {"markdown": str(out)})
 
     def export_session(self, args: dict[str, Any]) -> ToolResult:
-        export_dir = self.harness.store.root / "agent" / "session-exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        out_arg = str(args.get("out") or "").strip()
-        if out_arg:
-            out = Path(out_arg)
-            if not out.is_absolute():
-                out = export_dir / out
-        else:
-            stamp = utc_now().replace(":", "").replace("+00:00", "Z")
-            out = export_dir / f"session-handoff-{stamp}.json"
-        if out.suffix.lower() != ".json":
-            out = out.with_suffix(".json")
-        out.parent.mkdir(parents=True, exist_ok=True)
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "session-exports",
+            str(args.get("out") or "").strip(),
+            f"session-handoff-{stamp}.json",
+            suffix=".json",
+        )
         message_limit = int(args.get("message_limit", 1000))
         bundle = {
             "bundle_type": "phobos-agent-session-handoff",
@@ -1879,6 +1873,34 @@ def _finding_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         else:
             lines.append(redact_secrets(json.dumps(item, sort_keys=True)))
     return lines
+
+
+def _scoped_artifact_output_path(evidence_root: Path, subdir: str, out_arg: str, default_name: str, *, suffix: str | None = None) -> Path:
+    """Return a user-selected artifact output path only if it stays in its artifact dir.
+
+    Runtime artifact writers are reachable through the authenticated gateway and
+    chat bridges. A relative ``out`` path is useful, but it must not become a
+    host-file write primitive through ``..`` traversal, absolute paths, or
+    symlinks placed under the evidence tree. Resolve existing path components
+    before writing so symlink destinations are checked before ``write_text()`` or
+    ``ZipFile`` follows them.
+    """
+
+    root = evidence_root.resolve(strict=False)
+    base_dir = (evidence_root / "agent" / subdir).resolve(strict=False) if subdir else (evidence_root / "agent").resolve(strict=False)
+    if not _is_relative_to(base_dir, root):
+        raise ValueError("artifact output directory escapes the engagement evidence root")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    candidate = Path(out_arg).expanduser() if out_arg else base_dir / default_name
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    if suffix and candidate.suffix.lower() != suffix.lower():
+        candidate = candidate.with_suffix(suffix)
+    parent = candidate.parent.resolve(strict=False)
+    resolved = candidate.resolve(strict=False)
+    if not _is_relative_to(parent, base_dir) or not _is_relative_to(resolved, base_dir):
+        raise ValueError(f"artifact output path escapes the {subdir or 'agent'} artifact directory")
+    return candidate
 
 
 def _artifact_status(path_value: str, root: Path | None = None) -> dict[str, Any]:

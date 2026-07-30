@@ -292,6 +292,20 @@ def main(argv: list[str] | None = None) -> int:
         finding_review_markdown = Path(reviewed_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if reviewed_finding.artifacts.get("markdown") else ""
         checks["finding_lifecycle_ok"] = created_finding.status == "ok" and updated_finding.data["finding"]["status"] == "confirmed" and "Exposed administrative interface" in json.dumps(listed_findings.to_dict()) and "Tool run" in finding_markdown
         checks["finding_review_ok"] = reviewed_finding.status == "ok" and reviewed_finding.data["review"]["readiness"] in {"ready_with_advisories", "ready_for_operator_review"} and "Phobos Finding Review" in finding_review_markdown and "supersecret" not in json.dumps(reviewed_finding.to_dict()) and "supersecret" not in finding_review_markdown
+        outside_artifact = root / "outside-artifact-output.md"
+        artifact_escape = runtime.registry.run("finding_review", {"id": finding_id, "out": str(outside_artifact)})
+        scoped_briefing = runtime.registry.run("operator_briefing", {"out": "containment-briefing.md"})
+        write("artifact-output-escape.json", json.dumps(artifact_escape.to_dict(), indent=2))
+        write("artifact-output-scoped.json", json.dumps(scoped_briefing.to_dict(), indent=2))
+        briefing_dir = (runtime.registry.harness.store.root / "agent" / "briefings").resolve()
+        scoped_path = Path(scoped_briefing.artifacts.get("markdown", "")).resolve() if scoped_briefing.artifacts.get("markdown") else Path("/")
+        checks["artifact_output_containment_ok"] = (
+            artifact_escape.status == "error"
+            and "escapes" in artifact_escape.message
+            and not outside_artifact.exists()
+            and scoped_briefing.status == "ok"
+            and os.path.commonpath([str(briefing_dir), str(scoped_path)]) == str(briefing_dir)
+        )
 
         started = runtime.registry.run(
             "start_process",

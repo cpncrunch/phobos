@@ -259,7 +259,7 @@ agent/context-summary-*.md           # compacted session summaries
 agent/context-nodes/*.md             # LCM-style expandable context node summaries
 agent/delegations/delegation-*/       # durable local pseudo-subagent task artifacts
 agent/media/*                         # copied local media/artifact evidence with hashes
-agent/operator-briefing-*.md         # redacted operator briefings
+agent/briefings/operator-briefing-*.md # redacted operator briefings
 agent/session-exports/*.json         # portable redacted session handoffs
 agent/sealed/*.sealed.json           # passphrase-env sealed portable snapshots
 agent/exports/*.zip                  # redacted engagement packs
@@ -279,7 +279,7 @@ python scripts/smoke_hermes_parity.py
 
 The unit suite and smoke include deterministic finding QA review coverage: `/finding-review` writes a redacted Markdown readiness review and distinguishes blocking evidence gaps from advisory improvements without executing target actions.
 
-Current verification: 35 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 36 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -315,7 +315,7 @@ This turns the harness into a standalone agent-style application with:
 - local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline views, and routes for status/tools/schemas/sessions/context/timeline/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
-- redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root;
+- redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
 - interactive chat and single-message modes.
 
 The new public commands are `phobos-agent` and `phobos-harness`. The old
@@ -536,7 +536,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 35 tests
+Ran 36 tests
 OK
 ```
 
@@ -563,6 +563,7 @@ guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
+artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -591,7 +592,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=174
+artifact_count=177
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
