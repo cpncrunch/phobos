@@ -333,6 +333,87 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_session_memory_context_and_media_storage_redacts_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                message_id = runtime.store.append_message(
+                    runtime.session_id,
+                    "user",
+                    "operator note token=message-supersecret",
+                    {"api_key": "message-metadata-key", "nested": ["Cookie: sid=message-cookie"]},
+                )
+                memory = runtime.registry.run(
+                    "remember",
+                    {
+                        "key": "client-token=memory-supersecret",
+                        "value": "Authorization: Bearer memory-bearer-secret",
+                        "tags": "api_key=memory-tag-secret",
+                    },
+                )
+                self.assertEqual(memory.status, "ok", memory.to_dict())
+                self.assertNotIn("memory-supersecret", json.dumps(memory.to_dict()))
+                summary_id = runtime.store.create_context_summary(
+                    runtime.session_id,
+                    message_id,
+                    message_id,
+                    "context summary password=context-summary-secret",
+                )
+                node_id = runtime.store.create_context_node(
+                    runtime.session_id,
+                    "node title token=node-title-secret",
+                    "node summary client_secret=node-summary-secret",
+                    sources=[{"type": "message", "id": message_id, "note": "token=node-source-secret"}],
+                    metadata={"client_secret": "node-metadata-secret"},
+                )
+                media_src = Path(tmp) / "proof-token=media-name-secret.txt"
+                media_src.write_text("media content token=media-content-secret", encoding="utf-8")
+                media = runtime.registry.run("media_import", {"path": str(media_src)})
+                self.assertEqual(media.status, "ok", media.to_dict())
+                self.assertNotIn("media-name-secret", json.dumps(media.to_dict()) + json.dumps(media.artifacts))
+                self.assertNotIn("media-content-secret", json.dumps(media.to_dict()))
+
+                raw_message = runtime.store.conn.execute("SELECT content, metadata_json FROM messages WHERE id=?", (message_id,)).fetchone()
+                raw_memory = runtime.store.conn.execute("SELECT key, value, tags FROM memories").fetchall()
+                raw_summary = runtime.store.conn.execute("SELECT summary FROM context_summaries WHERE id=?", (summary_id,)).fetchone()
+                raw_node = runtime.store.conn.execute("SELECT title, summary, source_json, metadata_json FROM context_nodes WHERE id=?", (node_id,)).fetchone()
+                raw_media = runtime.store.conn.execute("SELECT source_path, artifact_path, metadata_json FROM media_artifacts").fetchone()
+                raw_blob = json.dumps({
+                    "message": dict(raw_message),
+                    "memories": [dict(row) for row in raw_memory],
+                    "summary": dict(raw_summary),
+                    "node": dict(raw_node),
+                    "media": dict(raw_media),
+                }, sort_keys=True)
+                for leaked in [
+                    "message-supersecret",
+                    "message-metadata-key",
+                    "message-cookie",
+                    "memory-supersecret",
+                    "memory-bearer-secret",
+                    "memory-tag-secret",
+                    "context-summary-secret",
+                    "node-title-secret",
+                    "node-summary-secret",
+                    "node-source-secret",
+                    "node-metadata-secret",
+                    "media-name-secret",
+                ]:
+                    self.assertNotIn(leaked, raw_blob)
+                self.assertIn("<REDACTED>", raw_blob)
+
+                read_blob = json.dumps({
+                    "message": runtime.store.get_message(message_id, session_id=runtime.session_id),
+                    "recall": runtime.registry.run("recall", {"query": "client-token"}).to_dict(),
+                    "context": runtime.registry.run("context_expand", {"id": node_id}).to_dict(),
+                    "media": runtime.registry.run("media_get", {"id": media.data["media"]["id"]}).to_dict(),
+                }, sort_keys=True)
+                for leaked in ["message-supersecret", "memory-bearer-secret", "node-source-secret", "media-name-secret"]:
+                    self.assertNotIn(leaked, read_blob)
+                self.assertIn("<REDACTED>", read_blob)
+            finally:
+                runtime.close()
+
     def test_task_and_process_ids_are_session_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)

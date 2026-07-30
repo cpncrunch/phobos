@@ -782,7 +782,8 @@ class OffSecToolRegistry:
         if not key or not value:
             return ToolResult("error", "remember requires key and value.")
         mem_id = self.store.remember(key, value, tags=str(args.get("tags", "")))
-        return ToolResult("ok", f"Stored memory {mem_id}: {key}", {"id": mem_id, "key": key})
+        display_key = redact_secrets(key) or ""
+        return ToolResult("ok", f"Stored memory {mem_id}: {display_key}", {"id": mem_id, "key": display_key})
 
     def recall(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.recall(str(args.get("query", "")), limit=int(args.get("limit", 10)))
@@ -903,8 +904,11 @@ class OffSecToolRegistry:
             key = f"hindsight-{digest}"
         value = content if not context else f"[{context}] {content}"
         mem_id = self.store.remember(key, value, tags=tags)
-        self.store.audit(self.session_id, "hindsight_retain", {"key": key, "context": context, "tags": tags})
-        return ToolResult("ok", f"Retained Hindsight-style memory {mem_id}: {key}", {"id": mem_id, "key": key, "context": context, "tags": tags})
+        display_key = redact_secrets(key) or ""
+        display_context = redact_secrets(context) or ""
+        display_tags = redact_secrets(tags) or ""
+        self.store.audit(self.session_id, "hindsight_retain", {"key": display_key, "context": display_context, "tags": display_tags})
+        return ToolResult("ok", f"Retained Hindsight-style memory {mem_id}: {display_key}", {"id": mem_id, "key": display_key, "context": display_context, "tags": display_tags})
 
     def hindsight_recall(self, args: dict[str, Any]) -> ToolResult:
         query = str(args.get("query") or "")
@@ -1199,11 +1203,13 @@ class OffSecToolRegistry:
         kind = str(args.get("kind") or _kind_from_mime(mime_type)).strip() or "file"
         media_dir = self.harness.store.root / "agent" / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
-        dest = media_dir / f"{digest[:12]}-{_safe_filename(src.name)}"
+        safe_name = _safe_filename(redact_secrets(src.name) or src.name)
+        dest = media_dir / f"{digest[:12]}-{safe_name}"
         shutil.copyfile(src, dest)
         media_id = self.store.create_media_artifact(self.session_id, kind, str(src), str(dest), mime_type, digest, len(data), {"original_name": src.name})
         media = self.store.get_media_artifact(media_id, session_id=self.session_id) or {}
-        return ToolResult("ok", f"Imported media/artifact {media_id}: {dest}", {"media": _redacted_mapping(media)}, {"file": str(dest)})
+        display_dest = redact_secrets(str(dest)) or str(dest)
+        return ToolResult("ok", f"Imported media/artifact {media_id}: {display_dest}", {"media": _redacted_mapping(media)}, {"file": display_dest})
 
     def media_list(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_media_artifacts(self.session_id, limit=int(args.get("limit", 50)))

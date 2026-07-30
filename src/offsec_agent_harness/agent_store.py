@@ -391,9 +391,11 @@ class AgentStore:
         return dict(row) if row else None
 
     def append_message(self, session_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> int:
+        safe_content = redact_secrets(content) or ""
+        safe_metadata = _redact_json_value(metadata or {})
         cur = self.conn.execute(
             "INSERT INTO messages(session_id, role, content, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, role, content, json.dumps(metadata or {}, sort_keys=True), utc_now()),
+            (session_id, role, safe_content, json.dumps(safe_metadata, sort_keys=True), utc_now()),
         )
         self.conn.execute("UPDATE sessions SET updated_at=? WHERE id=?", (utc_now(), session_id))
         self.conn.commit()
@@ -404,13 +406,7 @@ class AgentStore:
             "SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?",
             (session_id, limit),
         ).fetchall()
-        out = []
-        for row in reversed(rows):
-            out.append({
-                "id": row["id"], "role": row["role"], "content": row["content"],
-                "metadata": json.loads(row["metadata_json"] or "{}"), "created_at": row["created_at"],
-            })
-        return out
+        return [_message_row(row) for row in reversed(rows)]
 
     def all_messages(self, session_id: str, limit: int = 1000) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -454,14 +450,17 @@ class AgentStore:
 
     def remember(self, key: str, value: str, tags: str = "") -> int:
         now = utc_now()
-        existing = self.conn.execute("SELECT id FROM memories WHERE key=?", (key,)).fetchone()
+        safe_key = (redact_secrets(key) or "").strip() or "memory"
+        safe_value = redact_secrets(value) or ""
+        safe_tags = redact_secrets(tags) or ""
+        existing = self.conn.execute("SELECT id FROM memories WHERE key=?", (safe_key,)).fetchone()
         if existing:
-            self.conn.execute("UPDATE memories SET value=?, tags=?, updated_at=? WHERE key=?", (value, tags, now, key))
+            self.conn.execute("UPDATE memories SET value=?, tags=?, updated_at=? WHERE key=?", (safe_value, safe_tags, now, safe_key))
             self.conn.commit()
             return int(existing["id"])
         cur = self.conn.execute(
             "INSERT INTO memories(key, value, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (key, value, tags, now, now),
+            (safe_key, safe_value, safe_tags, now, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -482,7 +481,7 @@ class AgentStore:
                         (match_query, limit),
                     ).fetchall()
                     if rows:
-                        return [dict(row) for row in rows]
+                        return [_memory_row(row) for row in rows]
                 except sqlite3.OperationalError:
                     continue
         like = f"%{query}%"
@@ -490,12 +489,12 @@ class AgentStore:
             "SELECT * FROM memories WHERE key LIKE ? OR value LIKE ? OR tags LIKE ? ORDER BY updated_at DESC LIMIT ?",
             (like, like, like, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_memory_row(row) for row in rows]
 
     def create_context_summary(self, session_id: str, source_from: int | None, source_to: int | None, summary: str) -> int:
         cur = self.conn.execute(
             "INSERT INTO context_summaries(session_id, source_from, source_to, summary, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, source_from, source_to, summary, utc_now()),
+            (session_id, source_from, source_to, redact_secrets(summary) or "", utc_now()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -505,14 +504,14 @@ class AgentStore:
             "SELECT * FROM context_summaries WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _context_summary_row(row) if row else None
 
     def list_context_summaries(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM context_summaries WHERE session_id=? ORDER BY id DESC LIMIT ?",
             (session_id, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_context_summary_row(row) for row in rows]
 
     def create_context_node(
         self,
@@ -525,12 +524,23 @@ class AgentStore:
         depth: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        safe_sources = _redact_json_value(sources or [])
+        safe_metadata = _redact_json_value(metadata or {})
         cur = self.conn.execute(
             """
             INSERT INTO context_nodes(session_id, parent_id, depth, title, summary, source_json, metadata_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, parent_id, depth, title, summary, json.dumps(sources or [], sort_keys=True), json.dumps(metadata or {}, sort_keys=True), utc_now()),
+            (
+                session_id,
+                parent_id,
+                depth,
+                redact_secrets(title) or "",
+                redact_secrets(summary) or "",
+                json.dumps(safe_sources, sort_keys=True),
+                json.dumps(safe_metadata, sort_keys=True),
+                utc_now(),
+            ),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -730,12 +740,23 @@ class AgentStore:
         size: int,
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        safe_metadata = _redact_json_value(metadata or {})
         cur = self.conn.execute(
             """
             INSERT INTO media_artifacts(session_id, kind, source_path, artifact_path, mime_type, sha256, size, metadata_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, kind, source_path, artifact_path, mime_type, sha256, size, json.dumps(metadata or {}, sort_keys=True), utc_now()),
+            (
+                session_id,
+                redact_secrets(kind) or "file",
+                redact_secrets(source_path) or "",
+                redact_secrets(artifact_path) or "",
+                mime_type,
+                sha256,
+                size,
+                json.dumps(safe_metadata, sort_keys=True),
+                utc_now(),
+            ),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1180,10 +1201,11 @@ def next_run_for_schedule(schedule: str) -> str:
 def _redact_json_value(value: Any) -> Any:
     """Recursively redact secret-like strings before local SQLite storage/display.
 
-    Audit events, approvals, delegation batches, structured tool runs, and
-    finding evidence are intentionally useful for troubleshooting and closeout,
-    but they are still plaintext local records. Redacting at write time prevents
-    a plugin/tool/delegation/finding boundary from accidentally persisting bearer
+    Session messages, memories, context nodes, media metadata, audit events,
+    approvals, delegation batches, structured tool runs, and finding evidence are
+    intentionally useful for troubleshooting and closeout, but they are still
+    plaintext local records. Redacting at write time prevents a plugin/tool/chat
+    bridge/import/delegation/finding boundary from accidentally persisting bearer
     tokens, passwords, or API keys; read paths can apply it again to sanitize
     rows written by older Phobos versions.
     """
@@ -1218,8 +1240,30 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
         "id": row["id"],
         "session_id": row["session_id"],
         "role": row["role"],
-        "content": row["content"],
-        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "content": redact_secrets(row["content"]) or "",
+        "metadata": _redact_json_value(json.loads(row["metadata_json"] or "{}")),
+        "created_at": row["created_at"],
+    }
+
+
+def _memory_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "key": redact_secrets(row["key"]) or "",
+        "value": redact_secrets(row["value"]) or "",
+        "tags": redact_secrets(row["tags"]) or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _context_summary_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "source_from": row["source_from"],
+        "source_to": row["source_to"],
+        "summary": redact_secrets(row["summary"]) or "",
         "created_at": row["created_at"],
     }
 
@@ -1257,10 +1301,10 @@ def _context_node_row(row: sqlite3.Row) -> dict[str, Any]:
         "session_id": row["session_id"],
         "parent_id": row["parent_id"],
         "depth": row["depth"],
-        "title": row["title"],
-        "summary": row["summary"],
-        "sources": json.loads(row["source_json"] or "[]"),
-        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "title": redact_secrets(row["title"]) or "",
+        "summary": redact_secrets(row["summary"]) or "",
+        "sources": _redact_json_value(json.loads(row["source_json"] or "[]")),
+        "metadata": _redact_json_value(json.loads(row["metadata_json"] or "{}")),
         "created_at": row["created_at"],
     }
 
@@ -1283,13 +1327,13 @@ def _media_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "session_id": row["session_id"],
-        "kind": row["kind"],
-        "source_path": row["source_path"],
-        "artifact_path": row["artifact_path"],
+        "kind": redact_secrets(row["kind"]) or "file",
+        "source_path": redact_secrets(row["source_path"]) or "",
+        "artifact_path": redact_secrets(row["artifact_path"]) or "",
         "mime_type": row["mime_type"],
         "sha256": row["sha256"],
         "size": row["size"],
-        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "metadata": _redact_json_value(json.loads(row["metadata_json"] or "{}")),
         "created_at": row["created_at"],
     }
 

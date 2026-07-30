@@ -207,6 +207,66 @@ def main(argv: list[str] | None = None) -> int:
         checks["auto_memory_recall"] = '"mode": "plan_only"' in auto_plan and '"tool": "remember"' in auto_apply and "ACME parity" in recall
         checks["auto_loop_ok"] = "Auto loop completed" in auto_loop and "ACME loop parity" in loop_recall
 
+        storage_message_id = runtime.store.append_message(
+            runtime.session_id,
+            "user",
+            "storage boundary note token=storage-message-secret",
+            {"api_key": "storage-message-metadata-key", "nested": ["Cookie: sid=storage-message-cookie"]},
+        )
+        storage_memory = runtime.registry.run("remember", {
+            "key": "client-token=storage-memory-secret",
+            "value": "Authorization: Bearer storage-memory-bearer",
+            "tags": "api_key=storage-memory-tag",
+        })
+        storage_summary_id = runtime.store.create_context_summary(runtime.session_id, storage_message_id, storage_message_id, "storage summary password=storage-summary-secret")
+        storage_node_id = runtime.store.create_context_node(
+            runtime.session_id,
+            "storage node token=storage-node-title",
+            "storage node summary client_secret=storage-node-summary",
+            sources=[{"type": "message", "id": storage_message_id, "note": "token=storage-node-source"}],
+            metadata={"client_secret": "storage-node-metadata"},
+        )
+        storage_media_src = root / "proof-token=storage-media-name.txt"
+        storage_media_src.write_text("storage media content token=storage-media-content", encoding="utf-8")
+        storage_media = runtime.registry.run("media_import", {"path": str(storage_media_src)})
+        storage_media_id = int(storage_media.data.get("media", {}).get("id", 0)) if storage_media.data.get("media") else 0
+        storage_raw = {
+            "message": dict(runtime.store.conn.execute("SELECT content, metadata_json FROM messages WHERE id=?", (storage_message_id,)).fetchone()),
+            "memories": [dict(row) for row in runtime.store.conn.execute("SELECT key, value, tags FROM memories").fetchall()],
+            "summary": dict(runtime.store.conn.execute("SELECT summary FROM context_summaries WHERE id=?", (storage_summary_id,)).fetchone()),
+            "node": dict(runtime.store.conn.execute("SELECT title, summary, source_json, metadata_json FROM context_nodes WHERE id=?", (storage_node_id,)).fetchone()),
+            "media": dict(runtime.store.conn.execute("SELECT source_path, artifact_path, metadata_json FROM media_artifacts WHERE id=?", (storage_media_id,)).fetchone()),
+        }
+        storage_views = {
+            "memory_result": storage_memory.to_dict(),
+            "message": runtime.store.get_message(storage_message_id, session_id=runtime.session_id),
+            "recall": runtime.registry.run("recall", {"query": "client-token"}).to_dict(),
+            "context": runtime.registry.run("context_expand", {"id": storage_node_id}).to_dict(),
+            "media": runtime.registry.run("media_get", {"id": storage_media_id}).to_dict(),
+        }
+        storage_blob = json.dumps({"raw": storage_raw, "views": storage_views}, sort_keys=True)
+        storage_leaks = [
+            "storage-message-secret",
+            "storage-message-metadata-key",
+            "storage-message-cookie",
+            "storage-memory-secret",
+            "storage-memory-bearer",
+            "storage-memory-tag",
+            "storage-summary-secret",
+            "storage-node-title",
+            "storage-node-summary",
+            "storage-node-source",
+            "storage-node-metadata",
+            "storage-media-name",
+        ]
+        checks["message_memory_context_media_storage_redaction_ok"] = (
+            storage_memory.status == "ok"
+            and storage_media.status == "ok"
+            and all(leak not in storage_blob for leak in storage_leaks)
+            and "<REDACTED>" in storage_blob
+        )
+        write("storage-redaction-boundary.json", redact_secrets(json.dumps({"raw": storage_raw, "views": storage_views}, indent=2)) or "{}")
+
         handle("workspace-write", '/write path=notes/scope.md content="Scope app.example.test authz note"')
         read_back = handle("workspace-read", "/read path=notes/scope.md")
         search = handle("workspace-search", '/workspace-search query=authz glob="**/*.md"')
