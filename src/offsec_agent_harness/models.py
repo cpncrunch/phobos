@@ -90,12 +90,26 @@ class SafetyDecision:
         return data
 
 
+_SECRET_FIELD_PATTERN = (
+    r"(?:x[_-]?(?:api[_-]?key|auth[_-]?token|csrf[_-]?token|xsrf[_-]?token)|"
+    r"aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key|"
+    r"client[_-]?secret|clientsecret|private[_-]?key|proxy[_-]?authorization|"
+    r"session[_-]?token|id[_-]?token|csrf[_-]?token|xsrf[_-]?token|"
+    r"auth[_-]?token|access[_-]?token|refresh[_-]?token|"
+    r"api[_-]?key|password|passwd|pwd|token|secret)"
+)
+
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # PEM-style private keys may be pasted as evidence/config blocks; collapse the
+    # entire block before assignment/header regexes can leave line fragments.
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE | re.DOTALL), "<REDACTED_PRIVATE_KEY>"),
     # Header/assignment formats first so values after auth schemes are not leaked.
     (re.compile(r"(?i)\b(authorization\s*[:=]\s*(?:bearer|basic|digest|token)\s+)[^\s'\";,]+"), r"\1<REDACTED>"),
     (re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?!(?:bearer|basic|digest|token)\s+)[^\s'\";,]+"), r"\1<REDACTED>"),
     (re.compile(r"(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n'\"]+"), r"\1<REDACTED>"),
-    (re.compile(r"(?i)\b((?:password|passwd|pwd|token|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*)(['\"]?)[^\s'\";,]+\2"), r"\1\2<REDACTED>\2"),
+    (re.compile(rf"(?i)\b(({_SECRET_FIELD_PATTERN})\s*[:=]\s*)(['\"]?)[^\s'\";,]+\3"), r"\1\3<REDACTED>\3"),
+    (re.compile(rf"(?i)(['\"]{_SECRET_FIELD_PATTERN}['\"]\s*:\s*['\"])[^'\"]+(['\"])",), r"\1<REDACTED>\2"),
+    (re.compile(rf"(?i)(['\"]{_SECRET_FIELD_PATTERN}['\"]\s*:\s*)[^\s'\",}}]+"), r"\1<REDACTED>"),
 ]
 
 

@@ -113,7 +113,7 @@ class GuardrailTests(unittest.TestCase):
 
     def test_redacts_authorization_cookie_and_quoted_values(self):
         sample = (
-            "curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==' "
+            "curl -H 'Authorization: Basic QWxhZG...ZQ==' "
             "-H 'Cookie: sessionid=cookievalue; csrftoken=csrfvalue' "
             "https://app.example.test authorization=Bearer cli.secret "
             "api_key='quoted-key' password=\"quoted-pass\""
@@ -132,6 +132,31 @@ class GuardrailTests(unittest.TestCase):
         self.assertIn("authorization=Bearer <REDACTED>", redacted)
         self.assertIn("api_key='<REDACTED>'", redacted)
         self.assertIn('password="<REDACTED>"', redacted)
+
+    def test_redacts_cloud_oauth_headers_json_and_private_keys(self):
+        sample = (
+            "X-API-Key: header-secret-value\n"
+            "AWS_SECRET_ACCESS_KEY=aws-secret-value "
+            "client_secret=\"oauth-client-secret\" "
+            "private_key='-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----' "
+            "{\"session_token\":\"json-session-token\",\"proxy_authorization\":\"Bearer proxy-token\"}"
+        )
+        redacted = redact_secrets(sample) or ""
+        for leaked in [
+            "header-secret-value",
+            "aws-secret-value",
+            "oauth-client-secret",
+            "private-key-body",
+            "json-session-token",
+            "proxy-token",
+        ]:
+            self.assertNotIn(leaked, redacted)
+        self.assertIn("X-API-Key: <REDACTED>", redacted)
+        self.assertIn("AWS_SECRET_ACCESS_KEY=<REDACTED>", redacted)
+        self.assertIn('client_secret="<REDACTED>"', redacted)
+        self.assertIn("private_key='<REDACTED>'", redacted)
+        self.assertIn('"session_token":"<REDACTED>"', redacted)
+        self.assertIn('"proxy_authorization":"<REDACTED>"', redacted)
 
     def test_harness_records_decision(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -13,7 +13,39 @@ from .models import redact_secrets
 
 
 SCHEMA_VERSION = 5
-_SECRET_AUDIT_KEYS = {"password", "passwd", "pwd", "token", "auth_token", "access_token", "refresh_token", "api_key", "apikey", "api-key", "secret", "authorization", "bearer", "cookie", "cookies", "set_cookie"}
+_SECRET_AUDIT_KEYS = {
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+    "session_token",
+    "id_token",
+    "csrf_token",
+    "xsrf_token",
+    "api_key",
+    "apikey",
+    "api-key",
+    "x_api_key",
+    "x_auth_token",
+    "x_csrf_token",
+    "x_xsrf_token",
+    "client_secret",
+    "clientsecret",
+    "secret",
+    "secret_key",
+    "secret_access_key",
+    "aws_secret_access_key",
+    "private_key",
+    "authorization",
+    "proxy_authorization",
+    "bearer",
+    "cookie",
+    "cookies",
+    "set_cookie",
+}
 
 
 def utc_now() -> str:

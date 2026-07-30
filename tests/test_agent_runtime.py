@@ -303,7 +303,10 @@ class AgentRuntimeTests(unittest.TestCase):
                     {
                         "token": "token=leaky-audit-token",
                         "api_key": "leaky-audit-key-only",
-                        "nested": {"auth": "Authorization: Bearer leaky-audit-bearer"},
+                        "client_secret": "leaky-client-secret",
+                        "aws_secret_access_key": "leaky-aws-secret",
+                        "private_key": "-----BEGIN PRIVATE KEY-----\nleaky-private-key\n-----END PRIVATE KEY-----",
+                        "nested": {"auth": "Authorization: Bearer leaky-audit-bearer", "session_token": "leaky-session-token"},
                         "items": ["password=hunter2"],
                     },
                 )
@@ -312,11 +315,19 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("secret_audit_probe", audit)
                 self.assertNotIn("leaky-audit-token", audit)
                 self.assertNotIn("leaky-audit-key-only", audit)
+                self.assertNotIn("leaky-client-secret", audit)
+                self.assertNotIn("leaky-aws-secret", audit)
+                self.assertNotIn("leaky-private-key", audit)
+                self.assertNotIn("leaky-session-token", audit)
                 self.assertNotIn("leaky-audit-bearer", audit)
                 self.assertNotIn("hunter2", audit)
                 raw_audit = runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event='secret_audit_probe'").fetchone()[0]
                 self.assertNotIn("leaky-audit-token", raw_audit)
                 self.assertNotIn("leaky-audit-key-only", raw_audit)
+                self.assertNotIn("leaky-client-secret", raw_audit)
+                self.assertNotIn("leaky-aws-secret", raw_audit)
+                self.assertNotIn("leaky-private-key", raw_audit)
+                self.assertNotIn("leaky-session-token", raw_audit)
                 self.assertNotIn("leaky-audit-bearer", raw_audit)
                 self.assertNotIn("hunter2", raw_audit)
             finally:

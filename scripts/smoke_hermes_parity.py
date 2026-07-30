@@ -339,8 +339,12 @@ def main(argv: list[str] | None = None) -> int:
         auth_redaction_sample = (
             "curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==' "
             "-H 'Cookie: sessionid=smoke-cookie-value; csrftoken=smoke-csrf-value' "
+            "-H 'X-API-Key: smoke-header-api-key' "
             "https://app.example.test authorization=Bearer smoke-cli-bearer "
-            "api_key='smoke-quoted-key' password=\"smoke-quoted-pass\""
+            "api_key='smoke-quoted-key' password=\"smoke-quoted-pass\" "
+            "AWS_SECRET_ACCESS_KEY=smoke-aws-secret client_secret=\"smoke-client-secret\" "
+            "private_key='-----BEGIN PRIVATE KEY-----\nsmoke-private-key\n-----END PRIVATE KEY-----' "
+            '{"session_token":"smoke-session-token"}'
         )
         auth_redacted = redact_secrets(auth_redaction_sample) or ""
         auth_leak_markers = [
@@ -348,8 +352,13 @@ def main(argv: list[str] | None = None) -> int:
             "smoke-cookie-value",
             "smoke-csrf-value",
             "smoke-cli-bearer",
+            "smoke-header-api-key",
             "smoke-quoted-key",
             "smoke-quoted-pass",
+            "smoke-aws-secret",
+            "smoke-client-secret",
+            "smoke-private-key",
+            "smoke-session-token",
         ]
         auth_redaction_preview = auth_redacted if all(marker not in auth_redacted for marker in auth_leak_markers) else "<redaction failed; preview suppressed>"
         write("auth-header-cookie-redaction.json", json.dumps({"preview": auth_redaction_preview, "leak_free": auth_redaction_preview == auth_redacted}, indent=2, sort_keys=True))
@@ -357,8 +366,16 @@ def main(argv: list[str] | None = None) -> int:
             auth_redaction_preview == auth_redacted
             and "Cookie: <REDACTED>" in auth_redacted
             and "authorization=Bearer <REDACTED>" in auth_redacted
+            and "X-API-Key: <REDACTED>" in auth_redacted
             and "api_key='<REDACTED>'" in auth_redacted
             and 'password="<REDACTED>"' in auth_redacted
+        )
+        checks["cloud_oauth_private_key_redaction_ok"] = (
+            auth_redaction_preview == auth_redacted
+            and "AWS_SECRET_ACCESS_KEY=<REDACTED>" in auth_redacted
+            and 'client_secret="<REDACTED>"' in auth_redacted
+            and "private_key='<REDACTED>'" in auth_redacted
+            and '"session_token":"<REDACTED>"' in auth_redacted
         )
 
         nmap_output = "Starting Nmap\nNmap scan report for 10.10.0.5\nPORT    STATE SERVICE VERSION\n80/tcp  open  http    nginx 1.24\n443/tcp open  https   nginx 1.24\n"

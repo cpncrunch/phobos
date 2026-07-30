@@ -282,7 +282,7 @@ python scripts/smoke_hermes_parity.py
 
 The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest/verification, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, `/manifest-verify` re-hashes a prior manifest to flag changed/missing/unsafe/new local artifacts, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report with bounded local drill-down references. These review tools perform no target activity.
 
-Current verification: 45 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, tool-run/finding storage redaction, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, session-scoped LCM-style context node describe/expand, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted audit storage/display, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews with local drill-down links, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 47 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, tool-run/finding storage redaction, expanded Authorization/Cookie/cloud-OAuth/private-key redaction, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, session-scoped LCM-style context node describe/expand, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted audit storage/display, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews with local drill-down links, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -298,7 +298,7 @@ This turns the harness into a standalone agent-style application with:
 - local persistent memory and FTS-backed current/cross-session search;
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context; node describe/expand operations are scoped to the active session;
-- tool registry, JSON-style schemas, plugin loading, local skill loading, redacted audit log with common Authorization/Cookie/quoted-secret scrubbing, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
+- tool registry, JSON-style schemas, plugin loading, local skill loading, redacted audit log with common Authorization/Cookie/cloud-OAuth/private-key scrubbing, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable, session-bound evidence artifacts; structured tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with session-bound evidence/tool-run links, deterministic QA/readiness reviews, Markdown export, and field/evidence redaction before SQLite storage;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
@@ -587,6 +587,7 @@ session_bound_approval_store_ok=True
 approval_storage_redaction_ok=True
 audit_redaction_ok=True
 auth_header_cookie_redaction_ok=True
+cloud_oauth_private_key_redaction_ok=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
