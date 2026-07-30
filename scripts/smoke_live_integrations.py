@@ -18,6 +18,24 @@ if str(SRC) not in sys.path:
 from phobos_agent import AgentRuntimeConfig, EngagementROE, PhobosAgentRuntime, bridge_doctor
 
 
+def _scanner_binary(name: str) -> str | None:
+    env_var = f"PHOBOS_{name.upper()}_BIN"
+    candidates = [os.environ.get(env_var), str(Path.home() / "go" / "bin" / name), f"/root/go/bin/{name}", shutil.which(name)]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate)
+        if path.is_absolute() and path.exists() and os.access(path, os.X_OK):
+            return str(path)
+        if not path.is_absolute():
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run live-but-safe Phobos integration checks against local targets and platform auth endpoints.")
     parser.add_argument("--out-root", default="demo-phobos-live", help="Output directory to recreate under repo root.")
@@ -73,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     checks["live_bridge_auth_ready"] = "ready" if doctor.get("ok") else "missing-or-error"
     checks["live_bridge_no_message_send"] = doctor.get("message_sending") is False and all(item.get("message_sending") is False for item in doctor.get("checks", []))
 
-    binaries = {name: shutil.which(name) for name in ["nmap", "httpx", "nuclei", "ffuf"]}
+    binaries = {name: _scanner_binary(name) for name in ["nmap", "httpx", "nuclei", "ffuf"]}
     write("scanner-binaries.json", binaries)
     checks["scanner_binaries_present"] = all(binaries.values()) or not args.require_scanners
 

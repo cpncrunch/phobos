@@ -6,7 +6,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 
 ## Implemented modules
 
-- **ROE + guardrails** — explicit in-scope targets, prohibited techniques, stop conditions, secret redaction, and `allow` / `confirm` / `block` decisions.
+- **ROE + guardrails** — explicit in-scope targets, prohibited techniques, stop conditions, secret redaction, `allow` / `confirm` / `block` decisions, and granular local/VPS UI editing for safety mode, scope, stop conditions, and per-tool confirm/block policy.
 - **Burp MCP adapter** — probes a JSON-RPC/MCP endpoint, creates Repeater tabs from saved raw HTTP requests, and writes raw/redacted request artifacts. Dry-run by default.
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
@@ -308,7 +308,7 @@ This turns the harness into a standalone agent-style application with:
 - auth/token environment status checks that never reveal secret values;
 - local media/artifact import and listing with SHA-256 metadata;
 - operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, finding/tool-run views, and routes for status/tools/schemas/sessions/context/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run views, and routes for status/tools/schemas/sessions/context/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export;
@@ -360,11 +360,13 @@ phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/nmap target=10.10.0.5 ports=80,443 stdout="80/tcp open http nginx"'
 
-# Live wrapper execution requires scanner binaries on PATH. On Ubuntu/Kali:
+# Live wrapper execution requires scanner binaries. On Ubuntu/Kali:
 #   apt-get install -y nmap ffuf golang-go
 #   GOBIN=/usr/local/bin go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 #   GOBIN=/usr/local/bin go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-# Nuclei execution also requires an explicit safe template file/directory.
+# If Python's HTTPX CLI shadows ProjectDiscovery httpx, set PHOBOS_HTTPX_BIN=/path/to/httpx
+# (Phobos also prefers $HOME/go/bin/httpx when present). Nuclei execution requires
+# an explicit safe template file/directory.
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/nuclei url=https://app.example.test templates=./safe-templates/ execute=true rate_limit=1'
@@ -556,11 +558,12 @@ bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
+granular_guardrail_ui_ok=True
 remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=159
+artifact_count=160
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

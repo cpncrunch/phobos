@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     init_json = json.loads(init_stdout)
     checks["agent_init_ok"] = bool(init_json.get("session_id")) and init_json["runtime"]["skill_dirs"] == [str(skill_root)]
 
-    runtime = PhobosAgentRuntime(AgentAppConfig.load(config_path).to_runtime_config(str(engagement_path), str(db_path), "smoke"))
+    runtime = PhobosAgentRuntime(AgentAppConfig.load(config_path).to_runtime_config(str(engagement_path), str(db_path), "smoke", config_path=str(config_path)))
     gateway = None
     try:
         def handle(name: str, message: str) -> str:
@@ -485,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -512,13 +512,44 @@ def main(argv: list[str] | None = None) -> int:
         )
         with urllib.request.urlopen(tool_req, timeout=5) as response:
             gateway_tool = json.loads(response.read().decode("utf-8"))
+        guardrail_update_req = urllib.request.Request(
+            f"http://{host}:{port}/guardrails",
+            data=json.dumps({
+                "safety_mode": "standard",
+                "testing_window": "business hours with client lead online",
+                "notes": "Smoke guardrail UI note; no secrets.",
+                "in_scope_targets": ["app.example.test", "10.10.0.0/24"],
+                "allowed_techniques": ["web", "api", "service-enumeration", "offline-analysis"],
+                "prohibited_techniques": ["dos", "destructive", "persistence", "evasion", "malware", "credential-dumping"],
+                "stop_conditions": ["Stop before destructive actions or denial-of-service conditions.", "Stop before production state changes."],
+                "confirm_tools": ["nmap_scan"],
+                "blocked_tools": [],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(guardrail_update_req, timeout=5) as response:
+            gateway_guardrail_update = json.loads(response.read().decode("utf-8"))
         write("gateway-dashboard.html", dashboard)
         write("gateway-health.json", json.dumps(health, indent=2))
         write("gateway-status.json", json.dumps(gateway_status, indent=2))
+        write("gateway-guardrails.json", json.dumps({"before": gateway_gets.get("/guardrails"), "after": gateway_guardrail_update}, indent=2))
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
-        checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
+        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["granular_guardrail_ui_ok"] = (
+            (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
+            and gateway_guardrail_update.get("status") == "updated"
+            and gateway_guardrail_update.get("engagement", {}).get("safety_mode") == "standard"
+            and any(tool.get("name") == "nmap_scan" and tool.get("policy") == "confirm" for tool in gateway_guardrail_update.get("tools", []))
+            and gateway_guardrail_update.get("persisted", {}).get("engagement") is True
+            and gateway_guardrail_update.get("persisted", {}).get("runtime_policy") is True
+            and EngagementROE.load(engagement_path).safety_mode == "standard"
+            and EngagementROE.load(engagement_path).testing_window == "business hours with client lead online"
+            and "Smoke guardrail UI note" in EngagementROE.load(engagement_path).notes
+            and "nmap_scan" in AgentAppConfig.load(config_path).confirm_tools
+        )
 
         ui_client_stdout = run_cmd("ui-client", [sys.executable, "-m", "phobos_agent.agent_cli", "ui-client", "--out", str(output / "phobos-remote-ui.html"), "--agent-url", "https://phobos-vps.example"])
         remote_gateway = None

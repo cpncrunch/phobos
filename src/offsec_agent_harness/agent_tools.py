@@ -1376,7 +1376,25 @@ def _build_nmap_command(target: str, ports: str, profile: str) -> str:
 
 
 def _build_httpx_command(url: str) -> str:
-    return " ".join(shlex.quote(part) for part in ["httpx", "-json", "-status-code", "-title", "-tech-detect", "-follow-redirects", "-u", url])
+    return " ".join(shlex.quote(part) for part in [_scanner_binary("httpx", "PHOBOS_HTTPX_BIN"), "-json", "-status-code", "-title", "-tech-detect", "-follow-redirects", "-u", url])
+
+
+def _scanner_binary(name: str, env_var: str) -> str:
+    candidates = [os.environ.get(env_var), str(Path.home() / "go" / "bin" / name), f"/root/go/bin/{name}", shutil.which(name), name]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if Path(candidate).is_absolute():
+            path = Path(candidate)
+            if path.exists() and os.access(path, os.X_OK):
+                return str(path)
+            continue
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return name
 
 
 def _build_nuclei_command(url: str, rate_limit: int, templates: str = "") -> str:

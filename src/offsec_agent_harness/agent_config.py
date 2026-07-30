@@ -86,7 +86,7 @@ class AgentAppConfig:
         out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return out
 
-    def to_runtime_config(self, engagement_path: str, db_path: str, session_name: str) -> AgentRuntimeConfig:
+    def to_runtime_config(self, engagement_path: str, db_path: str, session_name: str, config_path: str | None = None) -> AgentRuntimeConfig:
         first = self.providers[0] if self.providers else ModelProviderConfig()
         return AgentRuntimeConfig(
             engagement_path=engagement_path,
@@ -111,6 +111,7 @@ class AgentAppConfig:
             skill_bundles={name: tuple(skills) for name, skills in self.skill_bundles.items()},
             bridges={name: dict(config) for name, config in self.bridges.items()},
             model_providers=tuple(asdict(provider) for provider in self.providers),
+            config_path=config_path,
         )
 
 

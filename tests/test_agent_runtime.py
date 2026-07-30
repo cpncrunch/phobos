@@ -699,7 +699,7 @@ PORT    STATE SERVICE VERSION
             )
             cfg_path = tmp_path / "agent.config.json"
             AgentAppConfig(workspace_dir=str(tmp_path / "workspace"), plugin_dirs=[str(plugin_dir)]).save(cfg_path)
-            cfg = AgentAppConfig.load(cfg_path).to_runtime_config(str(engagement), str(tmp_path / "agent.db"), "unit")
+            cfg = AgentAppConfig.load(cfg_path).to_runtime_config(str(engagement), str(tmp_path / "agent.db"), "unit", config_path=str(cfg_path))
             runtime = OffSecAgentRuntime(cfg)
             gateway = None
             try:
@@ -719,6 +719,56 @@ PORT    STATE SERVICE VERSION
                 with urllib.request.urlopen(f"http://{host}:{port}/", timeout=5) as response:
                     dashboard = response.read().decode("utf-8")
                 self.assertIn("Phobos Agent Gateway", dashboard)
+                self.assertIn("Granular Guardrails", dashboard)
+                with urllib.request.urlopen(f"http://{host}:{port}/guardrails", timeout=5) as response:
+                    guardrails = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(guardrails["engagement"]["safety_mode"], "non_destructive")
+                self.assertTrue(any(tool["name"] == "nmap_scan" for tool in guardrails["tools"]))
+                policy_req = urllib.request.Request(
+                    f"http://{host}:{port}/guardrails",
+                    data=json.dumps({
+                        "safety_mode": "standard",
+                        "testing_window": "business hours with client lead online",
+                        "notes": "UI test note: tighten only, no secrets.",
+                        "in_scope_targets": ["app.example.test", "10.10.0.0/24"],
+                        "allowed_techniques": ["web", "service-enumeration", "offline-analysis"],
+                        "prohibited_techniques": ["dos", "destructive", "persistence", "evasion", "malware", "credential-dumping"],
+                        "stop_conditions": ["Stop before customer data access.", "Stop before production changes."],
+                        "confirm_tools": ["nmap_scan"],
+                        "blocked_tools": ["export_pack"],
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(policy_req, timeout=5) as response:
+                    updated_policy = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(updated_policy["status"], "updated")
+                self.assertIn("engagement.safety_mode", updated_policy["changed"])
+                self.assertTrue(updated_policy["persisted"]["engagement"])
+                self.assertTrue(updated_policy["persisted"]["runtime_policy"])
+                persisted_roe = EngagementROE.load(engagement)
+                self.assertEqual(persisted_roe.safety_mode, "standard")
+                self.assertEqual(persisted_roe.testing_window, "business hours with client lead online")
+                self.assertIn("tighten only", persisted_roe.notes)
+                bad_req = urllib.request.Request(
+                    f"http://{host}:{port}/guardrails",
+                    data=json.dumps({"unknown_field": True}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as bad_exc:
+                    urllib.request.urlopen(bad_req, timeout=5)
+                self.assertEqual(bad_exc.exception.code, 400)
+                self.assertIn("unknown guardrail policy fields", bad_exc.exception.read().decode("utf-8"))
+                persisted_cfg = AgentAppConfig.load(cfg_path)
+                self.assertIn("nmap_scan", persisted_cfg.confirm_tools)
+                self.assertIn("export_pack", persisted_cfg.blocked_tools)
+                active_scan_confirm = runtime.handle_message('/assess target=app.example.test type=service-enumeration purpose="tight client" command="nmap -sV app.example.test"')
+                self.assertIn("Guardrail decision: confirm", active_scan_confirm)
+                policy_confirm = runtime.registry.run("nmap_scan", {"target": "app.example.test", "stdout": "80/tcp open http nginx"})
+                self.assertEqual(policy_confirm.status, "needs_approval", policy_confirm.to_dict())
+                policy_block = runtime.registry.run("export_pack", {})
+                self.assertEqual(policy_block.status, "blocked", policy_block.to_dict())
                 with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
                     gateway_status = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(gateway_status["status"], "ok")
@@ -740,6 +790,7 @@ PORT    STATE SERVICE VERSION
                     ("/media", "gateway-proof"),
                     ("/auth", "secret_values_redacted"),
                     ("/bridges", "discord"),
+                    ("/guardrails", "standard"),
                     ("/lcm", "nodes"),
                 ]:
                     with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:

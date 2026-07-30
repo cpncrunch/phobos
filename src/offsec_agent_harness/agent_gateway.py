@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from pathlib import Path
 import html
 import json
 import os
@@ -10,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .agent_runtime import OffSecAgentRuntime
 from .agent_bridges import BridgeConfig
+from .agent_config import AgentAppConfig
 
 
 class AgentGateway:
@@ -154,6 +156,9 @@ class AgentGateway:
                         bridge_configs = {name: BridgeConfig.from_dict(name, data).sanitized() for name, data in (runtime.config.bridges or {}).items()}
                         _write_json(self, {"bridges": bridge_configs})
                         return
+                    if path == "/guardrails":
+                        _write_json(self, _guardrail_policy(runtime))
+                        return
                 _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
@@ -168,6 +173,10 @@ class AgentGateway:
                 try:
                     payload = _read_json(self)
                     with lock:
+                        if path == "/guardrails":
+                            result = _apply_guardrail_policy(runtime, payload)
+                            _write_json(self, result)
+                            return
                         if path == "/message":
                             message = str(payload.get("message", ""))
                             if not message:
@@ -212,6 +221,8 @@ class AgentGateway:
                             _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
                             return
                     _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
+                except ValueError as exc:
+                    _write_json(self, {"error": str(exc)}, status=400)
                 except Exception as exc:  # pragma: no cover - defensive gateway boundary
                     _write_json(self, {"error": str(exc)}, status=500)
 
@@ -246,6 +257,7 @@ def _gateway_paths() -> list[str]:
         "/media",
         "/auth",
         "/bridges",
+        "/guardrails",
         "/audit",
         "/message",
         "/tool",
@@ -267,7 +279,7 @@ def remote_client_html(default_base_url: str = "") -> str:
   <style>
     :root {{ color-scheme: dark; }}
     body {{ font-family: system-ui, sans-serif; margin: 2rem; background: #0d1117; color: #e6edf3; }}
-    input, textarea {{ width: 100%; box-sizing: border-box; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: .5rem; padding: .55rem; }}
+    input, textarea, select {{ width: 100%; box-sizing: border-box; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: .5rem; padding: .55rem; }}
     textarea {{ min-height: 7rem; }} button {{ background: #238636; color: white; border: 0; border-radius: .5rem; padding: .55rem .85rem; margin-top: .4rem; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }} section {{ border: 1px solid #30363d; border-radius: .75rem; padding: 1rem; background: #111827; }}
     pre {{ white-space: pre-wrap; background: #161b22; border-radius: .5rem; padding: .75rem; max-height: 28rem; overflow: auto; }} code {{ background: #161b22; padding: .1rem .25rem; border-radius: .25rem; }}
@@ -275,7 +287,7 @@ def remote_client_html(default_base_url: str = "") -> str:
 </head>
 <body>
   <h1>Phobos Agent Remote Client</h1>
-  <p>Connect this browser to a local or VPS-hosted Phobos Agent gateway. The token stays in this browser tab and is sent as an <code>Authorization: Bearer</code> header; it is not stored by Phobos docs or config.</p>
+  <p>Connect this browser to a local or VPS-hosted Phobos Agent gateway. The token stays in this browser tab and is sent as an <code>Authorization: Bearer &lt;token&gt;</code> header; it is not stored by Phobos docs or config.</p>
   <section>
     <label>Agent base URL <input id="base" value="{default_base}" placeholder="https://agent.example.com or http://127.0.0.1:8765"></label><br><br>
     <label>Bearer token <input id="token" type="password" placeholder="paste gateway token from your password manager"></label><br>
@@ -291,6 +303,26 @@ def remote_client_html(default_base_url: str = "") -> str:
     <section><h2>Tasks</h2><pre id="tasks"></pre></section>
     <section><h2>Processes</h2><pre id="processes"></pre></section>
   </div>
+  <section>
+    <h2>Granular Guardrails</h2>
+    <p>Edit engagement ROE and per-tool policy. Engagement fields persist to the ROE JSON. Tool policy persists when the agent was started with a config file; otherwise it applies to this running session only.</p>
+    <label>Safety mode
+      <select id="guardSafety">
+        <option value="non_destructive">non_destructive — allow routine in-scope enumeration</option>
+        <option value="standard">standard — approval-gate active/noisy testing</option>
+      </select>
+    </label>
+    <label>Testing window<input id="guardWindow" placeholder="for example: business hours, change window ID, or not specified"></label>
+    <label>Scope targets, one per line<textarea id="guardScope"></textarea></label>
+    <label>Allowed techniques, one per line<textarea id="guardAllowed"></textarea></label>
+    <label>Prohibited techniques, one per line<textarea id="guardProhibited"></textarea></label>
+    <label>Stop conditions, one per line<textarea id="guardStops"></textarea></label>
+    <label>Notes<textarea id="guardNotes" placeholder="operator notes; do not paste secrets"></textarea></label>
+    <label>Tools requiring approval, one per line<textarea id="guardConfirm"></textarea></label>
+    <label>Blocked tools, one per line<textarea id="guardBlocked"></textarea></label>
+    <button onclick="saveGuardrails()">Save Guardrail Policy</button>
+    <pre id="guardrails"></pre>
+  </section>
   <section>
     <h2>Send Message</h2>
     <textarea id="message">/status</textarea>
@@ -321,8 +353,34 @@ function show(id, data) {{ document.getElementById(id).textContent = JSON.string
 function err(e) {{ document.getElementById('errors').textContent = String(e); }}
 async function health() {{ try {{ show('errors', await api('/health')); }} catch(e) {{ err(e); }} }}
 async function loadAll() {{ try {{ document.getElementById('errors').textContent=''; await Promise.all([
-  api('/status').then(d=>show('status',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
+  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
 ]); }} catch(e) {{ err(e); }} }}
+function setLines(id, values) {{ document.getElementById(id).value = (values || []).join('\\n'); }}
+function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}
+function getStopLines(id) {{ return document.getElementById(id).value.split(/\\n/).map(x=>x.trim()).filter(Boolean); }}
+function fillGuardrails(data) {{
+  const e = data.engagement || {{}}; const p = data.runtime_policy || {{}};
+  document.getElementById('guardSafety').value = e.safety_mode || 'non_destructive';
+  document.getElementById('guardWindow').value = e.testing_window || 'not specified';
+  document.getElementById('guardNotes').value = e.notes || '';
+  setLines('guardScope', e.in_scope_targets); setLines('guardAllowed', e.allowed_techniques); setLines('guardProhibited', e.prohibited_techniques); setLines('guardStops', e.stop_conditions);
+  setLines('guardConfirm', p.confirm_tools); setLines('guardBlocked', p.blocked_tools);
+}}
+async function saveGuardrails() {{ try {{
+  const payload = {{
+    safety_mode: document.getElementById('guardSafety').value,
+    testing_window: document.getElementById('guardWindow').value,
+    notes: document.getElementById('guardNotes').value,
+    in_scope_targets: getLines('guardScope'),
+    allowed_techniques: getLines('guardAllowed'),
+    prohibited_techniques: getLines('guardProhibited'),
+    stop_conditions: getStopLines('guardStops'),
+    confirm_tools: getLines('guardConfirm'),
+    blocked_tools: getLines('guardBlocked'),
+    persist: true
+  }};
+  show('guardrails', await api('/guardrails', {{method:'POST', body: JSON.stringify(payload)}})); await loadAll();
+}} catch(e) {{ err(e); }} }}
 async function sendMessage() {{ try {{ show('messageResult', await api('/message', {{method:'POST', body: JSON.stringify({{message: document.getElementById('message').value}})}})); await loadAll(); }} catch(e) {{ err(e); }} }}
 async function createFinding() {{ try {{ show('findingResult', await api('/finding', {{method:'POST', body: JSON.stringify({{title: document.getElementById('findingTitle').value, severity: document.getElementById('findingSeverity').value, description: document.getElementById('findingDescription').value}})}})); await loadAll(); }} catch(e) {{ err(e); }} }}
 </script>
@@ -412,6 +470,186 @@ def _is_local_bind(host: str) -> bool:
     return str(host).strip().lower() in {"127.0.0.1", "localhost", "::1", ""}
 
 
+SAFETY_MODE_DESCRIPTIONS = {
+    "non_destructive": "Allow routine in-scope active enumeration; confirm state-changing or lockout-sensitive actions; block destructive/disruptive/prohibited actions.",
+    "standard": "Conservative mode: active/noisy testing also queues for approval; destructive/disruptive/prohibited actions still block.",
+}
+
+
+def _guardrail_policy(runtime: OffSecAgentRuntime) -> dict[str, Any]:
+    tool_specs = sorted(runtime.registry.specs(), key=lambda spec: spec.name)
+    blocked = sorted(runtime.registry.blocked_tools)
+    confirm = sorted(runtime.registry.confirm_tools)
+    blocked_set = set(blocked)
+    confirm_set = set(confirm)
+    tools = []
+    for spec in tool_specs:
+        policy = "blocked" if spec.name in blocked_set else "confirm" if spec.name in confirm_set else "allow"
+        tools.append({"name": spec.name, "description": spec.description, "policy": policy})
+    config_path = runtime.config.config_path
+    return {
+        "engagement": {
+            "path": str(runtime.config.engagement_path),
+            "name": runtime.roe.name,
+            "authorized": runtime.roe.authorized,
+            "in_scope_targets": list(runtime.roe.in_scope_targets),
+            "allowed_techniques": list(runtime.roe.allowed_techniques),
+            "prohibited_techniques": list(runtime.roe.prohibited_techniques),
+            "testing_window": runtime.roe.testing_window,
+            "notes": runtime.roe.notes,
+            "stop_conditions": list(runtime.roe.stop_conditions),
+            "evidence_dir": runtime.roe.evidence_dir,
+            "safety_mode": runtime.roe.safety_mode,
+            "safety_modes": SAFETY_MODE_DESCRIPTIONS,
+        },
+        "runtime_policy": {
+            "blocked_tools": blocked,
+            "confirm_tools": confirm,
+            "config_path": str(config_path or ""),
+            "persistent": bool(config_path),
+        },
+        "tools": tools,
+        "presets": {
+            "balanced": {"safety_mode": "non_destructive", "description": "Default Caligo/Phobos posture."},
+            "conservative": {"safety_mode": "standard", "description": "Approval-gate active scanner/noisy tools."},
+            "import_only": {"description": "Block live scanner/process tools; parser/import paths can still be used explicitly.", "blocked_tools": ["nmap_scan", "httpx_probe", "nuclei_scan", "ffuf_scan", "run_command", "start_process"]},
+        },
+    }
+
+
+def _apply_guardrail_policy(runtime: OffSecAgentRuntime, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("guardrail payload must be an object")
+    engagement_keys = {"safety_mode", "in_scope_targets", "allowed_techniques", "prohibited_techniques", "testing_window", "notes", "stop_conditions"}
+    runtime_keys = {"blocked_tools", "confirm_tools"}
+    top_keys = engagement_keys | runtime_keys | {"engagement", "runtime_policy", "tool_policy", "persist"}
+    unknown_top = sorted(set(payload) - top_keys)
+    if unknown_top:
+        raise ValueError("unknown guardrail policy fields: " + ", ".join(unknown_top))
+    if "engagement" in payload and not isinstance(payload.get("engagement"), dict):
+        raise ValueError("engagement must be an object")
+    if "runtime_policy" in payload and not isinstance(payload.get("runtime_policy"), dict):
+        raise ValueError("runtime_policy must be an object")
+    if "tool_policy" in payload and not isinstance(payload.get("tool_policy"), dict):
+        raise ValueError("tool_policy must be an object")
+    engagement_payload = payload.get("engagement") if isinstance(payload.get("engagement"), dict) else payload
+    if engagement_payload is not payload:
+        unknown_engagement = sorted(set(engagement_payload) - engagement_keys)
+        if unknown_engagement:
+            raise ValueError("unknown engagement policy fields: " + ", ".join(unknown_engagement))
+    runtime_payload = payload.get("runtime_policy") or payload.get("tool_policy")
+    if isinstance(runtime_payload, dict):
+        unknown_runtime = sorted(set(runtime_payload) - runtime_keys)
+        if unknown_runtime:
+            raise ValueError("unknown runtime policy fields: " + ", ".join(unknown_runtime))
+    else:
+        runtime_payload = payload
+    persist = bool(payload.get("persist", True))
+    changed: list[str] = []
+    warnings: list[str] = []
+
+    safety_mode = engagement_payload.get("safety_mode")
+    if safety_mode is not None:
+        normalized = str(safety_mode).strip().lower().replace("-", "_")
+        if normalized not in SAFETY_MODE_DESCRIPTIONS:
+            raise ValueError("safety_mode must be non_destructive or standard")
+        if runtime.roe.safety_mode != normalized:
+            runtime.roe.safety_mode = normalized
+            changed.append("engagement.safety_mode")
+
+    list_fields = {
+        "in_scope_targets": True,
+        "allowed_techniques": True,
+        "prohibited_techniques": True,
+        "stop_conditions": False,
+    }
+    for field, comma_split in list_fields.items():
+        if field in engagement_payload:
+            values = _coerce_policy_list(engagement_payload.get(field), comma_split=comma_split)
+            if getattr(runtime.roe, field) != values:
+                setattr(runtime.roe, field, values)
+                changed.append(f"engagement.{field}")
+
+    if "testing_window" in engagement_payload:
+        testing_window = str(engagement_payload.get("testing_window") or "not specified")
+        if runtime.roe.testing_window != testing_window:
+            runtime.roe.testing_window = testing_window
+            changed.append("engagement.testing_window")
+    if "notes" in engagement_payload:
+        notes = str(engagement_payload.get("notes") or "")
+        if runtime.roe.notes != notes:
+            runtime.roe.notes = notes
+            changed.append("engagement.notes")
+
+    engagement_changed = any(item.startswith("engagement.") for item in changed)
+    if engagement_changed and persist:
+        runtime.roe.save(runtime.config.engagement_path)
+
+    policy_changed = False
+    if "blocked_tools" in runtime_payload or "confirm_tools" in runtime_payload:
+        available = {spec.name for spec in runtime.registry.specs()}
+        blocked = set(_coerce_policy_list(runtime_payload.get("blocked_tools", sorted(runtime.registry.blocked_tools))))
+        confirm = set(_coerce_policy_list(runtime_payload.get("confirm_tools", sorted(runtime.registry.confirm_tools))))
+        unknown = sorted((blocked | confirm) - available)
+        if unknown:
+            warnings.append("Unknown tool names ignored: " + ", ".join(unknown))
+        blocked &= available
+        confirm &= available
+        confirm -= blocked
+        if blocked != runtime.registry.blocked_tools:
+            runtime.registry.blocked_tools = blocked
+            runtime.config.blocked_tools = tuple(sorted(blocked))
+            changed.append("runtime_policy.blocked_tools")
+            policy_changed = True
+        if confirm != runtime.registry.confirm_tools:
+            runtime.registry.confirm_tools = confirm
+            runtime.config.confirm_tools = tuple(sorted(confirm))
+            changed.append("runtime_policy.confirm_tools")
+            policy_changed = True
+
+    config_persisted = False
+    if policy_changed and persist:
+        if runtime.config.config_path:
+            cfg_path = Path(runtime.config.config_path)
+            cfg = AgentAppConfig.load(cfg_path)
+            cfg.blocked_tools = sorted(runtime.registry.blocked_tools)
+            cfg.confirm_tools = sorted(runtime.registry.confirm_tools)
+            cfg.save(cfg_path)
+            config_persisted = True
+        else:
+            warnings.append("Runtime tool policy updated in memory only because no agent.config.json path is attached to this runtime.")
+
+    runtime.store.audit(runtime.session_id, "guardrail_policy_updated", {"changed": changed, "persist": persist, "config_persisted": config_persisted, "warnings": warnings})
+    result = _guardrail_policy(runtime)
+    result["status"] = "updated"
+    result["changed"] = changed
+    result["persisted"] = {"engagement": bool(engagement_changed and persist), "runtime_policy": config_persisted}
+    result["warnings"] = warnings
+    return result
+
+
+def _coerce_policy_list(value: Any, *, comma_split: bool = True) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if comma_split:
+            raw = value.replace("\r", "\n").replace(",", "\n").split("\n")
+        else:
+            raw = value.replace("\r", "\n").split("\n")
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item).strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out
+
+
 def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     status = runtime.registry.run("runtime_status", {}).data
     tasks = runtime.store.list_tasks(runtime.session_id, status="all", limit=20)
@@ -421,6 +659,9 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     delegations = runtime.store.list_delegations(runtime.session_id, limit=8)
     findings = runtime.store.list_findings(runtime.session_id, status="all", limit=8)
     tool_runs = runtime.store.list_tool_runs(runtime.session_id, limit=8)
+    guardrails = _guardrail_policy(runtime)
+    engagement_policy = guardrails["engagement"]
+    runtime_policy = guardrails["runtime_policy"]
     tool_count = len(runtime.registry.specs())
     task_items = "\n".join(f"<li><code>{html.escape(task['status'])}</code> #{task['id']} {html.escape(task['content'])}</li>" for task in tasks) or "<li>No tasks yet.</li>"
     approval_items = "\n".join(f"<li>#{approval['id']} <code>{html.escape(approval['tool_name'])}</code> {html.escape(str(approval.get('requested_at', '')))}</li>" for approval in approvals) or "<li>No pending approvals.</li>"
@@ -429,7 +670,17 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     delegation_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(str(item.get('prompt', ''))[:160])}</li>" for item in delegations) or "<li>No delegations yet.</li>"
     finding_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(item['severity'])} — {html.escape(item['title'])}</li>" for item in findings) or "<li>No findings yet.</li>"
     tool_run_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['tool_name'])}</code> {html.escape(item['status'])} — {html.escape(item['target'])}</li>" for item in tool_runs) or "<li>No structured tool runs yet.</li>"
-    api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/tool", "/finding", "/approve", "/deny", "/run-due"})
+    api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/tool", "/finding", "/guardrails", "/approve", "/deny", "/run-due"})
+    safety_non_destructive_selected = "selected" if str(runtime.roe.safety_mode) == "non_destructive" else ""
+    safety_standard_selected = "selected" if str(runtime.roe.safety_mode) == "standard" else ""
+    scope_text = html.escape("\n".join(engagement_policy["in_scope_targets"]))
+    allowed_text = html.escape("\n".join(engagement_policy["allowed_techniques"]))
+    prohibited_text = html.escape("\n".join(engagement_policy["prohibited_techniques"]))
+    testing_window_text = html.escape(str(engagement_policy["testing_window"]), quote=True)
+    notes_text = html.escape(str(engagement_policy.get("notes", "")))
+    stops_text = html.escape("\n".join(engagement_policy["stop_conditions"]))
+    confirm_tools_text = html.escape("\n".join(runtime_policy["confirm_tools"]))
+    blocked_tools_text = html.escape("\n".join(runtime_policy["blocked_tools"]))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -441,8 +692,10 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     a {{ color: #7dd3fc; }} code, pre {{ background: #161b22; border-radius: .35rem; padding: .15rem .35rem; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }}
     section {{ border: 1px solid #30363d; border-radius: .75rem; padding: 1rem; background: #111827; }}
-    textarea {{ width: 100%; min-height: 7rem; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: .5rem; padding: .5rem; }}
+    input, textarea, select {{ width: 100%; min-height: 2.4rem; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: .5rem; padding: .5rem; box-sizing: border-box; }}
+    textarea {{ min-height: 7rem; }}
     button {{ background: #238636; color: white; border: 0; border-radius: .5rem; padding: .5rem .8rem; }}
+    .wide {{ grid-column: 1 / -1; }}
   </style>
 </head>
 <body>
@@ -457,6 +710,26 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     <section><h2>Media / Voice Artifacts</h2><ul>{media_items}</ul></section>
     <section><h2>Local Delegations</h2><ul>{delegation_items}</ul></section>
     <section><h2>Recent Messages</h2><ul>{recent_items}</ul></section>
+    <section class="wide">
+      <h2>Granular Guardrails</h2>
+      <p>Adjust engagement ROE and per-tool runtime policy. ROE fields persist to <code>{html.escape(str(runtime.config.engagement_path))}</code>. Tool policy persistence: <code>{html.escape(str(runtime_policy['persistent']))}</code>{' via <code>' + html.escape(str(runtime_policy['config_path'])) + '</code>' if runtime_policy['config_path'] else ' (current runtime only unless started with --config)'}.</p>
+      <label>Safety mode
+        <select id="guardSafety">
+          <option value="non_destructive" {safety_non_destructive_selected}>non_destructive — allow routine in-scope enumeration</option>
+          <option value="standard" {safety_standard_selected}>standard — approval-gate active/noisy testing</option>
+        </select>
+      </label>
+      <label>Testing window<input id="guardWindow" value="{testing_window_text}" placeholder="business hours, change window ID, or not specified"></label>
+      <label>Scope targets, one per line<textarea id="guardScope">{scope_text}</textarea></label>
+      <label>Allowed techniques, one per line<textarea id="guardAllowed">{allowed_text}</textarea></label>
+      <label>Prohibited techniques, one per line<textarea id="guardProhibited">{prohibited_text}</textarea></label>
+      <label>Stop conditions, one per line<textarea id="guardStops">{stops_text}</textarea></label>
+      <label>Notes<textarea id="guardNotes" placeholder="operator notes; do not paste secrets">{notes_text}</textarea></label>
+      <label>Tools requiring approval, one per line<textarea id="guardConfirm">{confirm_tools_text}</textarea></label>
+      <label>Blocked tools, one per line<textarea id="guardBlocked">{blocked_tools_text}</textarea></label>
+      <button onclick="saveGuardrails()">Save Guardrail Policy</button>
+      <pre id="guardrailResponse"></pre>
+    </section>
   </div>
   <section>
     <h2>Send Message</h2>
@@ -469,6 +742,24 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     <p>Tools registered: {tool_count}. JSON endpoints: {api_links}. POST endpoints: <code>/message</code>, <code>/tool</code>, <code>/finding</code>, <code>/approve</code>, <code>/deny</code>, <code>/run-due</code>.</p>
   </section>
   <script>
+    function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}
+    function getStopLines(id) {{ return document.getElementById(id).value.split(/\\n/).map(x=>x.trim()).filter(Boolean); }}
+    async function saveGuardrails() {{
+      const payload = {{
+        safety_mode: document.getElementById('guardSafety').value,
+        testing_window: document.getElementById('guardWindow').value,
+        notes: document.getElementById('guardNotes').value,
+        in_scope_targets: getLines('guardScope'),
+        allowed_techniques: getLines('guardAllowed'),
+        prohibited_techniques: getLines('guardProhibited'),
+        stop_conditions: getStopLines('guardStops'),
+        confirm_tools: getLines('guardConfirm'),
+        blocked_tools: getLines('guardBlocked'),
+        persist: true
+      }};
+      const response = await fetch('/guardrails', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload)}});
+      document.getElementById('guardrailResponse').textContent = JSON.stringify(await response.json(), null, 2);
+    }}
     async function sendMessage() {{
       const response = await fetch('/message', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{message: document.getElementById('message').value}})}});
       document.getElementById('response').textContent = JSON.stringify(await response.json(), null, 2);

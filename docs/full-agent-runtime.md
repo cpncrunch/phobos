@@ -16,7 +16,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles and auth status:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values.
 - **Approvals:** confirm-level commands are queued in SQLite and require `/approve id=<n>` before execution/start.
-- **Runtime tool policy:** config/CLI can block or approval-gate arbitrary tool names, independent of ROE guardrails.
+- **Runtime tool policy:** config/CLI and the authenticated gateway UI/API can block or approval-gate arbitrary tool names, independent of ROE guardrails.
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
@@ -26,7 +26,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
-- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, and views for schemas, findings, tool runs, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
+- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
@@ -315,7 +315,7 @@ For a local binary/readiness check that avoids customer targets, run:
 python scripts/smoke_live_integrations.py --require-scanners
 ```
 
-The live smoke creates a temporary local HTTP server, runs the four wrappers only against `127.0.0.1`, generates a one-request Nuclei template, writes artifacts under `demo-phobos-live/`, and checks bridge auth readiness without sending any platform messages. If real bridge token env vars are present and should be mandatory, add `--require-bridge-tokens`.
+The live smoke creates a temporary local HTTP server, runs the four wrappers only against `127.0.0.1`, generates a one-request Nuclei template, writes artifacts under `demo-phobos-live/`, and checks bridge auth readiness without sending any platform messages. Its scanner lookup uses the same ProjectDiscovery `httpx` preference/`PHOBOS_HTTPX_BIN` override described above. If real bridge token env vars are present and should be mandatory, add `--require-bridge-tokens`.
 
 When a scanner run supports a finding, create and promote a lifecycle record instead of treating every scanner hit as report-ready:
 
@@ -543,14 +543,18 @@ GET  /delegations
 GET  /media
 GET  /auth
 GET  /bridges
+GET  /guardrails
 GET  /audit
 POST /message   {"message": "/tools"}
 POST /tool      {"name": "tool_name", "args": {}}
 POST /finding   {"title": "Finding title", "severity": "Medium", "description": "..."}
+POST /guardrails {"safety_mode": "standard", "confirm_tools": ["nmap_scan"], "blocked_tools": []}
 POST /approve   {"id": 1, "by": "gateway"}
 POST /deny      {"id": 1, "by": "gateway", "reason": "outside window"}
 POST /run-due   {}
 ```
+
+The dashboard and remote browser client include a **Granular Guardrails** editor. It can adjust `safety_mode`, scope targets, allowed/prohibited techniques, testing windows, stop conditions, and operator notes, and per-tool `confirm_tools` / `blocked_tools`. ROE fields persist to the engagement JSON. Tool policy persists to `agent.config.json` when the runtime was started with `--config`; otherwise the tool policy applies to the running session and the API response warns that it is in-memory only.
 
 Bind to localhost unless you have a clear reason to expose the agent on another interface.
 
@@ -653,11 +657,12 @@ bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
+granular_guardrail_ui_ok=True
 remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=159
+artifact_count=160
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -711,6 +716,7 @@ gateway-dashboard.html
 gateway-health.json
 gateway-routes.json
 gateway-status.json
+gateway-guardrails.json
 gateway-tool.json
 remote-gateway-auth.json
 ui-client.stdout.txt

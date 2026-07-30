@@ -39,6 +39,7 @@ class AgentRuntimeConfig:
     preload_skills: tuple[str, ...] = ()
     skill_bundles: dict[str, tuple[str, ...]] | None = None
     bridges: dict[str, dict[str, Any]] | None = None
+    config_path: str | None = None
 
 
 class OffSecAgentRuntime:

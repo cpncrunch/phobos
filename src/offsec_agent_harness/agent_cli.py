@@ -204,7 +204,7 @@ def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
         if not config_path and (profile_dir / "agent.config.json").exists():
             config_path = str(profile_dir / "agent.config.json")
     if config_path:
-        cfg = AgentAppConfig.load(config_path).to_runtime_config(args.engagement, db_path, args.session)
+        cfg = AgentAppConfig.load(config_path).to_runtime_config(args.engagement, db_path, args.session, config_path=str(config_path))
     else:
         cfg = AgentRuntimeConfig(
             engagement_path=args.engagement,
