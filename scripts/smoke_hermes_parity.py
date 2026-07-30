@@ -258,6 +258,26 @@ def main(argv: list[str] | None = None) -> int:
             and "blocked" in destructive.lower()
             and "blocked" in dos.lower()
         )
+        runtime.store.audit(
+            runtime.session_id,
+            "audit_redaction_smoke",
+            {
+                "token": "token=smoke-audit-token",
+                "api_key": "smoke-audit-key-only",
+                "nested": {"authorization": "Authorization: Bearer smoke-audit-bearer"},
+                "items": ["password=smoke-audit-password"],
+            },
+        )
+        audit_redaction = handle("audit-redaction", "/audit limit=50")
+        raw_audit = runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event='audit_redaction_smoke'").fetchone()[0]
+        checks["audit_redaction_ok"] = (
+            "audit_redaction_smoke" in audit_redaction
+            and "<REDACTED>" in audit_redaction
+            and "smoke-audit-token" not in audit_redaction + raw_audit
+            and "smoke-audit-key-only" not in audit_redaction + raw_audit
+            and "smoke-audit-bearer" not in audit_redaction + raw_audit
+            and "smoke-audit-password" not in audit_redaction + raw_audit
+        )
 
         nmap_output = "Starting Nmap\nNmap scan report for 10.10.0.5\nPORT    STATE SERVICE VERSION\n80/tcp  open  http    nginx 1.24\n443/tcp open  https   nginx 1.24\n"
         nmap_structured = runtime.registry.run("nmap_scan", {"target": "10.10.0.5", "ports": "80,443", "stdout": nmap_output})

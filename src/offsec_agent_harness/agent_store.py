@@ -9,8 +9,11 @@ import re
 import sqlite3
 import uuid
 
+from .models import redact_secrets
+
 
 SCHEMA_VERSION = 5
+_SECRET_AUDIT_KEYS = {"password", "passwd", "pwd", "token", "auth_token", "access_token", "refresh_token", "api_key", "apikey", "api-key", "secret", "authorization", "bearer"}
 
 
 def utc_now() -> str:
@@ -1026,9 +1029,10 @@ class AgentStore:
         return out
 
     def audit(self, session_id: str | None, event: str, data: dict[str, Any] | None = None) -> int:
+        redacted_data = _redact_json_value(data or {})
         cur = self.conn.execute(
             "INSERT INTO audit_log(session_id, event, data_json, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, event, json.dumps(data or {}, sort_keys=True), utc_now()),
+            (session_id, event, json.dumps(redacted_data, sort_keys=True), utc_now()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1041,7 +1045,7 @@ class AgentStore:
         out = []
         for row in rows:
             data = dict(row)
-            data["data"] = json.loads(data.pop("data_json") or "{}")
+            data["data"] = _redact_json_value(json.loads(data.pop("data_json") or "{}"))
             out.append(data)
         return out
 
@@ -1067,6 +1071,40 @@ def next_run_for_schedule(schedule: str) -> str:
         except ValueError:
             pass
     return (now + timedelta(days=1)).isoformat()
+
+
+def _redact_json_value(value: Any) -> Any:
+    """Recursively redact secret-like strings before audit storage/display.
+
+    Audit events are intentionally useful for troubleshooting and closeout, but
+    they are still local logs. Redacting at both write and read time prevents a
+    plugin/tool boundary from accidentally persisting bearer tokens, passwords,
+    or API keys and also sanitizes rows written by older Phobos versions.
+    """
+
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_secret_audit_key(key_text):
+                redacted[key_text] = None if item is None else "<REDACTED>"
+                continue
+            redacted[key_text] = _redact_json_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_json_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value) or ""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_secrets(str(value)) or ""
+
+
+def _is_secret_audit_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in _SECRET_AUDIT_KEYS
 
 
 def _message_row(row: sqlite3.Row) -> dict[str, Any]:

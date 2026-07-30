@@ -274,8 +274,28 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("bg-ok", log.data["stdout"])
                 processes = runtime.handle_message('/processes')
                 self.assertIn("background smoke", processes)
+                runtime.store.audit(
+                    runtime.session_id,
+                    "secret_audit_probe",
+                    {
+                        "token": "token=leaky-audit-token",
+                        "api_key": "leaky-audit-key-only",
+                        "nested": {"auth": "Authorization: Bearer leaky-audit-bearer"},
+                        "items": ["password=hunter2"],
+                    },
+                )
                 audit = runtime.handle_message('/audit limit=20')
                 self.assertIn("tool_call", audit)
+                self.assertIn("secret_audit_probe", audit)
+                self.assertNotIn("leaky-audit-token", audit)
+                self.assertNotIn("leaky-audit-key-only", audit)
+                self.assertNotIn("leaky-audit-bearer", audit)
+                self.assertNotIn("hunter2", audit)
+                raw_audit = runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event='secret_audit_probe'").fetchone()[0]
+                self.assertNotIn("leaky-audit-token", raw_audit)
+                self.assertNotIn("leaky-audit-key-only", raw_audit)
+                self.assertNotIn("leaky-audit-bearer", raw_audit)
+                self.assertNotIn("hunter2", raw_audit)
             finally:
                 runtime.close()
 
