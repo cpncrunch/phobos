@@ -816,10 +816,10 @@ class OffSecToolRegistry:
     def context_describe(self, args: dict[str, Any]) -> ToolResult:
         node_arg = args.get("id") or args.get("node_id")
         if node_arg:
-            node = self.store.get_context_node(int(node_arg))
+            node = self.store.get_context_node(int(node_arg), session_id=self.session_id)
             if not node:
-                return ToolResult("error", f"Context node {node_arg} not found.")
-            children = self.store.child_context_nodes(int(node_arg))
+                return ToolResult("error", f"Context node {node_arg} not found in this session.")
+            children = self.store.child_context_nodes(int(node_arg), session_id=self.session_id)
             preview = dict(node)
             preview["summary_preview"] = preview.pop("summary")[:1000]
             preview["source_count"] = len(node.get("sources", []))
@@ -832,18 +832,18 @@ class OffSecToolRegistry:
 
     def context_expand(self, args: dict[str, Any]) -> ToolResult:
         node_id = int(args.get("id") or args.get("node_id"))
-        node = self.store.get_context_node(node_id)
+        node = self.store.get_context_node(node_id, session_id=self.session_id)
         if not node:
-            return ToolResult("error", f"Context node {node_id} not found.")
+            return ToolResult("error", f"Context node {node_id} not found in this session.")
         source_limit = int(args.get("source_limit", 40))
         expanded_sources = []
         for source in node.get("sources", [])[:source_limit]:
             if source.get("type") == "message":
-                message = self.store.get_message(int(source.get("id")))
+                message = self.store.get_message(int(source.get("id")), session_id=self.session_id)
                 if message:
                     expanded_sources.append({"type": "message", "message": _redacted_mapping(message)})
             elif source.get("type") == "context_node":
-                child = self.store.get_context_node(int(source.get("id")))
+                child = self.store.get_context_node(int(source.get("id")), session_id=self.session_id)
                 if child:
                     expanded_sources.append({"type": "context_node", "node": {"id": child["id"], "title": child["title"], "summary": redact_secrets(child["summary"])}})
         return ToolResult("ok", f"Context node {node_id} expanded.", {"node": _redacted_mapping(node), "expanded_sources": expanded_sources})

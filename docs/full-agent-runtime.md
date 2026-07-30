@@ -7,7 +7,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v5.
 - **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; Hindsight-style aliases (`/hindsight-retain`, `/hindsight-recall`, `/hindsight-reflect`) store/search/synthesize through the same local memory and context stores; memory and current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
-- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
+- **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported. Node describe/expand by integer ID is scoped to the active session.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs and without target activity.
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, deterministic QA/readiness reviews, and Markdown exports for report drafting.
@@ -381,7 +381,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --message '/finding-export id=1'
 ```
 
-Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact. Finding and structured-tool-run detail operations are scoped to the active session: `/finding-get`, `/finding-update`, `/finding-export`, `/finding-review`, `/tool-run`, and their gateway detail routes return `not found in this session` rather than exposing or mutating records from another local session in the same SQLite DB. Task updates and process controls are session-scoped too: `/task-update`, `/poll`, `/wait`, `/log`, and `/kill` refuse IDs owned by another local session instead of leaking process logs, changing task state, or terminating another operator's process. `/finding-review` is a deterministic, local-only QA pass: it does not execute target actions, and it writes a Markdown review that separates blocking report-readiness gaps from advisory improvements such as missing negative controls, reproduction notes, or cleanup/side-effect notes.
+Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact. Finding and structured-tool-run detail operations are scoped to the active session: `/finding-get`, `/finding-update`, `/finding-export`, `/finding-review`, `/tool-run`, and their gateway detail routes return `not found in this session` rather than exposing or mutating records from another local session in the same SQLite DB. LCM-style context-node detail operations are session-scoped too: `/lcm-describe id=...` and `/lcm-expand id=...` refuse IDs owned by another local session, and child-node listings filter to the active session before returning summaries. Task updates and process controls are session-scoped as well: `/task-update`, `/poll`, `/wait`, `/log`, and `/kill` refuse IDs owned by another local session instead of leaking process logs, changing task state, or terminating another operator's process. `/finding-review` is a deterministic, local-only QA pass: it does not execute target actions, and it writes a Markdown review that separates blocking report-readiness gaps from advisory improvements such as missing negative controls, reproduction notes, or cleanup/side-effect notes.
 
 ## Workspace, process, and context examples
 
@@ -681,7 +681,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 42 tests
+Ran 43 tests
 OK
 ```
 
@@ -714,13 +714,16 @@ guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
+session_bound_finding_tool_detail_ok=True
 artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
 task_board_roundtrip=True
+session_bound_task_process_ok=True
 context_compacted=True
 lcm_context_nodes_ok=True
+session_bound_context_nodes_ok=True
 hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
@@ -729,6 +732,8 @@ safety_preflight_ok=True
 media_artifacts_ok=True
 evidence_timeline_ok=True
 evidence_manifest_ok=True
+evidence_manifest_verify_ok=True
+evidence_manifest_verify_flags_ok=True
 closeout_review_ok=True
 closeout_drilldown_links_ok=True
 sealed_snapshot_roundtrip_ok=True
@@ -748,7 +753,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=209
+artifact_count=230
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -821,6 +826,7 @@ lcm-compact.json
 lcm-describe.json
 lcm-expand.json
 lcm-query.json
+lcm-session-scope.json
 legacy-term-grep.txt
 media-import.json
 media-list.json

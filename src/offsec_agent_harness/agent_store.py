@@ -381,8 +381,11 @@ class AgentStore:
         ).fetchall()
         return [_message_row(row) for row in rows]
 
-    def get_message(self, message_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+    def get_message(self, message_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM messages WHERE id=? AND session_id=?", (message_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         return _message_row(row) if row else None
 
     def search_messages(self, session_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -494,8 +497,11 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def get_context_node(self, node_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM context_nodes WHERE id=?", (node_id,)).fetchone()
+    def get_context_node(self, node_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM context_nodes WHERE id=? AND session_id=?", (node_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM context_nodes WHERE id=?", (node_id,)).fetchone()
         return _context_node_row(row) if row else None
 
     def list_context_nodes(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -505,8 +511,14 @@ class AgentStore:
         ).fetchall()
         return [_context_node_row(row) for row in rows]
 
-    def child_context_nodes(self, parent_id: int) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM context_nodes WHERE parent_id=? ORDER BY id", (parent_id,)).fetchall()
+    def child_context_nodes(self, parent_id: int, session_id: str | None = None) -> list[dict[str, Any]]:
+        if session_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM context_nodes WHERE parent_id=? AND session_id=? ORDER BY id",
+                (parent_id, session_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM context_nodes WHERE parent_id=? ORDER BY id", (parent_id,)).fetchall()
         return [_context_node_row(row) for row in rows]
 
     def search_context_nodes(self, session_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:

@@ -720,6 +720,37 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("LCM parity marker", described)
                 expanded = runtime.handle_message('/lcm-expand id=1')
                 self.assertIn("acme-lcm-node", expanded)
+                other_context = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "agent.db"), session_name="other-context"))
+                try:
+                    other_message_id = other_context.store.append_message(other_context.session_id, "user", "foreign-context-node-secret")
+                    other_node_id = other_context.store.create_context_node(
+                        other_context.session_id,
+                        "Other session LCM",
+                        "foreign-context-node-secret",
+                        sources=[{"type": "message", "id": other_message_id}],
+                    )
+                    other_context.store.create_context_node(
+                        other_context.session_id,
+                        "Foreign child under local parent id",
+                        "foreign-child-context-secret",
+                        parent_id=1,
+                        depth=1,
+                    )
+                finally:
+                    other_context.close()
+                cross_describe = runtime.registry.run("context_describe", {"id": other_node_id})
+                cross_expand = runtime.registry.run("context_expand", {"id": other_node_id})
+                current_describe = runtime.registry.run("context_describe", {"id": 1})
+                self.assertEqual(cross_describe.status, "error")
+                self.assertEqual(cross_expand.status, "error")
+                self.assertIn("not found in this session", cross_describe.message)
+                serialized_scope = json.dumps({
+                    "cross_describe": cross_describe.to_dict(),
+                    "cross_expand": cross_expand.to_dict(),
+                    "current_describe": current_describe.to_dict(),
+                })
+                self.assertNotIn("foreign-context-node-secret", serialized_scope)
+                self.assertNotIn("foreign-child-context-secret", serialized_scope)
                 queried = runtime.handle_message('/reflect query=acme-lcm-node')
                 self.assertIn("Context query answered", queried)
                 retained = runtime.handle_message('/hindsight-retain content="ACME hindsight marker" context=unit tags=hindsight')

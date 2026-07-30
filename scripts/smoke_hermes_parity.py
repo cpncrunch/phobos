@@ -437,10 +437,50 @@ def main(argv: list[str] | None = None) -> int:
         lcm_describe = runtime.registry.run("context_describe", {"id": node_id})
         lcm_expand = runtime.registry.run("context_expand", {"id": node_id})
         lcm_query = runtime.registry.run("context_query", {"query": "smoke-client"})
+        context_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-context-smoke"))
+        try:
+            foreign_message_id = context_scope_runtime.store.append_message(context_scope_runtime.session_id, "user", "foreign-context-scope-secret")
+            foreign_node_id = context_scope_runtime.store.create_context_node(
+                context_scope_runtime.session_id,
+                "Foreign smoke LCM node",
+                "foreign-context-scope-secret",
+                sources=[{"type": "message", "id": foreign_message_id}],
+            )
+            context_scope_runtime.store.create_context_node(
+                context_scope_runtime.session_id,
+                "Foreign smoke child",
+                "foreign-context-child-secret",
+                parent_id=node_id,
+                depth=1,
+            )
+        finally:
+            context_scope_runtime.close()
+        lcm_cross_describe = runtime.registry.run("context_describe", {"id": foreign_node_id})
+        lcm_cross_expand = runtime.registry.run("context_expand", {"id": foreign_node_id})
+        lcm_owned_describe_after_foreign_child = runtime.registry.run("context_describe", {"id": node_id})
         write("lcm-describe.json", json.dumps(lcm_describe.to_dict(), indent=2))
         write("lcm-expand.json", json.dumps(lcm_expand.to_dict(), indent=2))
         write("lcm-query.json", json.dumps(lcm_query.to_dict(), indent=2))
+        write("lcm-session-scope.json", json.dumps({
+            "foreign_node_id": foreign_node_id,
+            "cross_describe": lcm_cross_describe.to_dict(),
+            "cross_expand": lcm_cross_expand.to_dict(),
+            "owned_describe_after_foreign_child": lcm_owned_describe_after_foreign_child.to_dict(),
+        }, indent=2))
         checks["lcm_context_nodes_ok"] = lcm_node.status == "ok" and lcm_describe.status == "ok" and lcm_expand.status == "ok" and lcm_query.status == "ok" and bool(lcm_expand.data.get("expanded_sources"))
+        lcm_scope_serialized = json.dumps({
+            "cross_describe": lcm_cross_describe.to_dict(),
+            "cross_expand": lcm_cross_expand.to_dict(),
+            "owned_describe_after_foreign_child": lcm_owned_describe_after_foreign_child.to_dict(),
+        })
+        checks["session_bound_context_nodes_ok"] = (
+            lcm_cross_describe.status == "error"
+            and lcm_cross_expand.status == "error"
+            and "not found in this session" in lcm_cross_describe.message
+            and lcm_owned_describe_after_foreign_child.status == "ok"
+            and "foreign-context-scope-secret" not in lcm_scope_serialized
+            and "foreign-context-child-secret" not in lcm_scope_serialized
+        )
 
         hindsight_retain = runtime.registry.run("hindsight_retain", {"content": "Smoke Hindsight ACME durable marker", "context": "smoke", "tags": "hindsight,smoke"})
         hindsight_recall = runtime.registry.run("hindsight_recall", {"query": "Hindsight ACME"})
