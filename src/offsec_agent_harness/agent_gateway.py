@@ -180,12 +180,28 @@ class AgentGateway:
                         query = parse_qs(parsed.query)
                         _write_json(self, runtime.registry.run("list_findings", {"status": (query.get("status") or ["all"])[0], "limit": int((query.get("limit") or [50])[0])}).to_dict())
                         return
+                    if path in {"/finding", "/finding-detail"}:
+                        query = parse_qs(parsed.query)
+                        finding_id = (query.get("id") or query.get("finding_id") or [""])[0]
+                        if not finding_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_finding", {"id": finding_id}).to_dict())
+                        return
                     if path == "/tool-runs":
                         query = parse_qs(parsed.query)
                         args: dict[str, Any] = {"limit": int((query.get("limit") or [50])[0])}
                         if (query.get("tool_name") or [""])[0]:
                             args["tool_name"] = (query.get("tool_name") or [""])[0]
                         _write_json(self, runtime.registry.run("list_tool_runs", args).to_dict())
+                        return
+                    if path in {"/tool-run", "/tool-run-detail"}:
+                        query = parse_qs(parsed.query)
+                        run_id = (query.get("id") or query.get("run_id") or [""])[0]
+                        if not run_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_tool_run", {"id": run_id}).to_dict())
                         return
                     if path == "/jobs":
                         _write_json(self, runtime.registry.run("list_jobs", {}).to_dict())
@@ -310,7 +326,10 @@ def _gateway_paths() -> list[str]:
         "/lcm",
         "/tasks",
         "/findings",
+        "/finding-detail",
         "/tool-runs",
+        "/tool-run",
+        "/tool-run-detail",
         "/jobs",
         "/processes",
         "/approvals",

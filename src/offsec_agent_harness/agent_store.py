@@ -687,8 +687,11 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def get_tool_run(self, run_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM tool_runs WHERE id=?", (run_id,)).fetchone()
+    def get_tool_run(self, run_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM tool_runs WHERE id=? AND session_id=?", (run_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM tool_runs WHERE id=?", (run_id,)).fetchone()
         return _tool_run_row(row) if row else None
 
     def list_tool_runs(self, session_id: str, limit: int = 50, tool_name: str | None = None) -> list[dict[str, Any]]:
@@ -725,6 +728,7 @@ class AgentStore:
         self,
         finding_id: int,
         *,
+        session_id: str | None = None,
         title: str | None = None,
         severity: str | None = None,
         status: str | None = None,
@@ -752,16 +756,25 @@ class AgentStore:
             fields.append("evidence_json=?")
             values.append(json.dumps(evidence, sort_keys=True))
         if not fields:
-            return self.get_finding(finding_id)
+            return self.get_finding(finding_id, session_id=session_id)
         fields.append("updated_at=?")
         values.append(utc_now())
+        where = "id=?"
         values.append(finding_id)
-        self.conn.execute(f"UPDATE findings SET {', '.join(fields)} WHERE id=?", values)
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(f"UPDATE findings SET {', '.join(fields)} WHERE {where}", values)
         self.conn.commit()
-        return self.get_finding(finding_id)
+        if cur.rowcount == 0:
+            return None
+        return self.get_finding(finding_id, session_id=session_id)
 
-    def get_finding(self, finding_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+    def get_finding(self, finding_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM findings WHERE id=? AND session_id=?", (finding_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
         return _finding_row(row) if row else None
 
     def list_findings(self, session_id: str, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:

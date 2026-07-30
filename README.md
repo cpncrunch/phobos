@@ -299,8 +299,8 @@ This turns the harness into a standalone agent-style application with:
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, audit log, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
-- ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
-- finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links, deterministic QA/readiness reviews, and Markdown export;
+- ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable, session-bound evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
+- finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with session-bound evidence/tool-run links, deterministic QA/readiness reviews, and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
 - a configurable Phobos assistant persona (`operator_name`, `assistant_style`) so natural-language replies sound like a concise pentest copilot instead of a raw harness log;
 - non-destructive-by-default command execution;
@@ -315,7 +315,7 @@ This turns the harness into a standalone agent-style application with:
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
 - redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories plus manifest verification reports, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, session-bound finding/tool-run detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/finding-detail/tool-runs/tool-run-detail/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -585,6 +585,7 @@ guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
+session_bound_finding_tool_detail_ok=True
 artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
@@ -600,6 +601,8 @@ safety_preflight_ok=True
 media_artifacts_ok=True
 evidence_timeline_ok=True
 evidence_manifest_ok=True
+evidence_manifest_verify_ok=True
+evidence_manifest_verify_flags_ok=True
 closeout_review_ok=True
 closeout_drilldown_links_ok=True
 sealed_snapshot_roundtrip_ok=True
@@ -619,7 +622,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=209
+artifact_count=225
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

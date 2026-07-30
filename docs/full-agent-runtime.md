@@ -9,7 +9,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs and without target activity.
-- **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable `tool_runs` records and redacted evidence artifacts. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
+- **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, deterministic QA/readiness reviews, and Markdown exports for report drafting.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
@@ -381,7 +381,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --message '/finding-export id=1'
 ```
 
-Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact. `/finding-review` is a deterministic, local-only QA pass: it does not execute target actions, and it writes a Markdown review that separates blocking report-readiness gaps from advisory improvements such as missing negative controls, reproduction notes, or cleanup/side-effect statements.
+Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact. Finding and structured-tool-run detail operations are scoped to the active session: `/finding-get`, `/finding-update`, `/finding-export`, `/finding-review`, `/tool-run`, and their gateway detail routes return `not found in this session` rather than exposing or mutating records from another local session in the same SQLite DB. `/finding-review` is a deterministic, local-only QA pass: it does not execute target actions, and it writes a Markdown review that separates blocking report-readiness gaps from advisory improvements such as missing negative controls, reproduction notes, or cleanup/side-effect notes.
 
 ## Workspace, process, and context examples
 
@@ -603,7 +603,11 @@ GET  /closeout-review
 GET  /lcm
 GET  /tasks
 GET  /findings
+GET  /finding?id=<finding-id>
+GET  /finding-detail?id=<finding-id>
 GET  /tool-runs
+GET  /tool-run?id=<tool-run-id>
+GET  /tool-run-detail?run_id=<tool-run-id>
 GET  /jobs
 GET  /processes
 GET  /approvals

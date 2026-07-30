@@ -532,9 +532,12 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"{len(runs)} structured tool runs returned.", {"runs": [_redacted_mapping(run) for run in runs]})
 
     def get_tool_run(self, args: dict[str, Any]) -> ToolResult:
-        run = self.store.get_tool_run(int(args.get("id") or args.get("run_id")))
+        run_id = _first_int_arg(args, "id", "run_id")
+        if run_id is None:
+            return ToolResult("error", "id is required.")
+        run = self.store.get_tool_run(run_id, session_id=self.session_id)
         if not run:
-            return ToolResult("error", "Structured tool run not found.")
+            return ToolResult("error", "Structured tool run not found in this session.")
         return ToolResult("ok", f"Structured tool run #{run['id']} returned.", {"run": _redacted_mapping(run)})
 
     def create_finding(self, args: dict[str, Any]) -> ToolResult:
@@ -553,21 +556,24 @@ class OffSecToolRegistry:
             evidence=evidence,
             tags=str(args.get("tags") or ""),
         )
-        finding = self.store.get_finding(finding_id) or {}
+        finding = self.store.get_finding(finding_id, session_id=self.session_id) or {}
         self.store.audit(self.session_id, "finding_created", {"id": finding_id, "title": redact_secrets(title), "severity": finding.get("severity"), "status": finding.get("status")})
         return ToolResult("ok", f"Finding #{finding_id} created.", {"finding": _redacted_mapping(finding)})
 
     def update_finding(self, args: dict[str, Any]) -> ToolResult:
-        finding_id = int(args.get("id") or args.get("finding_id"))
-        existing = self.store.get_finding(finding_id)
+        finding_id = _first_int_arg(args, "id", "finding_id")
+        if finding_id is None:
+            return ToolResult("error", "id is required.")
+        existing = self.store.get_finding(finding_id, session_id=self.session_id)
         if not existing:
-            return ToolResult("error", "Finding not found.")
+            return ToolResult("error", "Finding not found in this session.")
         evidence = None
         new_evidence = self._finding_evidence_from_args(args)
         if new_evidence:
             evidence = (existing.get("evidence") or []) + new_evidence if args.get("append_evidence", True) else new_evidence
         finding = self.store.update_finding(
             finding_id,
+            session_id=self.session_id,
             title=str(args["title"]) if "title" in args else None,
             severity=_normalize_severity(str(args["severity"])) if "severity" in args else None,
             status=_normalize_finding_status(str(args["status"])) if "status" in args else None,
@@ -578,6 +584,8 @@ class OffSecToolRegistry:
             tags=str(args["tags"]) if "tags" in args else None,
         )
         self.store.audit(self.session_id, "finding_updated", {"id": finding_id, "status": finding.get("status") if finding else None})
+        if not finding:
+            return ToolResult("error", "Finding not found in this session.")
         return ToolResult("ok", f"Finding #{finding_id} updated.", {"finding": _redacted_mapping(finding or {})})
 
     def list_findings(self, args: dict[str, Any]) -> ToolResult:
@@ -585,15 +593,21 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"{len(findings)} findings returned.", {"findings": [_redacted_mapping(row) for row in findings]})
 
     def get_finding(self, args: dict[str, Any]) -> ToolResult:
-        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        finding_id = _first_int_arg(args, "id", "finding_id")
+        if finding_id is None:
+            return ToolResult("error", "id is required.")
+        finding = self.store.get_finding(finding_id, session_id=self.session_id)
         if not finding:
-            return ToolResult("error", "Finding not found.")
+            return ToolResult("error", "Finding not found in this session.")
         return ToolResult("ok", f"Finding #{finding['id']} returned.", {"finding": _redacted_mapping(finding)})
 
     def finding_export(self, args: dict[str, Any]) -> ToolResult:
-        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        finding_id = _first_int_arg(args, "id", "finding_id")
+        if finding_id is None:
+            return ToolResult("error", "id is required.")
+        finding = self.store.get_finding(finding_id, session_id=self.session_id)
         if not finding:
-            return ToolResult("error", "Finding not found.")
+            return ToolResult("error", "Finding not found in this session.")
         evidence_lines = _finding_evidence_lines(finding.get("evidence") or [])
         affected_assets = sorted({str(item.get("target")) for item in finding.get("evidence", []) if isinstance(item, dict) and item.get("target")})
         report = FindingInput(
@@ -620,9 +634,12 @@ class OffSecToolRegistry:
     def finding_review(self, args: dict[str, Any]) -> ToolResult:
         """Review a stored finding for operator/report-readiness without target activity."""
 
-        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        finding_id = _first_int_arg(args, "id", "finding_id")
+        if finding_id is None:
+            return ToolResult("error", "id is required.")
+        finding = self.store.get_finding(finding_id, session_id=self.session_id)
         if not finding:
-            return ToolResult("error", "Finding not found.")
+            return ToolResult("error", "Finding not found in this session.")
         review = self._build_finding_review(finding)
         out = _scoped_artifact_output_path(
             self.harness.store.root,
@@ -665,7 +682,8 @@ class OffSecToolRegistry:
                 if item.get(key):
                     target_refs.add(str(item.get(key)))
             if item.get("type") == "tool_run" and item.get("id"):
-                run = self.store.get_tool_run(int(item.get("id")))
+                run_id = _coerce_int(item.get("id"))
+                run = self.store.get_tool_run(run_id, session_id=self.session_id) if run_id is not None else None
                 if run:
                     redacted_run = _redacted_mapping(run)
                     linked_runs.append(redacted_run)
@@ -725,7 +743,7 @@ class OffSecToolRegistry:
         evidence = _parse_evidence_arg(args.get("evidence"))
         run_ids = _parse_id_list(args.get("tool_run_ids") or args.get("tool_run_id") or args.get("run_ids"))
         for run_id in run_ids:
-            run = self.store.get_tool_run(run_id)
+            run = self.store.get_tool_run(run_id, session_id=self.session_id)
             if run:
                 evidence.append({"type": "tool_run", "id": run_id, "tool_name": run.get("tool_name"), "target": run.get("target"), "status": run.get("status"), "artifact_path": run.get("artifact_path")})
         return [_redact_value(item) for item in evidence]
@@ -2509,6 +2527,23 @@ def _parse_ffuf_output(text: str) -> dict[str, Any]:
     return {"results": results, "summary": {"count": len(results), "statuses": sorted({str(item.get('status')) for item in results if item.get('status')})}}
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_int_arg(args: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        parsed = _coerce_int(args.get(name))
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _parse_id_list(value: Any) -> list[int]:
     if value is None or value == "":
         return []
@@ -2521,8 +2556,9 @@ def _parse_id_list(value: Any) -> list[int]:
         return out
     out = []
     for part in re.split(r"[,\s]+", str(value)):
-        if part.strip().isdigit():
-            out.append(int(part.strip()))
+        parsed = _coerce_int(part.strip())
+        if parsed is not None:
+            out.append(parsed)
     return out
 
 

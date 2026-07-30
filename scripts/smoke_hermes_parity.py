@@ -300,6 +300,50 @@ def main(argv: list[str] | None = None) -> int:
         finding_review_markdown = Path(reviewed_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if reviewed_finding.artifacts.get("markdown") else ""
         checks["finding_lifecycle_ok"] = created_finding.status == "ok" and updated_finding.data["finding"]["status"] == "confirmed" and "Exposed administrative interface" in json.dumps(listed_findings.to_dict()) and "Tool run" in finding_markdown
         checks["finding_review_ok"] = reviewed_finding.status == "ok" and reviewed_finding.data["review"]["readiness"] in {"ready_with_advisories", "ready_for_operator_review"} and "Phobos Finding Review" in finding_review_markdown and "supersecret" not in json.dumps(reviewed_finding.to_dict()) and "supersecret" not in finding_review_markdown
+        current_tool_detail = runtime.registry.run("get_tool_run", {"id": nmap_structured.data["run_id"]})
+        current_finding_detail = runtime.registry.run("get_finding", {"id": finding_id})
+        other_detail_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-detail-smoke"))
+        try:
+            other_tool = other_detail_runtime.registry.run("nmap_scan", {"target": "10.10.0.6", "stdout": "80/tcp open http nginx"})
+            other_finding = other_detail_runtime.registry.run("create_finding", {"title": "Other session detail sentinel", "tool_run_ids": str(other_tool.data.get("run_id"))})
+            other_run_id = int(other_tool.data["run_id"])
+            other_finding_id = int(other_finding.data["finding"]["id"])
+            cross_tool_detail = runtime.registry.run("get_tool_run", {"id": other_run_id})
+            cross_finding_detail = runtime.registry.run("get_finding", {"id": other_finding_id})
+            cross_update = runtime.registry.run("update_finding", {"id": other_finding_id, "status": "confirmed"})
+            cross_export = runtime.registry.run("finding_export", {"id": other_finding_id})
+            cross_review = runtime.registry.run("finding_review", {"id": other_finding_id})
+            cross_link_probe = runtime.registry.run("create_finding", {"title": "Cross-session link probe", "tool_run_ids": str(other_run_id)})
+            reverse_tool_detail = other_detail_runtime.registry.run("get_tool_run", {"id": nmap_structured.data["run_id"]})
+            reverse_finding_detail = other_detail_runtime.registry.run("get_finding", {"id": finding_id})
+            session_bound_detail = {
+                "current_tool_detail": current_tool_detail.to_dict(),
+                "current_finding_detail": current_finding_detail.to_dict(),
+                "cross_tool_detail": cross_tool_detail.to_dict(),
+                "cross_finding_detail": cross_finding_detail.to_dict(),
+                "cross_update": cross_update.to_dict(),
+                "cross_export": cross_export.to_dict(),
+                "cross_review": cross_review.to_dict(),
+                "cross_link_probe": cross_link_probe.to_dict(),
+                "reverse_tool_detail": reverse_tool_detail.to_dict(),
+                "reverse_finding_detail": reverse_finding_detail.to_dict(),
+            }
+        finally:
+            other_detail_runtime.close()
+        write("session-bound-detail.json", json.dumps(session_bound_detail, indent=2))
+        checks["session_bound_finding_tool_detail_ok"] = (
+            current_tool_detail.status == "ok"
+            and current_finding_detail.status == "ok"
+            and cross_tool_detail.status == "error"
+            and cross_finding_detail.status == "error"
+            and cross_update.status == "error"
+            and cross_export.status == "error"
+            and cross_review.status == "error"
+            and "not found in this session" in json.dumps(session_bound_detail)
+            and (cross_link_probe.data.get("finding", {}).get("evidence") == [])
+            and reverse_tool_detail.status == "error"
+            and reverse_finding_detail.status == "error"
+        )
         outside_artifact = root / "outside-artifact-output.md"
         artifact_escape = runtime.registry.run("finding_review", {"id": finding_id, "out": str(outside_artifact)})
         scoped_briefing = runtime.registry.run("operator_briefing", {"out": "containment-briefing.md"})
@@ -690,7 +734,9 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        finding_route = f"/finding?id={finding_id}"
+        tool_run_route = f"/tool-run?id={nmap_structured.data['run_id']}"
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -758,9 +804,11 @@ def main(argv: list[str] | None = None) -> int:
         closeout_route_data_obj = closeout_route.get("data")
         closeout_route_data: dict[str, object] = closeout_route_data_obj if isinstance(closeout_route_data_obj, dict) else {}
         approval_route = gateway_gets.get("/approval?id=1") or {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        finding_route_payload = gateway_gets.get(finding_route) or {}
+        tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

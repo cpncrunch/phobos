@@ -997,6 +997,28 @@ PORT    STATE SERVICE VERSION
                 })
                 self.assertEqual(created.status, "ok", created.to_dict())
                 finding_id = created.data["finding"]["id"]
+
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="other-detail-session"))
+                try:
+                    other_nmap = other_runtime.registry.run("nmap_scan", {"target": "10.10.0.6", "stdout": "80/tcp open http nginx"})
+                    self.assertEqual(other_nmap.status, "parsed", other_nmap.to_dict())
+                    other_run_id = other_nmap.data["run_id"]
+                    other_finding = other_runtime.registry.run("create_finding", {"title": "Other session detail sentinel", "tool_run_ids": str(other_run_id)})
+                    self.assertEqual(other_finding.status, "ok", other_finding.to_dict())
+                    other_finding_id = other_finding.data["finding"]["id"]
+                    self.assertIn("not found in this session", runtime.handle_message(f"/tool-run id={other_run_id}"))
+                    self.assertIn("not found in this session", runtime.handle_message(f"/finding-get id={other_finding_id}"))
+                    self.assertIn("not found in this session", runtime.registry.run("update_finding", {"id": other_finding_id, "status": "confirmed"}).message)
+                    self.assertIn("not found in this session", runtime.registry.run("finding_export", {"id": other_finding_id}).message)
+                    self.assertIn("not found in this session", runtime.registry.run("finding_review", {"id": other_finding_id}).message)
+                    cross_link = runtime.registry.run("create_finding", {"title": "Cross-session link probe", "tool_run_ids": str(other_run_id)})
+                    self.assertEqual(cross_link.status, "ok", cross_link.to_dict())
+                    self.assertEqual(cross_link.data["finding"].get("evidence"), [])
+                    self.assertIn("not found in this session", other_runtime.handle_message(f"/tool-run id={nmap_run_id}"))
+                    self.assertIn("not found in this session", other_runtime.handle_message(f"/finding-get id={finding_id}"))
+                finally:
+                    other_runtime.close()
+
                 updated = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Gateway screenshot captured", "append_evidence": True})
                 self.assertEqual(updated.data["finding"]["status"], "confirmed")
                 exported = runtime.registry.run("finding_export", {"id": finding_id})
@@ -1055,6 +1077,22 @@ PORT    STATE SERVICE VERSION
                 with urllib.request.urlopen(finding_req, timeout=5) as response:
                     remote_finding = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(remote_finding["result"]["status"], "ok")
+                finding_detail_req = urllib.request.Request(
+                    f"http://{host}:{port}/finding?id={finding_id}",
+                    headers={"Authorization": "Bearer unit-token"},
+                )
+                with urllib.request.urlopen(finding_detail_req, timeout=5) as response:
+                    finding_detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(finding_detail["status"], "ok")
+                self.assertEqual(finding_detail["data"]["finding"]["id"], finding_id)
+                tool_run_detail_req = urllib.request.Request(
+                    f"http://{host}:{port}/tool-run?id={nmap_run_id}",
+                    headers={"Authorization": "Bearer unit-token"},
+                )
+                with urllib.request.urlopen(tool_run_detail_req, timeout=5) as response:
+                    tool_run_detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(tool_run_detail["status"], "ok")
+                self.assertEqual(tool_run_detail["data"]["run"]["id"], nmap_run_id)
             finally:
                 if gateway is not None:
                     gateway.shutdown()
