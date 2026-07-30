@@ -304,7 +304,7 @@ This turns the harness into a standalone agent-style application with:
 - durable scheduled jobs runnable with `phobos-agent run-due`;
 - role-based subagent reviews and durable local delegation batches with per-task child sessions/artifacts;
 - model adapter fallback chains;
-- engagement workspace file tools;
+- engagement workspace file tools that resolve candidate paths before reading/searching so symlink escapes stay blocked;
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values;
 - local media/artifact import and listing with SHA-256 metadata;
@@ -312,7 +312,7 @@ This turns the harness into a standalone agent-style application with:
 - local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline views, and routes for status/tools/schemas/sessions/context/timeline/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
-- redacted engagement-pack ZIP export;
+- redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root;
 - interactive chat and single-message modes.
 
 The new public commands are `phobos-agent` and `phobos-harness`. The old
@@ -393,6 +393,9 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
   --message '/write path=notes/scope.md content="Scope app.example.test authz notes"'
 
+# Workspace read/search/patch resolves symlinks and refuses paths whose real
+# target leaves the engagement workspace.
+
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
   --message '/auto apply=true prompt="remember client: ACME internal assessment"'
@@ -427,6 +430,8 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json status \
 phobos-agent --db data/phobos-agent.db --config agent.config.json export-pack \
   --engagement engagement.json \
   --out closeout-pack.zip
+# Export packs redact text artifacts and skip symlinked evidence paths whose
+# resolved target leaves the evidence root.
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
   --engagement engagement.json \

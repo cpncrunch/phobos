@@ -201,7 +201,34 @@ def main(argv: list[str] | None = None) -> int:
         search = handle("workspace-search", '/workspace-search query=authz glob="**/*.md"')
         patch = handle("workspace-patch", '/patch-file path=notes/scope.md old=authz new=authorization')
         escape = handle("workspace-escape", "/write path=../escape.txt content=nope")
+        symlink_escape_ok = True
+        symlink_created = False
+        pack_symlink_created = False
+        outside_secret = root / "outside-workspace-marker.txt"
+        outside_secret.write_text("outside-symlink-marker should not appear in workspace search", encoding="utf-8")
+        try:
+            link = runtime.registry.workspace_root / "notes" / "outside-link.txt"
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(outside_secret)
+            symlink_created = True
+            symlink_search = handle("workspace-symlink-search", '/workspace-search query=outside-symlink-marker glob="**/*.txt"')
+            symlink_read = handle("workspace-symlink-read", "/read path=notes/outside-link.txt")
+            symlink_escape_ok = "Found 0 matches" in symlink_search and "outside-symlink-marker" not in symlink_search and "escapes the engagement workspace" in symlink_read
+        except (OSError, NotImplementedError) as exc:
+            write("workspace-symlink-skipped.txt", f"symlink creation unavailable: {exc}\n")
+        pack_outside_secret = root / "outside-pack-marker.txt"
+        pack_outside_secret.write_text("OUTSIDE_PACK_SYMLINK_SENTINEL", encoding="utf-8")
+        try:
+            pack_link = runtime.registry.harness.store.root / "outside-pack-link.txt"
+            if pack_link.exists() or pack_link.is_symlink():
+                pack_link.unlink()
+            pack_link.symlink_to(pack_outside_secret)
+            pack_symlink_created = True
+        except (OSError, NotImplementedError) as exc:
+            write("pack-symlink-skipped.txt", f"pack symlink creation unavailable: {exc}\n")
         checks["workspace_roundtrip_and_escape_block"] = "authz note" in read_back and "scope.md" in search and "Patched notes/scope.md" in patch and "escapes the engagement workspace" in escape
+        checks["workspace_symlink_escape_block"] = symlink_escape_ok
 
         assess = handle("active-scan-assess", '/assess target=10.10.0.5 type=service-enumeration purpose=version-scan command="nmap -sV 10.10.0.5"')
         run = handle("safe-run", '/run target=app.example.test type=host purpose="safe local smoke" command="printf parity-ok" execute=true')
@@ -634,7 +661,14 @@ def main(argv: list[str] | None = None) -> int:
                 for name in names
                 if name.endswith((".json", ".md", ".txt", ".log", ".jsonl", ".html"))
             )
-        checks["pack_exported_and_redacted"] = pack.status == "ok" and "MANIFEST.json" in names and "runtime/state.json" in names and "supersecret" not in combined
+        checks["pack_exported_and_redacted"] = (
+            pack.status == "ok"
+            and "MANIFEST.json" in names
+            and "runtime/state.json" in names
+            and "supersecret" not in combined
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in combined
+            and (not pack_symlink_created or any(item.get("reason") == "symlink target outside evidence root" for item in pack.data.get("manifest", {}).get("skipped", [])))
+        )
         legacy_pattern = "pack" + "et"
         grep = subprocess.run(["git", "grep", "-ni", legacy_pattern], cwd=REPO, env=env, text=True, capture_output=True, check=False)
         write("legacy-term-grep.txt", grep.stdout + grep.stderr)

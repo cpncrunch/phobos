@@ -144,6 +144,43 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_workspace_search_does_not_follow_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                outside = Path(tmp) / "outside-workspace-secret.txt"
+                outside.write_text("outside-symlink-marker should stay outside workspace", encoding="utf-8")
+                link = runtime.registry.workspace_root / "outside-link.txt"
+                try:
+                    link.symlink_to(outside)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+
+                searched = runtime.handle_message('/workspace-search query=outside-symlink-marker glob="**/*.txt"')
+                self.assertIn("Found 0 matches", searched)
+                self.assertNotIn("outside-symlink-marker should stay outside workspace", searched)
+
+                read = runtime.handle_message('/read path=outside-link.txt')
+                self.assertIn("escapes the engagement workspace", read)
+
+                pack_source = Path(tmp) / "outside-pack-sentinel.txt"
+                pack_source.write_text("OUTSIDE_PACK_LEAK_SENTINEL", encoding="utf-8")
+                pack_link = runtime.registry.workspace_root / "pack-link.txt"
+                pack_link.symlink_to(pack_source)
+                pack = runtime.registry.run("export_pack", {"out": "symlink-pack.zip"})
+                self.assertEqual(pack.status, "ok", pack.to_dict())
+                with zipfile.ZipFile(pack.data["pack"]) as archive:
+                    combined = "\n".join(
+                        archive.read(name).decode("utf-8", errors="replace")
+                        for name in archive.namelist()
+                        if name.endswith((".json", ".md", ".txt"))
+                    )
+                    manifest = json.loads(archive.read("MANIFEST.json").decode("utf-8"))
+                self.assertNotIn("OUTSIDE_PACK_LEAK_SENTINEL", combined)
+                self.assertTrue(any(item.get("reason") == "symlink target outside evidence root" for item in manifest.get("skipped", [])))
+            finally:
+                runtime.close()
+
     def test_evidence_timeline_tool_slash_and_gateway_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)

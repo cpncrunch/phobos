@@ -785,12 +785,17 @@ class OffSecToolRegistry:
         matches: list[dict[str, Any]] = []
         pattern = re.compile(query, re.IGNORECASE)
         for path in self.workspace_root.glob(glob):
-            if not path.is_file():
+            resolved = self._contained_workspace_candidate(path)
+            if resolved is None or not resolved.is_file():
                 continue
             try:
-                for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                display_path = str(resolved.relative_to(self.workspace_root.resolve()))
+            except ValueError:
+                continue
+            try:
+                for number, line in enumerate(resolved.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if pattern.search(line):
-                        matches.append({"path": str(path.relative_to(self.workspace_root)), "line": number, "text": line[:500]})
+                        matches.append({"path": display_path, "line": number, "text": line[:500]})
                         if len(matches) >= limit:
                             return ToolResult("ok", f"Found {len(matches)} matches.", {"matches": matches})
             except UnicodeDecodeError:
@@ -1225,18 +1230,26 @@ class OffSecToolRegistry:
             _zip_text(archive, "PACK_README.md", _pack_readme(self.roe.name))
             _zip_json(archive, "runtime/state.json", state)
             for path in sorted(evidence_root.rglob("*")):
-                if not path.is_file():
+                try:
+                    resolved = path.resolve()
+                    rel = path.relative_to(evidence_root).as_posix()
+                except (OSError, ValueError):
+                    manifest["skipped"].append({"path": str(path), "reason": "path could not be safely resolved"})
                     continue
-                if _is_relative_to(path.resolve(), export_dir.resolve()):
+                if not _is_relative_to(resolved, evidence_root):
+                    manifest["skipped"].append({"path": rel, "reason": "symlink target outside evidence root"})
                     continue
-                rel = path.relative_to(evidence_root).as_posix()
-                if path.stat().st_size > 2_000_000:
+                if not resolved.is_file():
+                    continue
+                if _is_relative_to(resolved, export_dir.resolve()):
+                    continue
+                if resolved.stat().st_size > 2_000_000:
                     manifest["skipped"].append({"path": rel, "reason": "larger than 2MB"})
                     continue
                 if path.suffix.lower() not in text_suffixes:
                     manifest["skipped"].append({"path": rel, "reason": "non-text artifact omitted from redacted pack"})
                     continue
-                raw = path.read_text(encoding="utf-8", errors="replace")
+                raw = resolved.read_text(encoding="utf-8", errors="replace")
                 redacted = redact_secrets(raw)
                 arcname = f"evidence/{rel}"
                 archive.writestr(arcname, redacted)
@@ -1477,6 +1490,22 @@ class OffSecToolRegistry:
         if os.path.commonpath([str(self.workspace_root.resolve()), str(path)]) != str(self.workspace_root.resolve()):
             raise ValueError("workspace path escapes the engagement workspace")
         return path
+
+    def _contained_workspace_candidate(self, path: Path) -> Path | None:
+        """Resolve a candidate path and return it only if it stays inside the workspace.
+
+        Workspace globbing can surface symlink files. pathlib's is_file()/read_text()
+        follow symlinks, so a symlink inside the workspace could otherwise expose
+        an operator or host file outside the engagement workspace during search.
+        """
+        try:
+            root = self.workspace_root.resolve()
+            resolved = path.resolve()
+            if os.path.commonpath([str(root), str(resolved)]) != str(root):
+                return None
+            return resolved
+        except (OSError, ValueError):
+            return None
 
     def _refresh_process(self, process_id: int) -> dict[str, Any] | None:
         process = self.store.get_process(process_id)
