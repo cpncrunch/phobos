@@ -14,6 +14,17 @@ from .agent_bridges import BridgeConfig
 from .agent_config import AgentAppConfig
 
 
+DEFAULT_MAX_JSON_BODY_BYTES = 1_048_576
+
+
+class GatewayRequestError(ValueError):
+    """Clean HTTP error raised for malformed gateway request payloads."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 class AgentGateway:
     """Local/remote HTTP gateway for the standalone Phobos Agent.
 
@@ -33,10 +44,20 @@ class AgentGateway:
         token_env: str | None = None,
         allow_origins: tuple[str, ...] = (),
         unsafe_no_auth: bool = False,
+        max_body_bytes: int = DEFAULT_MAX_JSON_BODY_BYTES,
     ):
+        if isinstance(max_body_bytes, bool):
+            raise ValueError("max_body_bytes must be an integer")
+        try:
+            max_body_bytes_int = int(max_body_bytes)
+        except (TypeError, ValueError):
+            raise ValueError("max_body_bytes must be an integer") from None
+        if max_body_bytes_int <= 0:
+            raise ValueError("max_body_bytes must be positive")
         self.runtime = runtime
         self.host = host
         self.port = port
+        self.max_body_bytes = max_body_bytes_int
         self.token_env = str(token_env or "").strip()
         self.auth_token = os.environ.get(self.token_env, "") if self.token_env else ""
         if self.token_env and not self.auth_token:
@@ -51,6 +72,8 @@ class AgentGateway:
         self.server.token_env = self.token_env  # type: ignore[attr-defined]
         self.server.allow_origins = tuple(origin.strip() for origin in allow_origins if origin.strip())  # type: ignore[attr-defined]
         self.server.unsafe_no_auth = unsafe_no_auth  # type: ignore[attr-defined]
+        self.server.max_body_bytes = self.max_body_bytes  # type: ignore[attr-defined]
+        self.server.bind_host = host  # type: ignore[attr-defined]
 
     @property
     def server_address(self) -> tuple[str, int]:
@@ -84,7 +107,8 @@ class AgentGateway:
                     _write_html(self, remote_client_html())
                     return
                 if path == "/health":
-                    _write_json(self, {"ok": True, "session_id": runtime.session_id, "engagement": runtime.roe.name, "auth_required": _auth_required(self), "remote_safe": bool(getattr(self.server, "auth_token", "")) or _is_local_bind(self.server.server_address[0])})
+                    local_bind = _is_local_bind(str(getattr(self.server, "bind_host", "")))
+                    _write_json(self, {"ok": True, "session_id": runtime.session_id, "engagement": runtime.roe.name, "auth_required": _auth_required(self), "remote_safe": bool(getattr(self.server, "auth_token", "")) or local_bind, "max_body_bytes": getattr(self.server, "max_body_bytes", DEFAULT_MAX_JSON_BODY_BYTES)})
                     return
                 if not _authorized(self):
                     _audit_gateway_auth(runtime, lock, self, path)
@@ -484,6 +508,8 @@ class AgentGateway:
                             _write_json(self, {"result": result.to_dict(), "session_id": runtime.session_id})
                             return
                     _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
+                except GatewayRequestError as exc:
+                    _write_json(self, {"error": str(exc)}, status=exc.status)
                 except ValueError as exc:
                     _write_json(self, {"error": str(exc)}, status=400)
                 except Exception as exc:  # pragma: no cover - defensive gateway boundary
@@ -740,11 +766,25 @@ async function createFinding() {{ try {{ show('findingResult', await api('/findi
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> Any:
-    length = int(handler.headers.get("Content-Length", "0") or "0")
+    raw_length = handler.headers.get("Content-Length", "0") or "0"
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        raise GatewayRequestError("Content-Length must be an integer") from None
+    if length < 0:
+        raise GatewayRequestError("Content-Length must be non-negative")
+    max_body = int(getattr(handler.server, "max_body_bytes", DEFAULT_MAX_JSON_BODY_BYTES))  # type: ignore[attr-defined]
+    if length > max_body:
+        raise GatewayRequestError(f"JSON body too large; limit is {max_body} bytes", status=413)
     raw = handler.rfile.read(length) if length else b"{}"
     if not raw:
         return {}
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise GatewayRequestError("JSON body must be UTF-8") from None
+    except json.JSONDecodeError:
+        raise GatewayRequestError("JSON body must be valid JSON") from None
 
 
 def _payload_first(payload: dict[str, Any], *names: str) -> Any:
@@ -833,7 +873,7 @@ def _authorized(handler: BaseHTTPRequestHandler) -> bool:
 
 def _gateway_auth_status(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     token_env = str(getattr(handler.server, "token_env", ""))  # type: ignore[attr-defined]
-    return {"auth_required": _auth_required(handler), "token_env": token_env, "token_present": bool(getattr(handler.server, "auth_token", "")), "allow_origins": list(getattr(handler.server, "allow_origins", ())), "unsafe_no_auth": bool(getattr(handler.server, "unsafe_no_auth", False))}
+    return {"auth_required": _auth_required(handler), "token_env": token_env, "token_present": bool(getattr(handler.server, "auth_token", "")), "allow_origins": list(getattr(handler.server, "allow_origins", ())), "unsafe_no_auth": bool(getattr(handler.server, "unsafe_no_auth", False)), "max_body_bytes": int(getattr(handler.server, "max_body_bytes", DEFAULT_MAX_JSON_BODY_BYTES))}
 
 
 def _audit_gateway_auth(runtime: OffSecAgentRuntime, lock: threading.RLock, handler: BaseHTTPRequestHandler, path: str) -> None:

@@ -233,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--token-env", help="Environment variable containing the gateway bearer token; required for non-local binds unless --unsafe-no-auth is used")
     serve.add_argument("--allow-origin", action="append", default=[], help="CORS origin allowed to call this gateway, e.g. https://ui.example.com or *; repeatable")
+    serve.add_argument("--max-body-bytes", type=int, default=1_048_576, help="Maximum JSON POST body size accepted by the gateway; default 1 MiB")
     serve.add_argument("--unsafe-no-auth", action="store_true", help="Allow a non-local bind without bearer auth; only for isolated throwaway test networks")
 
     ui_client = sub.add_parser("ui-client", help="Write a standalone browser UI that can connect to a local or VPS-hosted Phobos gateway")
@@ -500,9 +501,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"jobs_run": runtime.run_due_jobs()}, indent=2))
             return 0
         if args.subcommand == "serve":
-            gateway = AgentGateway(runtime, host=args.host, port=args.port, token_env=args.token_env, allow_origins=tuple(args.allow_origin or ()), unsafe_no_auth=bool(args.unsafe_no_auth))
+            gateway = AgentGateway(runtime, host=args.host, port=args.port, token_env=args.token_env, allow_origins=tuple(args.allow_origin or ()), unsafe_no_auth=bool(args.unsafe_no_auth), max_body_bytes=int(args.max_body_bytes))
             host, port = gateway.server_address
-            print(json.dumps({"status": "listening", "host": host, "port": port, "session_id": runtime.session_id, "auth_required": gateway.auth_required, "token_env": args.token_env or "", "allow_origins": list(args.allow_origin or ()), "ui_client": f"http://{host}:{port}/ui-client"}, indent=2), flush=True)
+            print(json.dumps({"status": "listening", "host": host, "port": port, "session_id": runtime.session_id, "auth_required": gateway.auth_required, "token_env": args.token_env or "", "allow_origins": list(args.allow_origin or ()), "max_body_bytes": int(args.max_body_bytes), "ui_client": f"http://{host}:{port}/ui-client"}, indent=2), flush=True)
             try:
                 gateway.serve_forever()
             finally:

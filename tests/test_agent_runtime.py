@@ -61,10 +61,13 @@ class AgentRuntimeTests(unittest.TestCase):
             runtime, _ = self.make_runtime(tmp)
             gateway = None
             try:
-                gateway = AgentGateway(runtime, port=0)
+                gateway = AgentGateway(runtime, port=0, max_body_bytes=64)
                 thread = threading.Thread(target=gateway.serve_forever, daemon=True)
                 thread.start()
                 host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=5) as response:
+                    health = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(health.get("max_body_bytes"), 64)
                 for route, expected_error in [
                     ("/task?id=not-an-int", "id must be an integer"),
                     ("/approval?approval_id=not-an-int", "id must be an integer"),
@@ -100,9 +103,55 @@ class AgentRuntimeTests(unittest.TestCase):
                         payload = json.loads(raised.exception.read().decode("utf-8"))
                         self.assertEqual(payload.get("error"), expected_error)
                         self.assertNotIn("Traceback", json.dumps(payload))
+                for route, body, expected_error in [
+                    ("/message", b"{", "JSON body must be valid JSON"),
+                    ("/message", b"\xff", "JSON body must be UTF-8"),
+                ]:
+                    with self.subTest(route=route, raw_body=body):
+                        req = urllib.request.Request(
+                            f"http://{host}:{port}{route}",
+                            data=body,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            urllib.request.urlopen(req, timeout=5)
+                        self.assertEqual(raised.exception.code, 400)
+                        payload = json.loads(raised.exception.read().decode("utf-8"))
+                        self.assertEqual(payload.get("error"), expected_error)
+                        self.assertNotIn("Traceback", json.dumps(payload))
+                oversized_req = urllib.request.Request(
+                    f"http://{host}:{port}/message",
+                    data=json.dumps({"message": "x" * 128}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with mock.patch.object(runtime, "handle_message", side_effect=AssertionError("oversized request dispatched")):
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        urllib.request.urlopen(oversized_req, timeout=5)
+                self.assertEqual(raised.exception.code, 413)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload.get("error"), "JSON body too large; limit is 64 bytes")
+                self.assertNotIn("Traceback", json.dumps(payload))
             finally:
                 if gateway is not None:
                     gateway.shutdown()
+                runtime.close()
+
+    def test_gateway_rejects_invalid_body_limit_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                for value, expected_error in [
+                    (0, "max_body_bytes must be positive"),
+                    (-1, "max_body_bytes must be positive"),
+                    (True, "max_body_bytes must be an integer"),
+                    ("not-an-int", "max_body_bytes must be an integer"),
+                ]:
+                    with self.subTest(value=value):
+                        with self.assertRaisesRegex(ValueError, expected_error):
+                            AgentGateway(runtime, port=0, max_body_bytes=value)
+            finally:
                 runtime.close()
 
     def test_scope_check_is_read_only_redacted_and_gateway_visible(self):

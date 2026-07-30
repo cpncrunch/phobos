@@ -739,10 +739,11 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
   --host 0.0.0.0 \
   --port 8765 \
   --token-env PHOBOS_GATEWAY_TOKEN \
-  --allow-origin https://your-ui-origin.example
+  --allow-origin https://your-ui-origin.example \
+  --max-body-bytes 1048576
 ```
 
-`/health` remains unauthenticated so load balancers and operators can confirm liveness, but operational endpoints require `Authorization: Bearer <token>` when a token is configured. Non-local binds refuse to start without `--token-env` unless `--unsafe-no-auth` is supplied; that override is only for isolated throwaway test networks. For real VPS deployments, put the stdlib gateway behind a firewall plus TLS reverse proxy, VPN, or SSH tunnel. Do not expose it directly as a multi-user production web application.
+`/health` remains unauthenticated so load balancers and operators can confirm liveness, but operational endpoints require `Authorization: Bearer ***` when a token is configured. Non-local binds refuse to start without `--token-env` unless `--unsafe-no-auth` is supplied; that override is only for isolated throwaway test networks. JSON `POST` endpoints reject non-object bodies, malformed typed IDs, and oversized request bodies before dispatching to runtime tools; the default body limit is 1 MiB and can be tightened with `--max-body-bytes`. For real VPS deployments, put the stdlib gateway behind a firewall plus TLS reverse proxy, VPN, or SSH tunnel. Do not expose it directly as a multi-user production web application.
 
 ### Bridge doctor
 
@@ -852,6 +853,7 @@ gateway_ok=True
 gateway_full_api_ok=True
 gateway_invalid_query_handling_ok=True
 gateway_invalid_post_handling_ok=True
+gateway_body_size_limit_ok=True
 gateway_audit_detail_route_ok=True
 granular_guardrail_ui_ok=True
 deploy_kit_ok=True
@@ -927,6 +929,8 @@ gateway-dashboard.html
 gateway-health.json
 gateway-routes.json
 gateway-invalid-query.json
+gateway-invalid-post.json
+gateway-body-limit.json
 gateway-status.json
 gateway-guardrails.json
 gateway-tool.json

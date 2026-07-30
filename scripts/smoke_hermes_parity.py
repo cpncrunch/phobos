@@ -1441,6 +1441,30 @@ def main(argv: list[str] | None = None) -> int:
                     invalid_gateway_posts[route] = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
             except urllib.error.HTTPError as exc:
                 invalid_gateway_posts[route] = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
+        limited_gateway = None
+        gateway_body_limit: dict[str, object] = {}
+        try:
+            limited_gateway = AgentGateway(runtime, port=0, max_body_bytes=64)
+            limited_thread = threading.Thread(target=limited_gateway.serve_forever, daemon=True)
+            limited_thread.start()
+            limited_host, limited_port = limited_gateway.server_address
+            with urllib.request.urlopen(f"http://{limited_host}:{limited_port}/health", timeout=5) as response:
+                limited_health = json.loads(response.read().decode("utf-8"))
+            oversized_req = urllib.request.Request(
+                f"http://{limited_host}:{limited_port}/message",
+                data=json.dumps({"message": "x" * 128}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(oversized_req, timeout=5) as response:
+                    oversized_payload = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
+            except urllib.error.HTTPError as exc:
+                oversized_payload = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
+            gateway_body_limit = {"health": limited_health, "oversized": oversized_payload}
+        finally:
+            if limited_gateway is not None:
+                limited_gateway.shutdown()
         message_req = urllib.request.Request(
             f"http://{host}:{port}/message",
             data=json.dumps({"message": "/status"}).encode("utf-8"),
@@ -1490,6 +1514,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-invalid-query.json", json.dumps(invalid_gateway_queries, indent=2))
         write("gateway-invalid-post.json", json.dumps(invalid_gateway_posts, indent=2))
+        write("gateway-body-limit.json", json.dumps(gateway_body_limit, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         preflight_route_obj = gateway_gets.get("/preflight")
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
@@ -1550,6 +1575,18 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or payload_obj.get("error") != expected_error:
                 invalid_post_ok = False
         checks["gateway_invalid_post_handling_ok"] = invalid_post_ok and "Traceback" not in invalid_post_blob
+        body_limit_health = gateway_body_limit.get("health") if isinstance(gateway_body_limit, dict) else {}
+        body_limit_oversized = gateway_body_limit.get("oversized") if isinstance(gateway_body_limit, dict) else {}
+        body_limit_payload = body_limit_oversized.get("payload") if isinstance(body_limit_oversized, dict) else {}
+        checks["gateway_body_size_limit_ok"] = (
+            isinstance(body_limit_health, dict)
+            and body_limit_health.get("max_body_bytes") == 64
+            and isinstance(body_limit_oversized, dict)
+            and body_limit_oversized.get("status_code") == 413
+            and isinstance(body_limit_payload, dict)
+            and body_limit_payload.get("error") == "JSON body too large; limit is 64 bytes"
+            and "Traceback" not in json.dumps(gateway_body_limit)
+        )
         checks["gateway_audit_detail_route_ok"] = audit_route_payload.get("status") == "ok" and audit_route_data.get("no_target_activity") is True and "storage-audit-secret" not in json.dumps(audit_route_payload) and "storage-audit-bearer" not in json.dumps(audit_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
