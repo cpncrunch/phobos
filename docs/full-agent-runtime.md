@@ -8,7 +8,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Persistent memory:** local SQLite memory table with `/remember`, `/recall`, `/memories`, `/memory`, and `/forget`; Hindsight-style aliases (`/hindsight-retain`, `/hindsight-recall`, `/hindsight-reflect`) store/search/synthesize through the same local memory and context stores; memory list/detail/delete controls support local hygiene without target activity, memory keys/values/tags are redacted before SQLite writes, and memory plus current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-detail`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite with redacted current-session detail views.
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported. Context summary/node text, sources, and metadata are redacted before SQLite writes. Node describe/expand by integer ID is scoped to the active session.
-- **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/scope`/`scope_check` gives operators a read-only ROE summary plus optional target-to-scope match decision before they queue scanner or command work. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs; `/ref`/`/detail` resolves those refs to session-bound metadata without target activity.
+- **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/scope`/`scope_check` gives operators a read-only ROE summary plus optional target-to-scope match decision before they queue scanner or command work; scope matching normalizes URL rules, userinfo/path/query fragments, explicit host ports, wildcard host:port rules, CIDR ranges, and bracketed IPv6 literals without doing target activity. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs; `/ref`/`/detail` resolves those refs to session-bound metadata without target activity.
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. Tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle records:** `/finding-create`, `/finding-update`, `/finding-get`, `/findings`, `/finding-export`, and `/finding-review` persist and review candidate/reportable findings. Scanner-imported evidence stays candidate/non-reportable until the operator moves a finding to `confirmed`, `resolved`, or `accepted-risk`. Finding fields and evidence refs are redacted before SQLite storage.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
@@ -766,6 +766,7 @@ local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
 scope_check_read_only_ok=True
+scope_url_port_ipv6_matching_ok=True
 natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
@@ -830,7 +831,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=257
+artifact_count=262
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -930,7 +931,12 @@ plugin-echo.txt
 schema-scope-check.txt
 scope-allowed.txt
 scope-blocked.txt
+scope-ipv6-allowed.txt
+scope-ipv6-port-allowed.txt
 scope-summary.txt
+scope-url-port-allowed.txt
+scope-url-port-blocked.txt
+scope-wildcard-port-allowed.txt
 policy-approved.json
 policy-block.json
 policy-confirm.json

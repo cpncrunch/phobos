@@ -23,6 +23,52 @@ class GuardrailTests(unittest.TestCase):
         self.assertTrue(target_in_scope("10.10.0.50", ["10.10.0.0/24"]).in_scope)
         self.assertFalse(target_in_scope("example.org", ["*.corp.example"]).in_scope)
 
+    def test_scope_normalizes_url_port_wildcard_and_ipv6_rules(self):
+        rules = [
+            "https://api.example.test:8443",
+            "*.corp.example:443",
+            "2001:db8::/126",
+            "[2001:db8::8]:9443",
+        ]
+        self.assertTrue(target_in_scope("https://api.example.test:8443/v1?token=supersecret", rules).in_scope)
+        self.assertFalse(target_in_scope("https://api.example.test:9443/v1", rules).in_scope)
+        self.assertTrue(target_in_scope("team.corp.example:443", rules).in_scope)
+        self.assertFalse(target_in_scope("team.corp.example:444", rules).in_scope)
+        self.assertTrue(target_in_scope("http://[2001:db8::1]:8080/", rules).in_scope)
+        self.assertTrue(target_in_scope("[2001:db8::8]:9443", rules).in_scope)
+        self.assertFalse(target_in_scope("[2001:db8::8]:9444", rules).in_scope)
+        self.assertFalse(target_in_scope("https://api.example.test:99999/v1", ["api.example.test"]).in_scope)
+        self.assertFalse(target_in_scope("api.example.test:99999", ["api.example.test"]).in_scope)
+
+    def test_guardrails_use_normalized_url_port_scope_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roe = EngagementROE(
+                name="Port Scoped Engagement",
+                authorized=True,
+                in_scope_targets=["https://api.example.test:8443"],
+                evidence_dir=tmp,
+            )
+            allowed = GuardrailEngine().evaluate(
+                roe,
+                ActionRequest(
+                    target="https://api.example.test:8443/v1?token=supersecret",
+                    action_type="web",
+                    purpose="Capture scoped API headers",
+                    command="curl -I https://api.example.test:8443/v1",
+                ),
+            )
+            blocked = GuardrailEngine().evaluate(
+                roe,
+                ActionRequest(
+                    target="https://api.example.test:9443/v1",
+                    action_type="web",
+                    purpose="Capture API headers on the wrong port",
+                    command="curl -I https://api.example.test:9443/v1",
+                ),
+            )
+            self.assertEqual(allowed.status, DecisionStatus.ALLOW)
+            self.assertEqual(blocked.status, DecisionStatus.BLOCK)
+
     def test_allows_low_risk_in_scope_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             roe = self.make_roe(tmp)

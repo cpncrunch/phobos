@@ -6,7 +6,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 
 ## Implemented modules
 
-- **ROE + guardrails** — explicit in-scope targets, read-only `/scope`/`scope_check` target matching, prohibited techniques, stop conditions, secret redaction, `allow` / `confirm` / `block` decisions, and granular local/VPS UI editing for safety mode, scope, stop conditions, and per-tool confirm/block policy.
+- **ROE + guardrails** — explicit in-scope targets, read-only `/scope`/`scope_check` target matching for host/IP/URL/CIDR rules including explicit ports and IPv6 literals, prohibited techniques, stop conditions, secret redaction, `allow` / `confirm` / `block` decisions, and granular local/VPS UI editing for safety mode, scope, stop conditions, and per-tool confirm/block policy.
 - **Burp MCP adapter** — probes a JSON-RPC/MCP endpoint, creates Repeater tabs from saved raw HTTP requests, and writes raw/redacted request artifacts. Dry-run by default.
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.

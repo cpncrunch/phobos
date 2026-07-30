@@ -199,6 +199,17 @@ def main(argv: list[str] | None = None) -> int:
         scope_summary = handle("scope-summary", "/scope")
         scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
         scope_blocked = handle("scope-blocked", "/scope-check target=outside.example.test")
+        runtime.roe.in_scope_targets.extend([
+            "https://api.example.test:8443",
+            "*.scoped.example:443",
+            "2001:db8::/126",
+            "[2001:db8::8]:9443",
+        ])
+        scope_url_port_allowed = handle("scope-url-port-allowed", '/scope target="https://api.example.test:8443/v1?token=supersecret"')
+        scope_url_port_blocked = handle("scope-url-port-blocked", '/scope target="https://api.example.test:9443/v1"')
+        scope_wildcard_port_allowed = handle("scope-wildcard-port-allowed", '/scope target="team.scoped.example:443"')
+        scope_ipv6_allowed = handle("scope-ipv6-allowed", '/scope target="http://[2001:db8::1]:8080/"')
+        scope_ipv6_port_allowed = handle("scope-ipv6-port-allowed", '/scope target="[2001:db8::8]:9443"')
         scope_schema = handle("schema-scope-check", "/schemas name=scope_check")
         auto_scope = handle("auto-scope", '/auto apply=true prompt="is app.example.test in scope?"')
         checks["scope_check_read_only_ok"] = (
@@ -209,6 +220,15 @@ def main(argv: list[str] | None = None) -> int:
             and "scope_check" in scope_schema
             and '"tool": "scope_check"' in auto_scope
             and "supersecret" not in scope_summary + scope_allowed + scope_blocked + scope_schema + auto_scope
+        )
+        checks["scope_url_port_ipv6_matching_ok"] = (
+            '"decision": "allow"' in scope_url_port_allowed
+            and '"matched_rule": "https://api.example.test:8443"' in scope_url_port_allowed
+            and '"decision": "block"' in scope_url_port_blocked
+            and '"decision": "allow"' in scope_wildcard_port_allowed
+            and '"decision": "allow"' in scope_ipv6_allowed
+            and '"decision": "allow"' in scope_ipv6_port_allowed
+            and "supersecret" not in scope_url_port_allowed + scope_url_port_blocked + scope_wildcard_port_allowed + scope_ipv6_allowed + scope_ipv6_port_allowed
         )
 
         natural_polish = handle("natural-polish", "What is the safest next step for a controlled IDOR?")
