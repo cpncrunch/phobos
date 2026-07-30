@@ -111,6 +111,14 @@ class AgentGateway:
                     if path == "/preflight":
                         _write_json(self, runtime.registry.run("safety_preflight", {}).to_dict())
                         return
+                    if path in {"/scope", "/scope-check", "/roe-check"}:
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {}
+                        target = (query.get("target") or query.get("host") or query.get("url") or [""])[0]
+                        if target:
+                            args["target"] = target
+                        _write_json(self, runtime.registry.run("scope_check", args).to_dict())
+                        return
                     if path == "/sessions":
                         _write_json(self, {"session_id": runtime.session_id, "sessions": runtime.store.list_sessions(limit=50), "recent": runtime.store.recent_messages(runtime.session_id, limit=12)})
                         return
@@ -395,6 +403,9 @@ def _gateway_paths() -> list[str]:
         "/routes",
         "/status",
         "/preflight",
+        "/scope",
+        "/scope-check",
+        "/roe-check",
         "/tools",
         "/schemas",
         "/sessions",

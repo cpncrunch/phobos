@@ -257,6 +257,9 @@ class OffSecAgentRuntime:
             return json.dumps({"jobs_run": self.run_due_jobs()}, indent=2)
         mapping = {
             "assess": "assess_action",
+            "scope": "scope_check",
+            "scope-check": "scope_check",
+            "roe-check": "scope_check",
             "run": "run_command",
             "start": "start_process",
             "process-start": "start_process",
@@ -896,6 +899,7 @@ HELP_TEXT = """Phobos Agent commands:
 /write path=<workspace-relative-file> content=<text> append=false
 /workspace-search query=<regex> glob="**/*.md"
 /patch-file path=<file> old=<text> new=<text> replace_all=false
+/scope target=<optional-host-or-url>
 /assess target=<host> type=<web|api|host> purpose=<why> command=<cmd>
 /run target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /start target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true

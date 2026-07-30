@@ -144,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             token in tools
             for token in [
                 "runtime_status",
+                "scope_check",
                 "workspace_write",
                 "start_process",
                 "operator_briefing",
@@ -194,6 +195,21 @@ def main(argv: list[str] | None = None) -> int:
         checks["schema_returned"] = "start_process" in schema and "execute" in schema
         plugin = handle("plugin-echo", "/tool name=example_echo value=plugin-ok")
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
+
+        scope_summary = handle("scope-summary", "/scope")
+        scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
+        scope_blocked = handle("scope-blocked", "/scope-check target=outside.example.test")
+        scope_schema = handle("schema-scope-check", "/schemas name=scope_check")
+        auto_scope = handle("auto-scope", '/auto apply=true prompt="is app.example.test in scope?"')
+        checks["scope_check_read_only_ok"] = (
+            "Engagement scope summary" in scope_summary
+            and '"no_target_activity": true' in scope_summary
+            and '"decision": "allow"' in scope_allowed
+            and '"decision": "block"' in scope_blocked
+            and "scope_check" in scope_schema
+            and '"tool": "scope_check"' in auto_scope
+            and "supersecret" not in scope_summary + scope_allowed + scope_blocked + scope_schema + auto_scope
+        )
 
         natural_polish = handle("natural-polish", "What is the safest next step for a controlled IDOR?")
         natural_execution = handle("natural-execution-polish", "Run nmap against app.example.test")
@@ -1231,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
         ref_route = "/ref?ref=task:1"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))

@@ -24,6 +24,7 @@ from .cve_advisor import CveAdvisor
 from .harness import OffSecHarness
 from .model_adapters import BaseModelAdapter, HeuristicAdapter
 from .models import ActionRequest, DecisionStatus, EngagementROE, redact_secrets
+from .scope import target_in_scope
 from .reporting import FindingInput, FindingMarkdownExporter, safe_report_filename
 from .agent_store import AgentStore, utc_now
 from .agent_crypto import seal_bytes, unseal_bytes
@@ -126,6 +127,11 @@ class OffSecToolRegistry:
             "purpose": _string("Why the action is being performed."),
             "command": _string("Command/action text to assess."),
         }, ["target", "purpose", "command"]))
+        self.register_tool("scope_check", self.scope_check, _spec("scope_check", "Read-only ROE scope summary and optional target match check; performs no target activity.", {
+            "target": _string("Optional host/IP/URL to match against in-scope target rules."),
+            "host": _string("Alias for target."),
+            "url": _string("Alias for target."),
+        }, []))
         self.register_tool("run_command", self.run_command, _spec("run_command", "Run a short shell command through ROE guardrails; confirm-level actions are queued for approval.", {
             "target": _string("In-scope target or local artifact context."),
             "type": _string("Action type."),
@@ -232,6 +238,42 @@ class OffSecToolRegistry:
         result = self.harness.assess(request, execute=False)
         status = result.decision.status.value
         return ToolResult(status, f"Guardrail decision: {status}", result.to_dict(), {"decision_log": result.evidence_path})
+
+    def scope_check(self, args: dict[str, Any]) -> ToolResult:
+        """Return a read-only ROE scope summary and optionally classify one target."""
+
+        raw_target = str(args.get("target") or args.get("host") or args.get("url") or "").strip()
+        summary: dict[str, Any] = {
+            "engagement": redact_secrets(self.roe.name),
+            "authorized": bool(self.roe.authorized),
+            "safety_mode": self.roe.safety_mode,
+            "testing_window": redact_secrets(self.roe.testing_window),
+            "in_scope_targets": _redact_value(self.roe.in_scope_targets),
+            "allowed_techniques": _redact_value(self.roe.allowed_techniques),
+            "prohibited_techniques": _redact_value(self.roe.prohibited_techniques),
+            "stop_conditions": _redact_value(self.roe.stop_conditions),
+            "evidence_dir": redact_secrets(self.roe.evidence_dir),
+            "no_target_activity": True,
+        }
+        if not raw_target:
+            readiness = "ready" if self.roe.authorized and self.roe.in_scope_targets else "review"
+            summary["scope_status"] = readiness
+            return ToolResult("ok", "Engagement scope summary generated without target activity.", summary)
+
+        match = target_in_scope(raw_target, self.roe.in_scope_targets)
+        decision = "allow" if self.roe.authorized and match.in_scope else "block"
+        reason = match.reason
+        if not self.roe.authorized:
+            reason = "Engagement is not marked authorized; target actions must be blocked. " + reason
+        summary["target_check"] = {
+            "target": redact_secrets(raw_target),
+            "in_scope": bool(match.in_scope),
+            "matched_rule": redact_secrets(match.matched_rule) if match.matched_rule else None,
+            "decision": decision,
+            "reason": redact_secrets(reason),
+        }
+        message = "Target is in scope." if decision == "allow" else "Target is not authorized for target activity."
+        return ToolResult("ok", message, summary)
 
     def run_command(self, args: dict[str, Any]) -> ToolResult:
         request = _request_from_args(args)

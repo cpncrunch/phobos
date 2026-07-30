@@ -6,7 +6,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 
 ## Implemented modules
 
-- **ROE + guardrails** — explicit in-scope targets, prohibited techniques, stop conditions, secret redaction, `allow` / `confirm` / `block` decisions, and granular local/VPS UI editing for safety mode, scope, stop conditions, and per-tool confirm/block policy.
+- **ROE + guardrails** — explicit in-scope targets, read-only `/scope`/`scope_check` target matching, prohibited techniques, stop conditions, secret redaction, `allow` / `confirm` / `block` decisions, and granular local/VPS UI editing for safety mode, scope, stop conditions, and per-tool confirm/block policy.
 - **Burp MCP adapter** — probes a JSON-RPC/MCP endpoint, creates Repeater tabs from saved raw HTTP requests, and writes raw/redacted request artifacts. Dry-run by default.
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
@@ -358,6 +358,11 @@ phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/forget key=client'
 
+# Check ROE scope without target activity before queueing scanner/command work.
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/scope target=https://app.example.test/login'
+
 # ROE-gated command execution.
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
@@ -596,6 +601,7 @@ db_schema_counts_ok=True
 local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
+scope_check_read_only_ok=True
 natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
@@ -660,7 +666,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=252
+artifact_count=257
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

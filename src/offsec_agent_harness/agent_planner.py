@@ -67,6 +67,10 @@ def plan_agent_actions(prompt: str, *, allow_command_execution: bool = False) ->
         if not allow_command_execution and (wants_run or wants_start):
             warnings.append("Command execution was requested, but this plan leaves execute=false unless /auto execute=true is supplied.")
 
+    scope_target = _extract_scope_target(text)
+    if scope_target is not None:
+        calls.append(PlannedToolCall("scope_check", {"target": scope_target} if scope_target else {}, "Operator asked for a read-only ROE/scope check."))
+
     remember = _extract_memory(text)
     if remember:
         calls.append(PlannedToolCall("remember", remember, "Operator asked to store local agent memory."))
@@ -129,6 +133,28 @@ def _extract_command_args(text: str) -> dict[str, Any] | None:
     args.setdefault("type", args.get("action_type", "host"))
     args.setdefault("purpose", "auto-planned operator request")
     return args
+
+
+def _extract_scope_target(text: str) -> str | None:
+    stripped = text.strip()
+    lower = stripped.lower()
+    if lower in {"scope", "scope check", "show scope", "roe", "show roe", "guardrails"}:
+        return ""
+    if "scope" in lower or "authorized" in lower or "allowed" in lower:
+        keyed = _parse_key_values(stripped)
+        for key in ("target", "host", "url"):
+            if key in keyed and str(keyed[key]).strip():
+                return str(keyed[key]).strip()
+    patterns = [
+        r"(?is)^\s*(?:scope\s+check|check\s+scope\s+for|check\s+roe\s+for)\s+(?P<target>\S+)\??\s*$",
+        r"(?is)^\s*(?:scope\s+check|check\s+scope\s+for|check\s+roe\s+for|is)\s+(?P<target>\S+)\s+(?:in\s+scope|authorized|allowed)\??\s*$",
+        r"(?is)^\s*(?P<target>\S+)\s+(?:in\s+scope|authorized|allowed)\??\s*$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, stripped)
+        if match:
+            return match.group("target").strip().strip('"\'')
+    return None
 
 
 def _extract_memory(text: str) -> dict[str, str] | None:

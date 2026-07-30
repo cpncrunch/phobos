@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import unittest
 from unittest import mock
@@ -54,6 +55,49 @@ class AgentRuntimeTests(unittest.TestCase):
         ).save(engagement)
         runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(tmp_path / "agent.db"), session_name="unit"))
         return runtime, engagement
+
+    def test_scope_check_is_read_only_redacted_and_gateway_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                summary = runtime.registry.run("scope_check", {})
+                self.assertEqual(summary.status, "ok", summary.to_dict())
+                self.assertTrue(summary.data["no_target_activity"])
+                self.assertEqual(summary.data["scope_status"], "ready")
+
+                in_scope = runtime.registry.run("scope_check", {"target": "https://app.example.test/login?token=supersecret"})
+                out_scope = runtime.registry.run("scope_check", {"target": "outside.example.test"})
+                self.assertEqual(in_scope.status, "ok", in_scope.to_dict())
+                self.assertEqual(in_scope.data["target_check"]["decision"], "allow")
+                self.assertTrue(in_scope.data["target_check"]["in_scope"])
+                self.assertEqual(out_scope.data["target_check"]["decision"], "block")
+                self.assertFalse(out_scope.data["target_check"]["in_scope"])
+
+                slash = runtime.handle_message('/scope target="https://app.example.test/login?token=supersecret"')
+                schema = runtime.handle_message("/schemas name=scope_check")
+                auto = runtime.handle_message('/auto apply=true prompt="is app.example.test in scope?"')
+                self.assertIn("scope_check", schema)
+                self.assertIn('"decision": "allow"', slash)
+                self.assertIn('"tool": "scope_check"', auto)
+                self.assertNotIn("supersecret", json.dumps({"summary": summary.to_dict(), "in_scope": in_scope.to_dict(), "out_scope": out_scope.to_dict()}) + slash + schema + auto)
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                encoded = urllib.parse.urlencode({"target": "app.example.test"})
+                with urllib.request.urlopen(f"http://{host}:{port}/scope-check?{encoded}", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["data"]["target_check"]["decision"], "allow")
+
+                raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event IN ('tool_call', 'tool_result')").fetchall())
+                self.assertNotIn("supersecret", raw_audit)
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
 
     def test_safety_preflight_reports_readiness_without_target_activity(self):
         with tempfile.TemporaryDirectory() as tmp:
