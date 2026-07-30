@@ -180,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence_timeline",
                 "evidence_manifest",
                 "evidence_manifest_verify",
+                "evidence_secret_scan",
                 "closeout_review",
                 "resolve_local_ref",
             ]
@@ -1020,6 +1021,34 @@ def main(argv: list[str] | None = None) -> int:
             and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(manifest_verify_probe.to_dict()) + manifest_verify_probe_text
         )
 
+        secret_scan_proof = runtime.registry.harness.store.root / "reports" / "secret-scan-proof.txt"
+        secret_scan_proof.parent.mkdir(parents=True, exist_ok=True)
+        secret_scan_proof.write_text(
+            "Authorization: Bearer supersecret-smoke-token\n"
+            "Cookie: sessionid=supersecret-smoke-cookie\n"
+            "password=supersecret-smoke-password\n",
+            encoding="utf-8",
+        )
+        secret_scan = runtime.registry.run("evidence_secret_scan", {"out": "smoke-secret-scan.json", "limit": 100})
+        cli_secret_scan_stdout = run_cmd("secret-scan-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "secret-scan", "--engagement", str(engagement_path), "--out", "smoke-cli-secret-scan.json", "--limit", "100"])
+        cli_secret_scan = json.loads(cli_secret_scan_stdout)
+        secret_scan_text = Path(secret_scan.artifacts.get("markdown", "")).read_text(encoding="utf-8") if secret_scan.artifacts.get("markdown") else ""
+        auto_secret_scan = handle("auto-secret-scan", '/auto apply=true prompt="scan evidence for secrets"')
+        write("evidence-secret-scan.json", json.dumps(secret_scan.to_dict(), indent=2))
+        checks["evidence_secret_scan_ok"] = (
+            secret_scan.status == "ok"
+            and secret_scan.data.get("review_status") == "review"
+            and secret_scan.data.get("no_target_activity") is True
+            and secret_scan.data.get("raw_file_contents_emitted") is False
+            and secret_scan.data.get("secret_values_redacted") is True
+            and secret_scan.data.get("counts", {}).get("total_secret_like_matches", 0) >= 3
+            and cli_secret_scan.get("status") == "ok"
+            and cli_secret_scan.get("data", {}).get("review_status") == "review"
+            and "Phobos Evidence Secret Scan" in secret_scan_text
+            and '"tool": "evidence_secret_scan"' in auto_secret_scan
+            and "supersecret" not in json.dumps(secret_scan.to_dict()) + secret_scan_text + cli_secret_scan_stdout + auto_secret_scan
+        )
+
         closeout = runtime.registry.run("closeout_review", {"out": "smoke-closeout.md"})
         cli_closeout_stdout = run_cmd("closeout-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "closeout", "--engagement", str(engagement_path), "--out", "smoke-cli-closeout.md"])
         cli_closeout = json.loads(cli_closeout_stdout)
@@ -1267,7 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
         ref_route = "/ref?ref=task:1"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1331,6 +1360,10 @@ def main(argv: list[str] | None = None) -> int:
         manifest_verify_route: dict[str, object] = manifest_verify_route_obj if isinstance(manifest_verify_route_obj, dict) else {}
         manifest_verify_data_obj = manifest_verify_route.get("data")
         manifest_verify_route_data: dict[str, object] = manifest_verify_data_obj if isinstance(manifest_verify_data_obj, dict) else {}
+        secret_scan_route_obj = gateway_gets.get("/secret-scan?limit=50")
+        secret_scan_route: dict[str, object] = secret_scan_route_obj if isinstance(secret_scan_route_obj, dict) else {}
+        secret_scan_data_obj = secret_scan_route.get("data")
+        secret_scan_route_data: dict[str, object] = secret_scan_data_obj if isinstance(secret_scan_data_obj, dict) else {}
         closeout_route_obj = gateway_gets.get("/closeout")
         closeout_route: dict[str, object] = closeout_route_obj if isinstance(closeout_route_obj, dict) else {}
         closeout_route_data_obj = closeout_route.get("data")
@@ -1349,7 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

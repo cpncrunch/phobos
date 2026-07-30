@@ -221,6 +221,7 @@ class OffSecToolRegistry:
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_manifest_verify", self.evidence_manifest_verify, _spec("evidence_manifest_verify", "Verify a prior evidence manifest against current local artifacts, reporting missing/changed/new files without target activity.", {"path": _string("Manifest JSON path under agent/manifests; defaults to latest evidence manifest."), "manifest": _string("Alias for path."), "max_bytes": {"type": "integer", "description": "Skip current files larger than this many bytes; default 50000000."}, "limit": {"type": "integer", "description": "Maximum new-artifact rows to include; default 1000."}, "detect_new": {"type": "boolean", "description": "Report artifacts not present in the source manifest; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
+        self.register_tool("evidence_secret_scan", self.evidence_secret_scan, _spec("evidence_secret_scan", "Read-only local evidence-root scan for secret-like material; emits redacted previews only and performs no target activity.", {"limit": {"type": "integer", "description": "Maximum finding rows to return/write; default 200."}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 2000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/secret-scans.")}, []))
         self.register_tool("closeout_review", self.closeout_review, _spec("closeout_review", "Run a read-only engagement closeout readiness review across ROE, approvals, tasks, findings, processes, and evidence artifacts.", {"out": _string("Optional Markdown output path; relative paths go under agent/closeout.")}, []))
         self.register_tool("resolve_local_ref", self.resolve_local_ref, _spec("resolve_local_ref", "Resolve a redacted local drill-down ref such as approval:1, task:1, finding:1, tool-run:1, media:1, context-node:1, or artifact:agent/path without target activity.", {"ref": _string("Local ref, e.g. task:1 or artifact:agent/preflight/report.md."), "kind": _string("Optional kind when id/path is supplied separately."), "id": {"type": "integer"}, "path": _string("Artifact path under the engagement evidence root."), "max_bytes": {"type": "integer", "description": "Maximum artifact bytes to hash; default 50000000."}}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
@@ -2000,6 +2001,149 @@ class OffSecToolRegistry:
             {"json": str(out_json), "markdown": str(out_markdown)},
         )
 
+    def evidence_secret_scan(self, args: dict[str, Any]) -> ToolResult:
+        """Scan local evidence artifacts for secret-like material without target activity.
+
+        This is a closeout hygiene check, not target validation: it reads only
+        files that resolve under the engagement evidence root, skips symlink
+        escapes and oversized/binary artifacts, and emits redacted previews only.
+        """
+
+        limit = max(1, min(int(args.get("limit", 200)), 5000))
+        max_bytes = max(1, min(int(args.get("max_bytes", 2_000_000)), 50_000_000))
+        include_agent = _truthy_bool(args.get("include_agent", True), default=True)
+        evidence_root = self.harness.store.root.resolve(strict=False)
+        scan_dir = (self.harness.store.root / "agent" / "secret-scans").resolve(strict=False)
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out_json = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "secret-scans",
+            str(args.get("out") or "").strip(),
+            f"evidence-secret-scan-{stamp}.json",
+            suffix=".json",
+        )
+        out_markdown = out_json.with_suffix(".md")
+        if not _is_relative_to(out_markdown.resolve(strict=False), scan_dir):
+            raise ValueError("artifact output path escapes the secret-scans artifact directory")
+
+        findings: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        files_with_findings: set[str] = set()
+        total_files_seen = 0
+        files_scanned = 0
+        total_matches = 0
+        truncated = False
+
+        for path in sorted(evidence_root.rglob("*")):
+            try:
+                resolved = path.resolve(strict=False)
+                rel = path.relative_to(evidence_root).as_posix()
+            except (OSError, RuntimeError, ValueError) as exc:
+                skipped.append({"path": redact_secrets(str(path)) or str(path), "reason": f"path could not be safely resolved: {exc}"})
+                continue
+            if not _is_relative_to(resolved, evidence_root):
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": "symlink target outside evidence root"})
+                continue
+            if _is_relative_to(resolved, scan_dir):
+                continue
+            if not include_agent and rel.startswith("agent/"):
+                continue
+            if not resolved.is_file():
+                continue
+            total_files_seen += 1
+            try:
+                stat_result = resolved.stat()
+            except OSError as exc:
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"stat failed: {exc}"})
+                continue
+            if stat_result.st_size > max_bytes:
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"larger than max_bytes ({max_bytes})", "bytes": stat_result.st_size})
+                continue
+            try:
+                data = resolved.read_bytes()
+            except OSError as exc:
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"read failed: {exc}"})
+                continue
+            if _looks_binary_bytes(data):
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": "binary-like artifact skipped", "bytes": stat_result.st_size})
+                continue
+            text = data.decode("utf-8", errors="replace")
+            redacted_text = redact_secrets(text) or ""
+            if redacted_text == text:
+                files_scanned += 1
+                continue
+            files_scanned += 1
+            category = _artifact_category(rel)
+            file_matches = 0
+
+            def add_finding(line_no: int | None, match_types: list[str], preview: str) -> None:
+                nonlocal total_matches, truncated, file_matches
+                total_matches += 1
+                file_matches += 1
+                files_with_findings.add(rel)
+                if len(findings) >= limit:
+                    truncated = True
+                    return
+                findings.append(_redacted_mapping({
+                    "path": rel,
+                    "category": category,
+                    "line": line_no,
+                    "match_types": match_types or ["secret_pattern"],
+                    "redacted_preview": (preview.strip() or "<REDACTED>")[:500],
+                }))
+
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                redacted_line = redact_secrets(line) or ""
+                if redacted_line == line:
+                    continue
+                add_finding(line_no, _secret_scan_match_types(line, redacted_line), redacted_line)
+            if file_matches == 0 and redacted_text != text:
+                first_line = 1
+                for idx, line in enumerate(text.splitlines(), start=1):
+                    if "private key" in line.lower():
+                        first_line = idx
+                        break
+                add_finding(first_line, ["private_key"], "<REDACTED_PRIVATE_KEY>")
+
+        counts = {
+            "files_seen": total_files_seen,
+            "files_scanned": files_scanned,
+            "files_with_findings": len(files_with_findings),
+            "findings_returned": len(findings),
+            "total_secret_like_matches": total_matches,
+            "skipped": len(skipped),
+            "truncated": truncated,
+        }
+        review_status = "review" if total_matches else "clear"
+        payload = _redacted_mapping({
+            "created_at": utc_now(),
+            "engagement": self.roe.name,
+            "session_id": self.session_id,
+            "evidence_root": str(evidence_root),
+            "review_status": review_status,
+            "counts": counts,
+            "findings": findings,
+            "skipped": skipped[:500],
+            "limit": limit,
+            "max_bytes": max_bytes,
+            "include_agent": include_agent,
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+            "secret_values_redacted": True,
+        })
+        payload["path"] = str(out_json)
+        payload["markdown_path"] = str(out_markdown)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        out_markdown.write_text(_evidence_secret_scan_markdown(self.roe.name, review_status, counts, findings, skipped), encoding="utf-8")
+        self.store.audit(self.session_id, "evidence_secret_scan", {"review_status": review_status, "counts": counts, "path": str(out_json)})
+        return ToolResult(
+            "ok",
+            f"Evidence secret scan {review_status}: {total_matches} secret-like match(es) across {len(files_with_findings)} file(s).",
+            payload,
+            {"json": str(out_json), "markdown": str(out_markdown)},
+        )
+
     def closeout_review(self, args: dict[str, Any]) -> ToolResult:
         """Review whether the local evidence/session state is ready for engagement closeout.
 
@@ -3222,6 +3366,7 @@ def _closeout_artifact_presence(evidence_root: Path) -> dict[str, Any]:
         "preflight": ("preflight", ("*.md",)),
         "manifests": ("manifests", ("*.json",)),
         "timelines": ("timelines", ("*.md",)),
+        "secret_scans": ("secret-scans", ("*.json", "*.md")),
         "exports": ("exports", ("*.zip",)),
         "briefings": ("briefings", ("*.md",)),
         "finding_exports": ("findings", ("*.md",)),
@@ -3797,6 +3942,86 @@ def _resolve_manifest_input_path(evidence_root: Path, path_arg: str) -> Path | N
     return None
 
 
+def _looks_binary_bytes(data: bytes) -> bool:
+    if not data:
+        return False
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return True
+    control = sum(1 for byte in sample if byte < 32 and byte not in {9, 10, 12, 13})
+    return control / max(1, len(sample)) > 0.30
+
+
+def _secret_scan_match_types(original: str, redacted: str) -> list[str]:
+    lower = original.lower()
+    types: list[str] = []
+    if "private key" in lower or "<redacted_private_key>" in redacted.lower():
+        types.append("private_key")
+    if "authorization" in lower:
+        types.append("authorization")
+    if "cookie" in lower or "set-cookie" in lower:
+        types.append("cookie")
+    labels = [
+        ("password", ("password", "passwd", "pwd")),
+        ("api_key", ("api_key", "api-key", "x-api-key")),
+        ("token", ("token", "session_token", "id_token", "access_token", "refresh_token")),
+        ("secret", ("secret", "client_secret", "aws_secret_access_key")),
+        ("proxy_authorization", ("proxy_authorization", "proxy-authorization")),
+    ]
+    for label, needles in labels:
+        if any(needle in lower for needle in needles):
+            types.append(label)
+    if redacted != original and not types:
+        types.append("secret_pattern")
+    return sorted(set(types))
+
+
+def _evidence_secret_scan_markdown(
+    engagement_name: str,
+    review_status: str,
+    counts: dict[str, Any],
+    findings: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "# Phobos Evidence Secret Scan",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Review status: `{_md_cell(review_status)}`",
+        "No target activity was performed. This report scans local evidence-root text artifacts and emits metadata plus redacted previews only; raw file contents and raw secret values are not emitted.",
+        "",
+        "## Summary",
+        "",
+        f"- Files seen: {counts.get('files_seen', 0)}",
+        f"- Files scanned: {counts.get('files_scanned', 0)}",
+        f"- Files with findings: {counts.get('files_with_findings', 0)}",
+        f"- Secret-like matches: {counts.get('total_secret_like_matches', 0)}",
+        f"- Findings returned: {counts.get('findings_returned', 0)}",
+        f"- Skipped: {counts.get('skipped', 0)}",
+        f"- Truncated by limit: {counts.get('truncated', False)}",
+        "",
+        "## Secret-like findings",
+        "",
+        "| Path | Category | Line | Match types | Redacted preview |",
+        "|---|---|---|---|---|",
+    ]
+    if not findings:
+        lines.append("| | | | | No secret-like material detected by configured patterns. |")
+    for item in findings[:500]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("category", ""), item.get("line", ""), ", ".join(str(kind) for kind in item.get("match_types", [])), item.get("redacted_preview", "")]) + " |")
+    if len(findings) > 500:
+        lines.append(f"| ... | | | | {len(findings) - 500} additional finding row(s) omitted from Markdown. |")
+    lines += ["", "## Skipped artifacts", "", "| Path | Reason |", "|---|---|"]
+    if not skipped:
+        lines.append("| | None |")
+    for item in skipped[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("reason", "")]) + " |")
+    if len(skipped) > 200:
+        lines.append(f"| ... | {len(skipped) - 200} additional skipped artifact(s) omitted from Markdown. |")
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
 def _evidence_manifest_verification_markdown(
     engagement_name: str,
     source_manifest: str,
@@ -3896,6 +4121,8 @@ def _artifact_category(relative_path: str) -> str:
         ("agent/briefings/", "briefing"),
         ("agent/session-exports/", "handoff"),
         ("agent/sealed/", "sealed"),
+        ("agent/manifests/", "manifest"),
+        ("agent/secret-scans/", "secret_scan"),
         ("agent/exports/", "export"),
         ("agent/workspace/", "workspace"),
     ]

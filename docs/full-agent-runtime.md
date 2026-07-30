@@ -8,7 +8,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Persistent memory:** local SQLite memory table with `/remember`, `/recall`, `/memories`, `/memory`, and `/forget`; Hindsight-style aliases (`/hindsight-retain`, `/hindsight-recall`, `/hindsight-reflect`) store/search/synthesize through the same local memory and context stores; memory list/detail/delete controls support local hygiene without target activity, memory keys/values/tags are redacted before SQLite writes, and memory plus current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-detail`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite with redacted current-session detail views.
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported. Context summary/node text, sources, and metadata are redacted before SQLite writes. Node describe/expand by integer ID is scoped to the active session.
-- **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/scope`/`scope_check` gives operators a read-only ROE summary plus optional target-to-scope match decision before they queue scanner or command work; scope matching normalizes URL rules, userinfo/path/query fragments, explicit host ports, wildcard host:port rules, CIDR ranges, and bracketed IPv6 literals without doing target activity. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs; `/ref`/`/detail` resolves those refs to session-bound metadata without target activity.
+- **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/scope`/`scope_check` gives operators a read-only ROE summary plus optional target-to-scope match decision before they queue scanner or command work; scope matching normalizes URL rules, userinfo/path/query fragments, explicit host ports, wildcard host:port rules, CIDR ranges, and bracketed IPv6 literals without doing target activity. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events; `/manifest` writes a read-only SHA-256 inventory of evidence artifacts without emitting file contents; `/manifest-verify` re-hashes a prior manifest to flag changed, missing, unsafe, or new local artifacts; `/secret-scan` scans local evidence-root text artifacts for secret-like material with redacted previews only; `/closeout` composes local readiness signals into a redacted closeout review with bounded local drill-down refs; `/ref`/`/detail` resolves those refs to session-bound metadata without target activity.
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. Tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle records:** `/finding-create`, `/finding-update`, `/finding-get`, `/findings`, `/finding-export`, and `/finding-review` persist and review candidate/reportable findings. Scanner-imported evidence stays candidate/non-reportable until the operator moves a finding to `confirmed`, `resolved`, or `accepted-risk`. Finding fields and evidence refs are redacted before SQLite storage.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
@@ -25,8 +25,8 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; stored/displayed paths and original names are redacted, `/media-list` lists metadata, and `/media-get` returns session-bound metadata without reading file contents.
-- **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/manifest` creates JSON/Markdown SHA-256 artifact inventories for chain-of-custody review; `/manifest-verify` writes JSON/Markdown verification reports comparing a prior manifest to current local artifacts; `/closeout` reviews local ROE/preflight, approvals, tasks, findings, process state, tool runs, and artifact presence into a ready/review/blocked Markdown checklist with redacted local refs such as `approval:<id>`, `task:<id>`, `process:<id>`, `finding:<id>`, `tool-run:<id>`, and `artifact:<relative-agent-path>`; `/ref` resolves those refs using existing current-session detail handlers or evidence-root artifact metadata, never file contents; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
-- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, read-only scope checks, memory hygiene, preflight readiness, findings, tool runs, timelines, evidence manifests/verification, closeout reviews, local ref resolution, LCM nodes, tasks/task details, jobs, processes/process details, delegations, delegation details, media metadata, auth status, and bridge config.
+- **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/manifest` creates JSON/Markdown SHA-256 artifact inventories for chain-of-custody review; `/manifest-verify` writes JSON/Markdown verification reports comparing a prior manifest to current local artifacts; `/secret-scan` writes redacted JSON/Markdown evidence hygiene reports under `agent/secret-scans/`; `/closeout` reviews local ROE/preflight, approvals, tasks, findings, process state, tool runs, and artifact presence into a ready/review/blocked Markdown checklist with redacted local refs such as `approval:<id>`, `task:<id>`, `process:<id>`, `finding:<id>`, `tool-run:<id>`, and `artifact:<relative-agent-path>`; `/ref` resolves those refs using existing current-session detail handlers or evidence-root artifact metadata, never file contents; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
+- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, read-only scope checks, memory hygiene, preflight readiness, findings, tool runs, timelines, evidence manifests/verification, evidence secret scans, closeout reviews, local ref resolution, LCM nodes, tasks/task details, jobs, processes/process details, delegations, delegation details, media metadata, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, checking actual local bridge-test attachment size before dispatch, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default with `--no-response-polish` available for raw diagnostics.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to session messages, memories, context summaries/nodes, media metadata, logged commands/tool args, and audit event payloads before storage/display; redaction covers common Authorization bearer/basic headers, authorization assignments, cookie headers, quoted password/token/API-key values, cloud/OAuth secret fields such as client secrets and AWS secret access keys, and pasted PEM private-key blocks.
@@ -120,6 +120,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /timeline limit=100 category=<optional> include_audit=true out=<optional.md>
 /manifest limit=1000 max_bytes=50000000 include_agent=true out=<optional.json>
 /manifest-verify path=<manifest.json> detect_new=true out=<optional.json>
+/secret-scan limit=200 max_bytes=2000000 include_agent=true out=<optional.json>
 /closeout out=<optional.md>
 /ref ref=<task:1|finding:1|tool-run:1|artifact:agent/path>
 /detail ref=<approval:1|process:1|job:1|delegation:1|media:1|context-node:1>
@@ -307,6 +308,19 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json evidence-manif
 ```
 
 The manifest is read-only and performs no target activity. It resolves every candidate artifact before `stat()`/hashing, skips symlink targets outside the engagement evidence root, writes JSON and Markdown under `agent/manifests/`, and records relative path, category, byte count, MIME, modified time, and SHA-256. It never emits file contents; secret-like values in paths or metadata are redacted before JSON/Markdown output.
+
+## Evidence secret hygiene scan
+
+Use `/secret-scan`, `evidence_secret_scan`, gateway `GET /secret-scan`, or the CLI command before closeout/handoff/export when you want a local-only hygiene pass over collected evidence:
+
+```bash
+phobos-agent --db data/phobos-agent.db --config agent.config.json secret-scan \
+  --engagement engagement.json \
+  --out closeout-secret-scan.json \
+  --limit 200
+```
+
+The scan is read-only and performs no target activity. It walks only files that resolve under the engagement evidence root, skips symlink escapes, oversized files, binary-like artifacts, and its own `agent/secret-scans/` output directory, then writes redacted JSON and Markdown under `agent/secret-scans/`. Results include metadata and redacted previews only: raw file contents and raw secret values are not emitted. Use `--exclude-agent` or `include_agent=false` when you want to scan operator/client evidence while ignoring Phobos-generated artifacts.
 
 ## Local drill-down refs
 
@@ -741,7 +755,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 48 tests
+Ran 52 tests
 OK
 ```
 
@@ -811,6 +825,7 @@ evidence_timeline_ok=True
 evidence_manifest_ok=True
 evidence_manifest_verify_ok=True
 evidence_manifest_verify_flags_ok=True
+evidence_secret_scan_ok=True
 closeout_review_ok=True
 closeout_drilldown_links_ok=True
 sealed_snapshot_roundtrip_ok=True
@@ -831,7 +846,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=262
+artifact_count=276
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -865,6 +880,7 @@ auto-loop.txt
 auto-loop-recall.txt
 auto-plan.txt
 auto-recall.txt
+auto-secret-scan.txt
 auto-scope.txt
 bridge-approval-block.json
 bridge-attachment-size-guard.json
@@ -880,6 +896,9 @@ closeout-cli.command.txt
 closeout-cli.stderr.txt
 closeout-cli.stdout.txt
 closeout-review.json
+secret-scan-cli.command.txt
+secret-scan-cli.stderr.txt
+secret-scan-cli.stdout.txt
 delegation.json
 delegation-storage.json
 delegations.json
@@ -912,6 +931,7 @@ legacy-term-grep.txt
 media-import.json
 media-list.json
 evidence-manifest.json
+evidence-secret-scan.json
 nmap-structured.json
 httpx-structured.json
 nuclei-structured.json
@@ -980,4 +1000,4 @@ This is now a real local Hermes-like offsec agent runtime, but it is still not a
 - sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
 - Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
 
-The important pieces for a standalone pentest agent are working: sessions, memory, Hindsight aliases, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, structured scanner wrapper evidence, finding lifecycle records, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches with child sessions, media/artifact import, bridge media metadata/import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, sealed DB backup/restore, authenticated local/VPS gateway/dashboard and remote browser client, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
+The important pieces for a standalone pentest agent are working: sessions, memory, Hindsight aliases, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, structured scanner wrapper evidence, finding lifecycle records, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches with child sessions, media/artifact import, bridge media metadata/import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, sealed DB backup/restore, authenticated local/VPS gateway/dashboard and remote browser client, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, local evidence secret hygiene scans, and the pentest-specific tools.

@@ -377,6 +377,9 @@ class OffSecAgentRuntime:
             "manifest-verify": "evidence_manifest_verify",
             "manifest-check": "evidence_manifest_verify",
             "evidence-manifest-verify": "evidence_manifest_verify",
+            "secret-scan": "evidence_secret_scan",
+            "evidence-secret-scan": "evidence_secret_scan",
+            "evidence-secrets": "evidence_secret_scan",
             "closeout": "closeout_review",
             "closeout-review": "closeout_review",
             "closeout-readiness": "closeout_review",
@@ -952,6 +955,7 @@ HELP_TEXT = """Phobos Agent commands:
 /timeline limit=100 category=<optional> include_audit=true out=<optional.md>
 /manifest limit=1000 max_bytes=50000000 include_agent=true out=<optional.json>
 /manifest-verify path=<manifest.json> out=<optional.json>
+/secret-scan limit=200 max_bytes=2000000 include_agent=true out=<optional.json>
 /closeout out=<optional.md>
 /ref ref=<task:1|finding:1|tool-run:1|artifact:agent/path>
 /tasks status=all

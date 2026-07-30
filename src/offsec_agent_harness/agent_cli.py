@@ -189,6 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_verify.add_argument("--max-bytes", type=int, default=50_000_000)
     manifest_verify.add_argument("--no-detect-new", action="store_true", help="Do not report artifacts absent from the source manifest")
 
+    secret_scan = sub.add_parser("secret-scan", help="Scan local evidence artifacts for secret-like material with redacted previews only")
+    secret_scan.add_argument("--engagement", required=True)
+    secret_scan.add_argument("--out", help="Optional JSON output path under the engagement agent/secret-scans artifacts directory")
+    secret_scan.add_argument("--limit", type=int, default=200)
+    secret_scan.add_argument("--max-bytes", type=int, default=2_000_000)
+    secret_scan.add_argument("--exclude-agent", action="store_true", help="Exclude agent-generated artifacts from the scan")
+
+    evidence_secret_scan = sub.add_parser("evidence-secret-scan", help="Alias for secret-scan")
+    evidence_secret_scan.add_argument("--engagement", required=True)
+    evidence_secret_scan.add_argument("--out", help="Optional JSON output path under the engagement agent/secret-scans artifacts directory")
+    evidence_secret_scan.add_argument("--limit", type=int, default=200)
+    evidence_secret_scan.add_argument("--max-bytes", type=int, default=2_000_000)
+    evidence_secret_scan.add_argument("--exclude-agent", action="store_true", help="Exclude agent-generated artifacts from the scan")
+
     closeout = sub.add_parser("closeout", help="Run a read-only closeout readiness review and write a redacted Markdown checklist")
     closeout.add_argument("--engagement", required=True)
     closeout.add_argument("--out", help="Optional Markdown output path under the engagement agent/closeout artifacts directory")
@@ -436,6 +450,15 @@ def main(argv: list[str] | None = None) -> int:
                 "limit": args.limit,
                 "max_bytes": args.max_bytes,
                 "detect_new": not args.no_detect_new,
+            })
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand in {"secret-scan", "evidence-secret-scan"}:
+            result = runtime.registry.run("evidence_secret_scan", {
+                "out": args.out or "",
+                "limit": args.limit,
+                "max_bytes": args.max_bytes,
+                "include_agent": not args.exclude_agent,
             })
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2

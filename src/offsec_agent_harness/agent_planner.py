@@ -106,6 +106,9 @@ def plan_agent_actions(prompt: str, *, allow_command_execution: bool = False) ->
     if "briefing" in lower or "operator brief" in lower or "status briefing" in lower:
         calls.append(PlannedToolCall("operator_briefing", {}, "Operator asked for a Hermes-like session briefing."))
 
+    if "secret scan" in lower or "scan evidence for secrets" in lower or "evidence secrets" in lower or "secret leak" in lower:
+        calls.append(PlannedToolCall("evidence_secret_scan", {}, "Operator asked for a read-only local evidence secret hygiene scan."))
+
     if "handoff" in lower or "export session" in lower or "session export" in lower:
         calls.append(PlannedToolCall("export_session", {}, "Operator asked to export a portable session handoff."))
 

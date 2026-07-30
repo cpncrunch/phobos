@@ -623,6 +623,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("sealed_export", {"passphrase_env": "PHOBOS_TEST_ARTIFACT_SEAL", "out": str(Path(tmp) / "outside-sealed.json")}, Path(tmp) / "outside-sealed.json"),
                     ("evidence_manifest", {"out": str(Path(tmp) / "outside-manifest.json")}, Path(tmp) / "outside-manifest.json"),
                     ("evidence_manifest_verify", {"path": "containment-manifest.json", "out": str(Path(tmp) / "outside-manifest-verify.json")}, Path(tmp) / "outside-manifest-verify.json"),
+                    ("evidence_secret_scan", {"out": str(Path(tmp) / "outside-secret-scan.json")}, Path(tmp) / "outside-secret-scan.json"),
                     ("closeout_review", {"out": str(Path(tmp) / "outside-closeout.md")}, Path(tmp) / "outside-closeout.md"),
                 ]
                 for tool, args, outside_path in escape_cases:
@@ -821,6 +822,76 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(verify_payload["data"]["verification_status"], "changed")
                 self.assertTrue(verify_payload["data"]["no_target_activity"])
                 self.assertNotIn("supersecret", json.dumps(verify_payload))
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
+    def test_evidence_secret_scan_reports_redacted_local_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                evidence_root = runtime.registry.harness.store.root
+                proof = evidence_root / "reports" / "secret-scan-proof.txt"
+                proof.parent.mkdir(parents=True, exist_ok=True)
+                proof.write_text(
+                    "GET / HTTP/1.1\n"
+                    "Authorization: Bearer scan-secret-token\n"
+                    "Cookie: sessionid=scan-cookie-value\n"
+                    "password=scan-password-value\n"
+                    "normal line\n",
+                    encoding="utf-8",
+                )
+                outside = Path(tmp) / "outside-secret-scan-sentinel.txt"
+                outside.write_text("OUTSIDE_SECRET_SCAN_SENTINEL token=outside-scan-token", encoding="utf-8")
+                link = evidence_root / "agent" / "media" / "secret-scan-escape-link.txt"
+                link.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    link.symlink_to(outside)
+                except (OSError, NotImplementedError):
+                    link = None
+
+                scan = runtime.registry.run("evidence_secret_scan", {"out": "unit-secret-scan.json", "limit": 20})
+                self.assertEqual(scan.status, "ok", scan.to_dict())
+                self.assertEqual(scan.data["review_status"], "review", scan.to_dict())
+                self.assertTrue(scan.data["no_target_activity"])
+                self.assertFalse(scan.data["raw_file_contents_emitted"])
+                self.assertTrue(scan.data["secret_values_redacted"])
+                self.assertGreaterEqual(scan.data["counts"]["total_secret_like_matches"], 3)
+                self.assertTrue(any(item.get("path") == "reports/secret-scan-proof.txt" for item in scan.data["findings"]), scan.data["findings"])
+                if link is not None:
+                    self.assertTrue(any(item.get("reason") == "symlink target outside evidence root" for item in scan.data["skipped"]), scan.data["skipped"])
+                json_path = Path(scan.artifacts["json"])
+                markdown_path = Path(scan.artifacts["markdown"])
+                self.assertTrue(json_path.exists())
+                self.assertTrue(markdown_path.exists())
+                combined = json.dumps(scan.to_dict()) + json_path.read_text(encoding="utf-8") + markdown_path.read_text(encoding="utf-8")
+                self.assertIn("<REDACTED>", combined)
+                self.assertIn("Phobos Evidence Secret Scan", combined)
+                self.assertNotIn("scan-secret-token", combined)
+                self.assertNotIn("scan-cookie-value", combined)
+                self.assertNotIn("scan-password-value", combined)
+                self.assertNotIn("OUTSIDE_SECRET_SCAN_SENTINEL", combined)
+
+                slash = runtime.handle_message('/secret-scan limit=20 out=slash-secret-scan.json')
+                schema = runtime.handle_message("/schemas name=evidence_secret_scan")
+                auto = runtime.handle_message('/auto apply=true prompt="scan evidence for secrets"')
+                self.assertIn("Evidence secret scan review", slash)
+                self.assertIn("evidence_secret_scan", schema)
+                self.assertIn('"tool": "evidence_secret_scan"', auto)
+                self.assertNotIn("scan-secret-token", slash + schema + auto)
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/secret-scan?limit=20", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["data"]["review_status"], "review")
+                self.assertTrue(payload["data"]["no_target_activity"])
+                self.assertNotIn("scan-secret-token", json.dumps(payload))
             finally:
                 if gateway is not None:
                     gateway.shutdown()
