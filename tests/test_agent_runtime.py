@@ -138,12 +138,27 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("[executed]", executed)
                 self.assertIn("agent-ok", executed)
 
-                confirm = runtime.handle_message('/run target=app.example.test type=web purpose="controlled test update" command="curl -X POST https://app.example.test/profile" execute=true')
+                confirm = runtime.handle_message('/run target=app.example.test type=web purpose="controlled test update token=supersecret" command="curl -X POST https://app.example.test/profile token=supersecret" execute=true')
                 self.assertIn("needs_approval", confirm)
                 approvals = runtime.handle_message('/approvals')
+                approval_detail = runtime.handle_message('/approval id=1')
                 self.assertIn("controlled test update", approvals)
+                self.assertIn("token=<REDACTED>", approvals)
+                self.assertIn("token=<REDACTED>", approval_detail)
+                self.assertNotIn("supersecret", approvals + approval_detail)
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="other"))
+                try:
+                    cross_session = other_runtime.handle_message('/approval id=1')
+                    cross_approve = other_runtime.handle_message('/approve id=1')
+                    self.assertIn("not found in this session", cross_session)
+                    self.assertIn("not found in this session", cross_approve)
+                finally:
+                    other_runtime.close()
                 denied = runtime.handle_message('/deny id=1 reason="unit test"')
                 self.assertIn("denied", denied)
+                all_approvals = runtime.handle_message('/approvals status=all')
+                self.assertIn("denied", all_approvals)
+                self.assertNotIn("supersecret", all_approvals)
 
                 job = runtime.handle_message('/job name=daily schedule=manual prompt="/recall query=ACME"')
                 self.assertIn("Scheduled job", job)

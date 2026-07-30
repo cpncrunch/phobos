@@ -15,7 +15,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles, auth status, and preflight:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report.
-- **Approvals:** confirm-level commands are queued in SQLite and require `/approve id=<n>` before execution/start.
+- **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start.
 - **Runtime tool policy:** config/CLI and the authenticated gateway UI/API can block or approval-gate arbitrary tool names, independent of ROE guardrails.
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
@@ -71,7 +71,8 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /wait id=<process-id> timeout=30
 /log id=<process-id> limit=4000
 /kill id=<process-id>
-/approvals
+/approvals status=pending|all
+/approval id=<approval-id>
 /approve id=<approval-id>
 /deny id=<approval-id> reason=<why>
 /plan finding=<observed weakness>
@@ -317,6 +318,7 @@ Review and approve/deny:
 
 ```bash
 phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approvals'
+phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approval id=1'
 phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/deny id=1 reason="outside window"'
 # or, when ROE permits:
 phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approve id=1'
@@ -604,6 +606,7 @@ GET  /tool-runs
 GET  /jobs
 GET  /processes
 GET  /approvals
+GET  /approval?id=<approval-id>
 GET  /delegations
 GET  /media
 GET  /auth
@@ -740,7 +743,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=208
+artifact_count=209
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -766,6 +769,7 @@ Representative smoke outputs are stored under `demo-phobos-parity/output/`:
 ```text
 active-scan-assess.txt
 agent-init.stdout.txt
+approval-detail.txt
 approvals.txt
 auth-status.json
 auto-apply.txt

@@ -329,6 +329,9 @@ class OffSecAgentRuntime:
             "job": "schedule_job",
             "jobs": "list_jobs",
             "approvals": "list_approvals",
+            "approval": "get_approval",
+            "approval-get": "get_approval",
+            "approval-detail": "get_approval",
             "subagents": "subagent_review",
             "delegate": "delegate_tasks",
             "delegations": "list_delegations",
@@ -633,7 +636,7 @@ def _render_approvals_chat(data: dict[str, Any]) -> str:
         lines.append(f"- #{approval.get('id')} `{approval.get('tool_name')}` requested {approval.get('requested_at', '')}")
     if len(approvals) > 8:
         lines.append(f"- ...and {len(approvals) - 8} more.")
-    lines.append("Use the local gateway/CLI for approvals unless this bridge was deliberately enabled for `/approve` and `/deny`.")
+    lines.append("Use `/approval id=<id>` to inspect redacted detail. Use the local gateway/CLI for approvals unless this bridge was deliberately enabled for `/approve` and `/deny`.")
     return "\n".join(lines)
 
 
@@ -866,7 +869,8 @@ HELP_TEXT = """Phobos Agent commands:
 /wait id=<process-id> timeout=30
 /log id=<process-id> limit=4000
 /kill id=<process-id>
-/approvals
+/approvals status=pending|all
+/approval id=<approval-id>
 /approve id=<approval-id>
 /deny id=<approval-id> reason=<why>
 /plan finding=<observed weakness>

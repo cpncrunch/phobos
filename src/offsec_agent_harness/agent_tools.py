@@ -77,7 +77,7 @@ class OffSecToolRegistry:
         self.blocked_tools = {name.strip() for name in blocked_tools if name.strip()}
         self.confirm_tools = {name.strip() for name in confirm_tools if name.strip()}
         self.runtime_metadata = runtime_metadata or {}
-        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight"}
+        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "get_approval", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight"}
         self.workspace_root = Path(workspace_dir) if workspace_dir else self.harness.store.root / "agent" / "workspace"
         if not self.workspace_root.is_absolute():
             self.workspace_root = (self.harness.store.root / self.workspace_root).resolve()
@@ -198,7 +198,8 @@ class OffSecToolRegistry:
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
         self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
         self.register_tool("sealed_import", self.sealed_import, _spec("sealed_import", "Decrypt a sealed session snapshot and import its handoff data; no commands are executed.", {"path": _string("Sealed snapshot path."), "passphrase_env": _string("Environment variable containing passphrase."), "merge_memories": {"type": "boolean"}}, ["path", "passphrase_env"]))
-        self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List pending approvals.", {"status": _string("Approval status; default pending.")}))
+        self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List approvals for the current session with redacted arguments/decisions.", {"status": _string("Approval status; default pending; use all for resolved approvals too."), "limit": {"type": "integer"}}))
+        self.register_tool("get_approval", self.get_approval, _spec("get_approval", "Return one current-session approval with redacted arguments, decision, and replay result.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
@@ -325,10 +326,10 @@ class OffSecToolRegistry:
     def approve(self, args: dict[str, Any]) -> ToolResult:
         approval_id = int(args.get("id") or args.get("approval_id"))
         approval = self.store.get_approval(approval_id)
-        if not approval:
-            return ToolResult("error", f"Approval {approval_id} not found.")
+        if not approval or approval.get("session_id") != self.session_id:
+            return ToolResult("error", f"Approval {approval_id} not found in this session.")
         if approval["status"] != "pending":
-            return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", approval)
+            return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", {"approval": _redacted_mapping(approval)})
         if approval["tool_name"] == "run_command":
             approved_args = dict(approval["args"])
             approved_args["_approved"] = True
@@ -364,8 +365,10 @@ class OffSecToolRegistry:
     def deny(self, args: dict[str, Any]) -> ToolResult:
         approval_id = int(args.get("id") or args.get("approval_id"))
         approval = self.store.get_approval(approval_id)
-        if not approval:
-            return ToolResult("error", f"Approval {approval_id} not found.")
+        if not approval or approval.get("session_id") != self.session_id:
+            return ToolResult("error", f"Approval {approval_id} not found in this session.")
+        if approval["status"] != "pending":
+            return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", {"approval": _redacted_mapping(approval)})
         self.store.resolve_approval(approval_id, "denied", args.get("by", "operator"), {"reason": args.get("reason", "")})
         return ToolResult("denied", f"Approval {approval_id} denied.")
 
@@ -1139,8 +1142,28 @@ class OffSecToolRegistry:
         return ToolResult(result.status, "Sealed snapshot decrypted and imported; no commands executed.", result.data, result.artifacts)
 
     def list_approvals(self, args: dict[str, Any]) -> ToolResult:
-        rows = self.store.list_approvals(self.session_id, status=str(args.get("status", "pending")))
-        return ToolResult("ok", f"Found {len(rows)} approvals.", {"approvals": rows})
+        status = str(args.get("status", "pending") or "pending").strip().lower()
+        limit = int(args.get("limit", 100))
+        rows = self.store.list_approvals(self.session_id, status=status, limit=limit)
+        return ToolResult(
+            "ok",
+            f"Found {len(rows)} approval(s).",
+            {"approvals": [_redacted_mapping(row) for row in rows], "status": status, "secret_values_redacted": True},
+        )
+
+    def get_approval(self, args: dict[str, Any]) -> ToolResult:
+        approval_raw = args.get("id") or args.get("approval_id")
+        if approval_raw is None:
+            return ToolResult("error", "Approval id is required.")
+        approval_id = int(approval_raw)
+        approval = self.store.get_approval(approval_id)
+        if not approval or approval.get("session_id") != self.session_id:
+            return ToolResult("error", f"Approval {approval_id} not found in this session.")
+        return ToolResult(
+            "ok",
+            f"Approval {approval_id} returned.",
+            {"approval": _redacted_mapping(approval), "secret_values_redacted": True},
+        )
 
     def tool_schemas(self, args: dict[str, Any]) -> ToolResult:
         name = str(args.get("name", "")).strip()
@@ -1242,17 +1265,16 @@ class OffSecToolRegistry:
                 data={"id": finding.get("id"), "evidence_count": len(finding.get("evidence") or [])},
             )
 
-        for approval_status in ("pending", "approved", "denied"):
-            for approval in self.store.list_approvals(self.session_id, status=approval_status):
-                add(
-                    approval.get("resolved_at") or approval.get("requested_at"),
-                    "approval",
-                    f"{approval.get('tool_name')} approval #{approval.get('id')}",
-                    status=str(approval.get("status") or approval_status),
-                    ref=f"approval:{approval.get('id')}",
-                    summary=json.dumps(approval.get("args", {}), sort_keys=True)[:800],
-                    data={"id": approval.get("id"), "tool_name": approval.get("tool_name"), "decision": approval.get("decision", {})},
-                )
+        for approval in self.store.list_approvals(self.session_id, status="all", limit=max(limit, 100)):
+            add(
+                approval.get("resolved_at") or approval.get("requested_at"),
+                "approval",
+                f"{approval.get('tool_name')} approval #{approval.get('id')}",
+                status=str(approval.get("status") or ""),
+                ref=f"approval:{approval.get('id')}",
+                summary=json.dumps(approval.get("args", {}), sort_keys=True)[:800],
+                data={"id": approval.get("id"), "tool_name": approval.get("tool_name"), "decision": approval.get("decision", {})},
+            )
 
         for task in self.store.list_tasks(self.session_id, status="all", limit=max(limit, 100)):
             add(

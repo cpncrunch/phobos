@@ -237,8 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         assess = handle("active-scan-assess", '/assess target=10.10.0.5 type=service-enumeration purpose=version-scan command="nmap -sV 10.10.0.5"')
         run = handle("safe-run", '/run target=app.example.test type=host purpose="safe local smoke" command="printf parity-ok" execute=true')
         secret_run = handle("secret-run", '/run target=app.example.test type=host purpose="redaction smoke" command="printf token=supersecret" execute=true')
-        state_change = handle("state-change-confirm", '/run target=app.example.test type=web purpose="controlled update" command="printf curl -X POST https://app.example.test/profile" execute=true')
+        state_change = handle("state-change-confirm", '/run target=app.example.test type=web purpose="controlled update token=supersecret" command="printf curl -X POST https://app.example.test/profile token=supersecret" execute=true')
         approvals = handle("approvals", "/approvals")
+        approval_detail = handle("approval-detail", "/approval id=1")
         destructive = handle("destructive-block", '/run target=app.example.test type=host purpose=blocked command="printf rm -rf /" execute=true')
         dos = handle("dos-block", '/run target=app.example.test type=web purpose=blocked command="printf hping3 --flood app.example.test" execute=true')
         checks["guardrails_execution_approvals_blocks"] = (
@@ -247,6 +248,9 @@ def main(argv: list[str] | None = None) -> int:
             and "token=<REDACTED>" in secret_run
             and "needs_approval" in state_change
             and "controlled update" in approvals
+            and "token=<REDACTED>" in approvals
+            and "token=<REDACTED>" in approval_detail
+            and "supersecret" not in approvals + approval_detail
             and "blocked" in destructive.lower()
             and "blocked" in dos.lower()
         )
@@ -641,7 +645,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -704,9 +708,10 @@ def main(argv: list[str] | None = None) -> int:
         closeout_route: dict[str, object] = closeout_route_obj if isinstance(closeout_route_obj, dict) else {}
         closeout_route_data_obj = closeout_route.get("data")
         closeout_route_data: dict[str, object] = closeout_route_data_obj if isinstance(closeout_route_data_obj, dict) else {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        approval_route = gateway_gets.get("/approval?id=1") or {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and "supersecret" not in json.dumps(approval_route)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

@@ -118,7 +118,20 @@ class AgentGateway:
                         _write_json(self, runtime.registry.run("context_snapshot", {}).to_dict())
                         return
                     if path == "/approvals":
-                        _write_json(self, runtime.registry.run("list_approvals", {}).to_dict())
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {
+                            "status": (query.get("status") or ["pending"])[0],
+                            "limit": int((query.get("limit") or [100])[0]),
+                        }
+                        _write_json(self, runtime.registry.run("list_approvals", args).to_dict())
+                        return
+                    if path in {"/approval", "/approval-detail"}:
+                        query = parse_qs(parsed.query)
+                        approval_id = (query.get("id") or query.get("approval_id") or [""])[0]
+                        if not approval_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_approval", {"id": approval_id}).to_dict())
                         return
                     if path == "/audit":
                         _write_json(self, runtime.registry.run("audit_log", {"limit": 50}).to_dict())
@@ -285,6 +298,8 @@ def _gateway_paths() -> list[str]:
         "/jobs",
         "/processes",
         "/approvals",
+        "/approval",
+        "/approval-detail",
         "/delegations",
         "/media",
         "/auth",

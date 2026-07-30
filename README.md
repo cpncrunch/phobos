@@ -315,7 +315,7 @@ This turns the harness into a standalone agent-style application with:
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
 - redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -397,6 +397,7 @@ phobos-agent --db data/phobos-agent.db once \
 
 # Review approvals.
 phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approvals'
+phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approval id=1'
 
 # Workspace files, background processes, plugins, context compaction, and local gateway.
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
@@ -613,7 +614,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=208
+artifact_count=209
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

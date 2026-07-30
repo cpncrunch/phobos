@@ -789,11 +789,19 @@ class AgentStore:
         data["result"] = json.loads(data.pop("result_json") or "null")
         return data
 
-    def list_approvals(self, session_id: str, status: str = "pending") -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM approvals WHERE session_id=? AND status=? ORDER BY id DESC",
-            (session_id, status),
-        ).fetchall()
+    def list_approvals(self, session_id: str, status: str = "pending", limit: int = 100) -> list[dict[str, Any]]:
+        normalized = (status or "pending").strip().lower()
+        row_limit = max(1, min(int(limit), 500))
+        if normalized in {"all", "*", "any"}:
+            rows = self.conn.execute(
+                "SELECT * FROM approvals WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                (session_id, row_limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM approvals WHERE session_id=? AND status=? ORDER BY id DESC LIMIT ?",
+                (session_id, normalized, row_limit),
+            ).fetchall()
         out = []
         for row in rows:
             data = dict(row)
