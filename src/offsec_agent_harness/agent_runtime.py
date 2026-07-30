@@ -349,6 +349,9 @@ class OffSecAgentRuntime:
             "evidence-timeline": "evidence_timeline",
             "manifest": "evidence_manifest",
             "evidence-manifest": "evidence_manifest",
+            "manifest-verify": "evidence_manifest_verify",
+            "manifest-check": "evidence_manifest_verify",
+            "evidence-manifest-verify": "evidence_manifest_verify",
             "closeout": "closeout_review",
             "closeout-review": "closeout_review",
             "closeout-readiness": "closeout_review",
@@ -904,6 +907,7 @@ HELP_TEXT = """Phobos Agent commands:
 /briefing query=<optional> out=<optional.md>
 /timeline limit=100 category=<optional> include_audit=true out=<optional.md>
 /manifest limit=1000 max_bytes=50000000 include_agent=true out=<optional.json>
+/manifest-verify path=<manifest.json> out=<optional.json>
 /closeout out=<optional.md>
 /tasks status=all
 /task-add content=<task> status=pending

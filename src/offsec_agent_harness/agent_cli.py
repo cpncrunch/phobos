@@ -181,6 +181,14 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_manifest.add_argument("--max-bytes", type=int, default=50_000_000)
     evidence_manifest.add_argument("--exclude-agent", action="store_true", help="Exclude agent-generated artifacts from the inventory")
 
+    manifest_verify = sub.add_parser("manifest-verify", help="Verify a prior evidence manifest against current local artifacts")
+    manifest_verify.add_argument("--engagement", required=True)
+    manifest_verify.add_argument("--path", help="Manifest JSON under agent/manifests; defaults to the latest evidence manifest")
+    manifest_verify.add_argument("--out", help="Optional JSON output path under the engagement agent/manifests artifacts directory")
+    manifest_verify.add_argument("--limit", type=int, default=1000)
+    manifest_verify.add_argument("--max-bytes", type=int, default=50_000_000)
+    manifest_verify.add_argument("--no-detect-new", action="store_true", help="Do not report artifacts absent from the source manifest")
+
     closeout = sub.add_parser("closeout", help="Run a read-only closeout readiness review and write a redacted Markdown checklist")
     closeout.add_argument("--engagement", required=True)
     closeout.add_argument("--out", help="Optional Markdown output path under the engagement agent/closeout artifacts directory")
@@ -418,6 +426,16 @@ def main(argv: list[str] | None = None) -> int:
                 "limit": args.limit,
                 "max_bytes": args.max_bytes,
                 "include_agent": not args.exclude_agent,
+            })
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand == "manifest-verify":
+            result = runtime.registry.run("evidence_manifest_verify", {
+                "path": args.path or "",
+                "out": args.out or "",
+                "limit": args.limit,
+                "max_bytes": args.max_bytes,
+                "detect_new": not args.no_detect_new,
             })
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2

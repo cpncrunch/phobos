@@ -169,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                 "finding_review",
                 "evidence_timeline",
                 "evidence_manifest",
+                "evidence_manifest_verify",
                 "closeout_review",
             ]
         )
@@ -436,6 +437,50 @@ def main(argv: list[str] | None = None) -> int:
             and (not pack_symlink_created or any(item.get("reason") == "symlink target outside evidence root" for item in manifest.data.get("skipped", [])))
         )
 
+        manifest_verify = runtime.registry.run("evidence_manifest_verify", {"path": "smoke-manifest.json", "out": "smoke-manifest-verify.json", "detect_new": False})
+        cli_manifest_verify_stdout = run_cmd("manifest-verify-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "manifest-verify", "--engagement", str(engagement_path), "--path", "smoke-manifest.json", "--out", "smoke-cli-manifest-verify.json", "--no-detect-new"])
+        cli_manifest_verify = json.loads(cli_manifest_verify_stdout)
+        write("evidence-manifest-verify.json", json.dumps(manifest_verify.to_dict(), indent=2))
+        manifest_verify_path = Path(manifest_verify.artifacts.get("markdown", ""))
+        manifest_verify_text = manifest_verify_path.read_text(encoding="utf-8") if manifest_verify_path.exists() else ""
+        checks["evidence_manifest_verify_ok"] = (
+            manifest_verify.status == "ok"
+            and manifest_verify.data.get("verification_status") == "verified"
+            and manifest_verify.data.get("no_target_activity") is True
+            and manifest_verify.data.get("secret_values_redacted") is True
+            and cli_manifest_verify.get("status") == "ok"
+            and cli_manifest_verify.get("data", {}).get("verification_status") == "verified"
+            and "Phobos Evidence Manifest Verification" in manifest_verify_text
+            and "supersecret" not in json.dumps(manifest_verify.to_dict()) + manifest_verify_text + cli_manifest_verify_stdout
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(manifest_verify.to_dict()) + manifest_verify_text
+        )
+        manifest_probe_path = Path(manifest.artifacts["json"]).parent / "smoke-manifest-missing-unsafe.json"
+        manifest_probe_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_probe_path.write_text(json.dumps({
+            "created_at": "2026-01-01T00:00:00Z",
+            "engagement": "Smoke Manifest Probe",
+            "include_agent": True,
+            "entries": [
+                {"path": "reports/smoke-missing-artifact.txt", "category": "finding", "bytes": 10, "sha256": "0" * 64},
+                {"path": "../outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "1" * 64},
+                {"path": "/tmp/outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "2" * 64},
+                {"path": "C:/outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "3" * 64},
+            ],
+        }), encoding="utf-8")
+        manifest_verify_probe = runtime.registry.run("evidence_manifest_verify", {"path": manifest_probe_path.name, "out": "smoke-manifest-missing-unsafe-verify.json", "detect_new": False})
+        write("evidence-manifest-verify-flags.json", json.dumps(manifest_verify_probe.to_dict(), indent=2))
+        manifest_verify_probe_text = Path(manifest_verify_probe.artifacts.get("markdown", "")).read_text(encoding="utf-8") if manifest_verify_probe.artifacts.get("markdown") else ""
+        checks["evidence_manifest_verify_flags_ok"] = (
+            manifest_verify_probe.status == "ok"
+            and manifest_verify_probe.data.get("verification_status") == "changed"
+            and manifest_verify_probe.data.get("counts", {}).get("missing", 0) >= 1
+            and manifest_verify_probe.data.get("counts", {}).get("unsafe", 0) >= 3
+            and manifest_verify_probe.data.get("no_target_activity") is True
+            and "manifest entry path is not evidence-root relative" in manifest_verify_probe_text
+            and "supersecret" not in json.dumps(manifest_verify_probe.to_dict()) + manifest_verify_probe_text
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(manifest_verify_probe.to_dict()) + manifest_verify_probe_text
+        )
+
         closeout = runtime.registry.run("closeout_review", {"out": "smoke-closeout.md"})
         cli_closeout_stdout = run_cmd("closeout-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "closeout", "--engagement", str(engagement_path), "--out", "smoke-cli-closeout.md"])
         cli_closeout = json.loads(cli_closeout_stdout)
@@ -645,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -704,14 +749,18 @@ def main(argv: list[str] | None = None) -> int:
         manifest_route: dict[str, object] = manifest_route_obj if isinstance(manifest_route_obj, dict) else {}
         manifest_data_obj = manifest_route.get("data")
         manifest_route_data: dict[str, object] = manifest_data_obj if isinstance(manifest_data_obj, dict) else {}
+        manifest_verify_route_obj = gateway_gets.get("/manifest-verify?path=smoke-manifest.json&detect_new=false")
+        manifest_verify_route: dict[str, object] = manifest_verify_route_obj if isinstance(manifest_verify_route_obj, dict) else {}
+        manifest_verify_data_obj = manifest_verify_route.get("data")
+        manifest_verify_route_data: dict[str, object] = manifest_verify_data_obj if isinstance(manifest_verify_data_obj, dict) else {}
         closeout_route_obj = gateway_gets.get("/closeout")
         closeout_route: dict[str, object] = closeout_route_obj if isinstance(closeout_route_obj, dict) else {}
         closeout_route_data_obj = closeout_route.get("data")
         closeout_route_data: dict[str, object] = closeout_route_data_obj if isinstance(closeout_route_data_obj, dict) else {}
         approval_route = gateway_gets.get("/approval?id=1") or {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and "supersecret" not in json.dumps(approval_route)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

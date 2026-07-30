@@ -204,6 +204,7 @@ class OffSecToolRegistry:
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
+        self.register_tool("evidence_manifest_verify", self.evidence_manifest_verify, _spec("evidence_manifest_verify", "Verify a prior evidence manifest against current local artifacts, reporting missing/changed/new files without target activity.", {"path": _string("Manifest JSON path under agent/manifests; defaults to latest evidence manifest."), "manifest": _string("Alias for path."), "max_bytes": {"type": "integer", "description": "Skip current files larger than this many bytes; default 50000000."}, "limit": {"type": "integer", "description": "Maximum new-artifact rows to include; default 1000."}, "detect_new": {"type": "boolean", "description": "Report artifacts not present in the source manifest; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("closeout_review", self.closeout_review, _spec("closeout_review", "Run a read-only engagement closeout readiness review across ROE, approvals, tasks, findings, processes, and evidence artifacts.", {"out": _string("Optional Markdown output path; relative paths go under agent/closeout.")}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
@@ -1460,6 +1461,247 @@ class OffSecToolRegistry:
         return ToolResult(
             "ok",
             f"Evidence manifest wrote {len(entries)} file hash(es); skipped {len(skipped)}.",
+            payload,
+            {"json": str(out_json), "markdown": str(out_markdown)},
+        )
+
+    def evidence_manifest_verify(self, args: dict[str, Any]) -> ToolResult:
+        """Verify a previously generated evidence manifest against local artifacts.
+
+        This is a read-only chain-of-custody check with respect to the engagement
+        target: it only reads files under the evidence root, resolves candidates
+        before stat/hash, writes a redacted verification report under
+        ``agent/manifests``, and never emits artifact contents.
+        """
+
+        max_bytes = max(1, min(int(args.get("max_bytes", 50_000_000)), 500_000_000))
+        limit = max(1, min(int(args.get("limit", 1000)), 5000))
+        detect_new = _truthy_bool(args.get("detect_new", True), default=True)
+        evidence_root = self.harness.store.root.resolve(strict=False)
+        manifest_dir = (self.harness.store.root / "agent" / "manifests").resolve(strict=False)
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out_json = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "manifests",
+            str(args.get("out") or "").strip(),
+            f"manifest-verification-{stamp}.json",
+            suffix=".json",
+        )
+        out_markdown = out_json.with_suffix(".md")
+        if not _is_relative_to(out_markdown.resolve(strict=False), manifest_dir):
+            raise ValueError("artifact output path escapes the manifests artifact directory")
+
+        source_path = _resolve_manifest_input_path(evidence_root, str(args.get("path") or args.get("manifest") or "").strip())
+        if source_path is None:
+            return ToolResult(
+                "error",
+                "No evidence manifest JSON found under agent/manifests.",
+                {"manifest_dir": str(manifest_dir), "no_target_activity": True, "secret_values_redacted": True},
+            )
+        try:
+            manifest = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return ToolResult(
+                "error",
+                f"Manifest could not be read or parsed: {exc}",
+                {"source_manifest": str(source_path), "no_target_activity": True, "secret_values_redacted": True},
+            )
+        entries_raw = manifest.get("entries")
+        if not isinstance(entries_raw, list):
+            return ToolResult(
+                "error",
+                "Manifest JSON does not contain an entries list.",
+                {"source_manifest": str(source_path), "no_target_activity": True, "secret_values_redacted": True},
+            )
+
+        expected_by_path: dict[str, dict[str, Any]] = {}
+        duplicate_paths: list[dict[str, Any]] = []
+        invalid_entries: list[dict[str, Any]] = []
+        unsafe: list[dict[str, Any]] = []
+        for index, entry in enumerate(entries_raw):
+            if not isinstance(entry, dict):
+                invalid_entries.append({"index": index, "reason": "entry is not an object"})
+                continue
+            raw_rel = str(entry.get("path") or "").strip().replace("\\", "/")
+            raw_parts = raw_rel.split("/")
+            if raw_rel.startswith("/") or re.match(r"^[A-Za-z]:", raw_rel) or ".." in raw_parts:
+                unsafe.append({"path": redact_secrets(raw_rel) or raw_rel, "reason": "manifest entry path is not evidence-root relative"})
+                continue
+            rel = "/".join(part for part in raw_parts if part not in {"", "."})
+            if not rel:
+                invalid_entries.append({"index": index, "reason": "entry path is empty"})
+                continue
+            if rel in expected_by_path:
+                duplicate_paths.append({"path": redact_secrets(rel) or rel, "reason": "duplicate manifest entry path"})
+                continue
+            expected_by_path[rel] = entry
+
+        verified: list[dict[str, Any]] = []
+        changed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for rel, expected in sorted(expected_by_path.items()):
+            rel_parts = Path(rel).parts
+            if Path(rel).is_absolute() or ".." in rel_parts:
+                unsafe.append({"path": redact_secrets(rel) or rel, "reason": "manifest entry path is not evidence-root relative"})
+                continue
+            candidate = evidence_root / rel
+            try:
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                unsafe.append({"path": redact_secrets(rel) or rel, "reason": f"path could not be safely resolved: {exc}"})
+                continue
+            if not _is_relative_to(resolved, evidence_root):
+                unsafe.append({"path": redact_secrets(rel) or rel, "reason": "symlink target outside evidence root"})
+                continue
+            if _is_relative_to(resolved, manifest_dir):
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": "manifest artifact self-reference skipped"})
+                continue
+            if not resolved.exists():
+                missing.append(_redacted_mapping({"path": rel, "expected_sha256": expected.get("sha256"), "expected_bytes": expected.get("bytes"), "reason": "missing"}))
+                continue
+            if not resolved.is_file():
+                missing.append(_redacted_mapping({"path": rel, "expected_sha256": expected.get("sha256"), "expected_bytes": expected.get("bytes"), "reason": "not a regular file"}))
+                continue
+            try:
+                stat_result = resolved.stat()
+            except OSError as exc:
+                unsafe.append({"path": redact_secrets(rel) or rel, "reason": f"stat failed: {exc}"})
+                continue
+            if stat_result.st_size > max_bytes:
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"larger than max_bytes ({max_bytes})", "bytes": stat_result.st_size})
+                continue
+            try:
+                data = resolved.read_bytes()
+            except OSError as exc:
+                unsafe.append({"path": redact_secrets(rel) or rel, "reason": f"read failed: {exc}"})
+                continue
+            actual_sha = hashlib.sha256(data).hexdigest()
+            actual_bytes = stat_result.st_size
+            expected_sha = str(expected.get("sha256") or "").strip().lower()
+            expected_bytes_value = expected.get("bytes")
+            try:
+                expected_bytes = int(expected_bytes_value) if expected_bytes_value is not None else None
+            except (TypeError, ValueError):
+                expected_bytes = None
+            reasons: list[str] = []
+            if not expected_sha:
+                reasons.append("source manifest entry has no SHA-256")
+            elif actual_sha != expected_sha:
+                reasons.append("SHA-256 mismatch")
+            if expected_bytes is None:
+                reasons.append("source manifest entry has no byte count")
+            elif actual_bytes != expected_bytes:
+                reasons.append("byte count mismatch")
+            row = _redacted_mapping({
+                "path": rel,
+                "category": expected.get("category") or _artifact_category(rel),
+                "expected_sha256": expected_sha,
+                "actual_sha256": actual_sha,
+                "expected_bytes": expected_bytes,
+                "actual_bytes": actual_bytes,
+                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
+                "reasons": reasons,
+            })
+            if reasons:
+                changed.append(row)
+            else:
+                verified.append(row)
+
+        include_agent = bool(manifest.get("include_agent", True))
+        new_entries: list[dict[str, Any]] = []
+        new_truncated = False
+        if detect_new:
+            expected_paths = set(expected_by_path)
+            for path in sorted(evidence_root.rglob("*")):
+                try:
+                    resolved = path.resolve(strict=False)
+                    rel = path.relative_to(evidence_root).as_posix()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    skipped.append({"path": redact_secrets(str(path)) or str(path), "reason": f"path could not be safely resolved while looking for new artifacts: {exc}"})
+                    continue
+                if rel in expected_paths:
+                    continue
+                if _is_relative_to(resolved, manifest_dir):
+                    continue
+                if not include_agent and rel.startswith("agent/"):
+                    continue
+                if not _is_relative_to(resolved, evidence_root):
+                    skipped.append({"path": redact_secrets(rel) or rel, "reason": "symlink target outside evidence root"})
+                    continue
+                if not resolved.is_file():
+                    continue
+                stat_result = resolved.stat()
+                if stat_result.st_size > max_bytes:
+                    skipped.append({"path": redact_secrets(rel) or rel, "reason": f"new artifact larger than max_bytes ({max_bytes})", "bytes": stat_result.st_size})
+                    continue
+                if len(new_entries) >= limit:
+                    new_truncated = True
+                    skipped.append({"path": redact_secrets(rel) or rel, "reason": f"new artifact limit reached ({limit})"})
+                    continue
+                try:
+                    data = resolved.read_bytes()
+                except OSError as exc:
+                    unsafe.append({"path": redact_secrets(rel) or rel, "reason": f"read failed while hashing new artifact: {exc}"})
+                    continue
+                new_entries.append(_redacted_mapping({
+                    "path": rel,
+                    "category": _artifact_category(rel),
+                    "bytes": stat_result.st_size,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "mime_type": mimetypes.guess_type(rel)[0] or "application/octet-stream",
+                    "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
+                }))
+
+        counts = {
+            "expected": len(expected_by_path),
+            "verified": len(verified),
+            "changed": len(changed),
+            "missing": len(missing),
+            "unsafe": len(unsafe),
+            "new": len(new_entries),
+            "skipped": len(skipped),
+            "duplicate_paths": len(duplicate_paths),
+            "invalid_entries": len(invalid_entries),
+            "new_truncated": new_truncated,
+        }
+        if changed or missing or unsafe:
+            verification_status = "changed"
+        elif duplicate_paths or invalid_entries or new_entries or skipped:
+            verification_status = "review"
+        else:
+            verification_status = "verified"
+        payload = _redacted_mapping({
+            "created_at": utc_now(),
+            "engagement": self.roe.name,
+            "session_id": self.session_id,
+            "source_manifest": str(source_path),
+            "source_manifest_created_at": manifest.get("created_at"),
+            "verification_status": verification_status,
+            "counts": counts,
+            "verified": verified[: min(len(verified), 200)],
+            "changed": changed,
+            "missing": missing,
+            "unsafe": unsafe,
+            "new": new_entries,
+            "skipped": skipped,
+            "duplicate_paths": duplicate_paths,
+            "invalid_entries": invalid_entries,
+            "detect_new": detect_new,
+            "max_bytes": max_bytes,
+            "limit": limit,
+            "no_target_activity": True,
+            "secret_values_redacted": True,
+            "path": str(out_json),
+            "markdown_path": str(out_markdown),
+        })
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        out_markdown.write_text(_evidence_manifest_verification_markdown(self.roe.name, str(source_path), verification_status, counts, changed, missing, unsafe, new_entries, skipped, duplicate_paths, invalid_entries), encoding="utf-8")
+        self.store.audit(self.session_id, "evidence_manifest_verified", {"source_manifest": str(source_path), "verification_status": verification_status, "counts": counts, "path": str(out_json)})
+        return ToolResult(
+            "ok",
+            f"Evidence manifest verification {verification_status}: {counts['verified']} verified, {counts['changed']} changed, {counts['missing']} missing, {counts['new']} new.",
             payload,
             {"json": str(out_json), "markdown": str(out_markdown)},
         )
@@ -3135,6 +3377,122 @@ def _evidence_manifest_markdown(engagement_name: str, entries: list[dict[str, An
         lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("reason", "")]) + " |")
     if len(skipped) > 200:
         lines.append(f"| ... | {len(skipped) - 200} additional skipped artifact(s) omitted from Markdown. |")
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
+def _resolve_manifest_input_path(evidence_root: Path, path_arg: str) -> Path | None:
+    manifest_dir = (evidence_root / "agent" / "manifests").resolve(strict=False)
+    if path_arg:
+        candidate = Path(path_arg).expanduser()
+        if not candidate.is_absolute():
+            candidate = manifest_dir / path_arg
+        resolved = candidate.resolve(strict=False)
+        if not _is_relative_to(resolved, evidence_root):
+            raise ValueError("manifest path escapes the evidence root")
+        if not _is_relative_to(resolved, manifest_dir):
+            raise ValueError("manifest path must be under agent/manifests")
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError("manifest path was not found under agent/manifests")
+        return resolved
+    candidates: list[Path] = []
+    try:
+        for candidate in manifest_dir.glob("*.json"):
+            resolved = candidate.resolve(strict=False)
+            if not _is_relative_to(resolved, manifest_dir):
+                continue
+            if not resolved.is_file():
+                continue
+            if "verification" in resolved.name:
+                continue
+            candidates.append(resolved)
+    except OSError:
+        return None
+    candidates.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            return candidate
+    return None
+
+
+def _evidence_manifest_verification_markdown(
+    engagement_name: str,
+    source_manifest: str,
+    verification_status: str,
+    counts: dict[str, Any],
+    changed: list[dict[str, Any]],
+    missing: list[dict[str, Any]],
+    unsafe: list[dict[str, Any]],
+    new_entries: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    duplicate_paths: list[dict[str, Any]],
+    invalid_entries: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "# Phobos Evidence Manifest Verification",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Source manifest: `{_md_cell(source_manifest)}`",
+        f"Verification status: `{_md_cell(verification_status)}`",
+        "No target activity was performed. This report re-hashes local evidence-root artifacts and records metadata only; it does not include file contents.",
+        "",
+        "## Summary",
+        "",
+        f"- Expected artifacts: {counts.get('expected', 0)}",
+        f"- Verified unchanged: {counts.get('verified', 0)}",
+        f"- Changed: {counts.get('changed', 0)}",
+        f"- Missing: {counts.get('missing', 0)}",
+        f"- Unsafe path entries: {counts.get('unsafe', 0)}",
+        f"- New artifacts: {counts.get('new', 0)}",
+        f"- Skipped: {counts.get('skipped', 0)}",
+        f"- Duplicate manifest paths: {counts.get('duplicate_paths', 0)}",
+        f"- Invalid manifest entries: {counts.get('invalid_entries', 0)}",
+        f"- New artifact list truncated: {counts.get('new_truncated', False)}",
+        "",
+        "## Changed artifacts",
+        "",
+        "| Path | Reasons | Expected SHA-256 | Actual SHA-256 | Expected bytes | Actual bytes |",
+        "|---|---|---|---|---|---|",
+    ]
+    if not changed:
+        lines.append("| | None | | | | |")
+    for item in changed[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), "; ".join(str(reason) for reason in item.get("reasons", [])), item.get("expected_sha256", ""), item.get("actual_sha256", ""), item.get("expected_bytes", ""), item.get("actual_bytes", "")]) + " |")
+    if len(changed) > 200:
+        lines.append(f"| ... | {len(changed) - 200} additional changed artifact(s) omitted from Markdown. | | | | |")
+    lines += ["", "## Missing artifacts", "", "| Path | Reason | Expected SHA-256 | Expected bytes |", "|---|---|---|---|"]
+    if not missing:
+        lines.append("| | None | | |")
+    for item in missing[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("reason", ""), item.get("expected_sha256", ""), item.get("expected_bytes", "")]) + " |")
+    if len(missing) > 200:
+        lines.append(f"| ... | {len(missing) - 200} additional missing artifact(s) omitted from Markdown. | | |")
+    lines += ["", "## Unsafe manifest entries", "", "| Path | Reason |", "|---|---|"]
+    if not unsafe:
+        lines.append("| | None |")
+    for item in unsafe[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("reason", "")]) + " |")
+    if len(unsafe) > 200:
+        lines.append(f"| ... | {len(unsafe) - 200} additional unsafe entry/entries omitted from Markdown. |")
+    lines += ["", "## New artifacts", "", "| Path | Category | Bytes | SHA-256 | Modified | MIME |", "|---|---|---|---|---|---|"]
+    if not new_entries:
+        lines.append("| | None | | | | |")
+    for item in new_entries[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("category", ""), item.get("bytes", ""), item.get("sha256", ""), item.get("modified_at", ""), item.get("mime_type", "")]) + " |")
+    if len(new_entries) > 200:
+        lines.append(f"| ... | {len(new_entries) - 200} additional new artifact(s) omitted from Markdown. | | | | |")
+    lines += ["", "## Skipped and manifest-quality notes", "", "| Path / Index | Reason |", "|---|---|"]
+    notes = skipped + duplicate_paths + invalid_entries
+    if not notes:
+        lines.append("| | None |")
+    for item in notes[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", item.get("index", "")), item.get("reason", "")]) + " |")
+    if len(notes) > 200:
+        lines.append(f"| ... | {len(notes) - 200} additional note(s) omitted from Markdown. |")
     return redact_secrets("\n".join(lines) + "\n") or ""
 
 

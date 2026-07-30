@@ -280,7 +280,7 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report with bounded local drill-down references such as `approval:<id>`, `task:<id>`, `finding:<id>`, `process:<id>`, and `artifact:<relative-path>`. These review tools perform no target activity.
+The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest/verification, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, `/manifest-verify` re-hashes a prior manifest to flag changed/missing/unsafe/new local artifacts, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report with bounded local drill-down references. These review tools perform no target activity.
 
 Current verification: 42 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews with local drill-down links, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
@@ -314,8 +314,8 @@ This turns the harness into a standalone agent-style application with:
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
-- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
+- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories plus manifest verification reports, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -430,6 +430,11 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 phobos-agent --db data/phobos-agent.db --config agent.config.json evidence-manifest \
   --engagement engagement.json \
   --out closeout-manifest.json
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json manifest-verify \
+  --engagement engagement.json \
+  --path closeout-manifest.json \
+  --out closeout-manifest-verify.json
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json closeout \
   --engagement engagement.json \

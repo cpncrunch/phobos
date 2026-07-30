@@ -154,6 +154,20 @@ class AgentGateway:
                             args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
                         _write_json(self, runtime.registry.run("evidence_manifest", args).to_dict())
                         return
+                    if path in {"/manifest-verify", "/evidence-manifest-verify"}:
+                        query = parse_qs(parsed.query)
+                        args = {
+                            "path": (query.get("path") or query.get("manifest") or [""])[0],
+                            "limit": int((query.get("limit") or [1000])[0]),
+                        }
+                        if (query.get("out") or [""])[0]:
+                            args["out"] = (query.get("out") or [""])[0]
+                        if (query.get("max_bytes") or [""])[0]:
+                            args["max_bytes"] = int((query.get("max_bytes") or [50000000])[0])
+                        if (query.get("detect_new") or [""])[0]:
+                            args["detect_new"] = (query.get("detect_new") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                        _write_json(self, runtime.registry.run("evidence_manifest_verify", args).to_dict())
+                        return
                     if path in {"/closeout", "/closeout-review"}:
                         query = parse_qs(parsed.query)
                         args = {"out": (query.get("out") or [""])[0]} if (query.get("out") or [""])[0] else {}
@@ -289,6 +303,8 @@ def _gateway_paths() -> list[str]:
         "/timeline",
         "/manifest",
         "/evidence-manifest",
+        "/manifest-verify",
+        "/evidence-manifest-verify",
         "/closeout",
         "/closeout-review",
         "/lcm",

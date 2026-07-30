@@ -279,6 +279,8 @@ class AgentRuntimeTests(unittest.TestCase):
                 good_path = Path(good.artifacts["markdown"]).resolve()
                 findings_dir = (Path(runtime.registry.harness.store.root) / "agent" / "findings").resolve()
                 self.assertEqual(os.path.commonpath([str(findings_dir), str(good_path)]), str(findings_dir))
+                source_manifest = runtime.registry.run("evidence_manifest", {"out": "containment-manifest.json"})
+                self.assertEqual(source_manifest.status, "ok", source_manifest.to_dict())
 
                 escape_cases = [
                     ("finding_review", {"id": finding_id, "out": str(Path(tmp) / "outside-review.md")}, Path(tmp) / "outside-review.md"),
@@ -287,6 +289,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("export_pack", {"out": str(Path(tmp) / "outside-pack.zip")}, Path(tmp) / "outside-pack.zip"),
                     ("sealed_export", {"passphrase_env": "PHOBOS_TEST_ARTIFACT_SEAL", "out": str(Path(tmp) / "outside-sealed.json")}, Path(tmp) / "outside-sealed.json"),
                     ("evidence_manifest", {"out": str(Path(tmp) / "outside-manifest.json")}, Path(tmp) / "outside-manifest.json"),
+                    ("evidence_manifest_verify", {"path": "containment-manifest.json", "out": str(Path(tmp) / "outside-manifest-verify.json")}, Path(tmp) / "outside-manifest-verify.json"),
                     ("closeout_review", {"out": str(Path(tmp) / "outside-closeout.md")}, Path(tmp) / "outside-closeout.md"),
                 ]
                 for tool, args, outside_path in escape_cases:
@@ -380,7 +383,7 @@ class AgentRuntimeTests(unittest.TestCase):
             gateway = None
             try:
                 evidence_root = runtime.registry.harness.store.root
-                proof = evidence_root / "reports" / "manifest-proof-token=supersecret.txt"
+                proof = evidence_root / "reports" / "manifest-proof.txt"
                 proof.parent.mkdir(parents=True, exist_ok=True)
                 proof_bytes = b"manifest proof body token=supersecret"
                 proof.write_bytes(proof_bytes)
@@ -413,9 +416,61 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn("supersecret", markdown)
                 self.assertNotIn("OUTSIDE_MANIFEST_SENTINEL", markdown)
 
+                verified = runtime.registry.run("evidence_manifest_verify", {"path": json_path.name, "out": "unit-manifest-verify.json", "detect_new": False})
+                self.assertEqual(verified.status, "ok", verified.to_dict())
+                self.assertEqual(verified.data["verification_status"], "verified", verified.to_dict())
+                self.assertTrue(verified.data["no_target_activity"])
+                self.assertTrue(verified.data["secret_values_redacted"])
+                verify_markdown = Path(verified.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Phobos Evidence Manifest Verification", verify_markdown)
+                self.assertNotIn("supersecret", json.dumps(verified.to_dict()) + verify_markdown)
+                self.assertNotIn("OUTSIDE_MANIFEST_SENTINEL", json.dumps(verified.to_dict()) + verify_markdown)
+
+                new_artifact = evidence_root / "reports" / "manifest-new-artifact.txt"
+                new_artifact.write_text("new artifact token=supersecret", encoding="utf-8")
+                new_review = runtime.registry.run("evidence_manifest_verify", {"path": json_path.name, "out": "unit-manifest-new-review.json", "detect_new": True})
+                self.assertEqual(new_review.status, "ok", new_review.to_dict())
+                self.assertEqual(new_review.data["verification_status"], "review", new_review.to_dict())
+                self.assertGreaterEqual(new_review.data["counts"]["new"], 1)
+                self.assertNotIn("supersecret", json.dumps(new_review.to_dict()) + Path(new_review.artifacts["markdown"]).read_text(encoding="utf-8"))
+
+                proof.write_bytes(b"manifest proof body changed token=supersecret")
+                changed = runtime.registry.run("evidence_manifest_verify", {"path": json_path.name, "out": "unit-manifest-changed.json", "detect_new": False})
+                self.assertEqual(changed.status, "ok", changed.to_dict())
+                self.assertEqual(changed.data["verification_status"], "changed", changed.to_dict())
+                self.assertGreaterEqual(changed.data["counts"]["changed"], 1)
+                changed_markdown = Path(changed.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("SHA-256 mismatch", changed_markdown)
+                self.assertNotIn("supersecret", json.dumps(changed.to_dict()) + changed_markdown)
+
+                probe_manifest = evidence_root / "agent" / "manifests" / "unit-manifest-missing-unsafe.json"
+                probe_manifest.write_text(json.dumps({
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "engagement": "Unit Manifest Probe",
+                    "include_agent": True,
+                    "entries": [
+                        {"path": "reports/manifest-missing.txt", "category": "finding", "bytes": 10, "sha256": "0" * 64},
+                        {"path": "../outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "1" * 64},
+                        {"path": "/tmp/outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "2" * 64},
+                        {"path": "C:/outside-evidence.txt", "category": "evidence", "bytes": 1, "sha256": "3" * 64},
+                    ],
+                }), encoding="utf-8")
+                probe_review = runtime.registry.run("evidence_manifest_verify", {"path": probe_manifest.name, "out": "unit-manifest-missing-unsafe-review.json", "detect_new": False})
+                self.assertEqual(probe_review.status, "ok", probe_review.to_dict())
+                self.assertEqual(probe_review.data["verification_status"], "changed", probe_review.to_dict())
+                self.assertGreaterEqual(probe_review.data["counts"]["missing"], 1)
+                self.assertGreaterEqual(probe_review.data["counts"]["unsafe"], 3)
+                probe_markdown = Path(probe_review.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("manifest entry path is not evidence-root relative", probe_markdown)
+                self.assertIn("missing", probe_markdown)
+                self.assertNotIn("OUTSIDE_MANIFEST_SENTINEL", json.dumps(probe_review.to_dict()) + probe_markdown)
+
                 slash = runtime.handle_message('/manifest limit=10 out=slash-manifest.json')
                 self.assertIn("Evidence manifest wrote", slash)
                 self.assertIn("evidence_manifest", runtime.handle_message("/schemas name=evidence_manifest"))
+                verify_slash = runtime.handle_message('/manifest-verify path=unit-manifest.json detect_new=false out=slash-manifest-verify.json')
+                self.assertIn("Evidence manifest verification changed", verify_slash)
+                self.assertIn("evidence_manifest_verify", runtime.handle_message("/schemas name=evidence_manifest_verify"))
 
                 gateway = AgentGateway(runtime, port=0)
                 thread = threading.Thread(target=gateway.serve_forever, daemon=True)
@@ -427,6 +482,12 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(payload["data"]["no_target_activity"])
                 self.assertFalse(payload["data"]["include_agent"])
                 self.assertNotIn("supersecret", json.dumps(payload))
+                with urllib.request.urlopen(f"http://{host}:{port}/manifest-verify?path=unit-manifest.json&detect_new=false", timeout=5) as response:
+                    verify_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(verify_payload["status"], "ok")
+                self.assertEqual(verify_payload["data"]["verification_status"], "changed")
+                self.assertTrue(verify_payload["data"]["no_target_activity"])
+                self.assertNotIn("supersecret", json.dumps(verify_payload))
             finally:
                 if gateway is not None:
                     gateway.shutdown()
@@ -1332,6 +1393,8 @@ PORT    STATE SERVICE VERSION
                 runtime.registry.run("delegate_tasks", {"prompt": "gateway delegation marker", "roles": "scope"})
                 process = runtime.registry.run("start_process", {"target": "app.example.test", "type": "host", "purpose": "gateway route process", "command": "printf gateway-process", "execute": True})
                 runtime.registry.run("wait_process", {"id": process.data["process_id"], "timeout": 5})
+                gateway_manifest = runtime.registry.run("evidence_manifest", {"out": "gateway-manifest.json"})
+                self.assertEqual(gateway_manifest.status, "ok", gateway_manifest.to_dict())
 
                 for route, marker in [
                     ("/routes", "/schemas"),
@@ -1339,6 +1402,7 @@ PORT    STATE SERVICE VERSION
                     ("/jobs", "gateway-job"),
                     ("/processes", "gateway route process"),
                     ("/timeline?include_audit=false", "gateway route process"),
+                    ("/manifest-verify?path=gateway-manifest.json&detect_new=false", "verification_status"),
                     ("/delegations", "gateway delegation marker"),
                     ("/media", "gateway-proof"),
                     ("/auth", "secret_values_redacted"),
@@ -1463,6 +1527,16 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(manifest_json["status"], "ok")
             self.assertTrue(Path(manifest_json["artifacts"]["json"]).exists())
             self.assertTrue(Path(manifest_json["artifacts"]["markdown"]).exists())
+
+            manifest_verify = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "manifest-verify", "--engagement", str(engagement), "--path", "cli-manifest.json", "--out", "cli-manifest-verify.json", "--no-detect-new",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(manifest_verify.returncode, 0, manifest_verify.stderr)
+            manifest_verify_json = json.loads(manifest_verify.stdout)
+            self.assertEqual(manifest_verify_json["status"], "ok")
+            self.assertEqual(manifest_verify_json["data"]["verification_status"], "verified")
+            self.assertTrue(manifest_verify_json["data"]["no_target_activity"])
+            self.assertTrue(Path(manifest_verify_json["artifacts"]["markdown"]).exists())
 
             closeout = subprocess.run([
                 sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "closeout", "--engagement", str(engagement), "--out", "cli-closeout.md",
