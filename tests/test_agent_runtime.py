@@ -494,6 +494,82 @@ class AgentRuntimeTests(unittest.TestCase):
                     gateway.shutdown()
                 runtime.close()
 
+    def test_closeout_review_includes_redacted_local_drilldown_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                evidence_root = runtime.registry.harness.store.root
+                proc_dir = evidence_root / "agent" / "processes"
+                proc_dir.mkdir(parents=True, exist_ok=True)
+                approval_id = runtime.store.create_approval(
+                    runtime.session_id,
+                    "run_command",
+                    {"command": "curl -X POST https://app.example.test/profile token=supersecret", "purpose": "queued token=supersecret"},
+                    {"status": "confirm", "reasons": ["state change token=supersecret"]},
+                )
+                task_id = runtime.store.create_task(runtime.session_id, "Resolve closeout evidence token=supersecret", status="in_progress")
+                active_proc = runtime.store.create_process(
+                    runtime.session_id,
+                    "printf token=supersecret",
+                    "app.example.test",
+                    "host",
+                    "active closeout process token=supersecret",
+                    str(proc_dir / "active.out"),
+                    str(proc_dir / "active.err"),
+                    str(proc_dir / "active.rc"),
+                    {"status": "allow"},
+                )
+                runtime.store.update_process(active_proc, pid=999999, status="running")
+                failed_proc = runtime.store.create_process(
+                    runtime.session_id,
+                    "printf token=supersecret",
+                    "app.example.test",
+                    "host",
+                    "failed closeout process token=supersecret",
+                    str(proc_dir / "failed.out"),
+                    str(proc_dir / "failed.err"),
+                    str(proc_dir / "failed.rc"),
+                    {"status": "allow"},
+                )
+                runtime.store.update_process(failed_proc, pid=999998, status="failed", exit_code=1, ended_at="2026-01-01T00:00:00+00:00")
+                finding_id = runtime.store.create_finding(
+                    runtime.session_id,
+                    "Closeout gap finding token=supersecret",
+                    severity="High",
+                    status="confirmed",
+                    description="too short",
+                    impact="too short",
+                    recommendation="too short",
+                    evidence=[],
+                )
+
+                result = runtime.registry.run("closeout_review", {"out": "drilldown-closeout.md"})
+                self.assertEqual(result.status, "ok", result.to_dict())
+                self.assertEqual(result.data["readiness"], "blocked")
+                checks = {check["name"]: check for check in result.data["checks"]}
+
+                def refs(name: str) -> set[str]:
+                    return {str(item.get("ref")) for item in checks[name].get("related", [])}
+
+                self.assertIn(f"approval:{approval_id}", refs("pending_approvals"))
+                self.assertIn(f"task:{task_id}", refs("open_tasks"))
+                self.assertIn(f"process:{active_proc}", refs("background_processes"))
+                self.assertIn(f"process:{failed_proc}", refs("failed_processes"))
+                self.assertIn(f"finding:{finding_id}", refs("finding_readiness"))
+                self.assertIn("artifact:agent/manifests/", refs("manifests"))
+                self.assertIn("artifact:agent/timelines/", refs("timelines"))
+                self.assertIn("artifact:agent/exports/", refs("exports"))
+                self.assertGreaterEqual(result.data["summary"].get("drilldown_links", 0), 7)
+                markdown = Path(result.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("## Drill-down", markdown)
+                self.assertIn(f"approval:{approval_id}", markdown)
+                serialized = json.dumps(result.to_dict()) + markdown
+                self.assertNotIn("supersecret", serialized)
+                self.assertNotIn("curl -X POST", serialized)
+                self.assertTrue(result.data["no_target_activity"])
+            finally:
+                runtime.close()
+
     def test_lcm_context_reflect_cross_session_delegation_and_wait(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)

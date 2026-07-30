@@ -1471,33 +1471,101 @@ class OffSecToolRegistry:
         closeout_artifacts = _closeout_artifact_presence(self.harness.store.root)
         checks: list[dict[str, Any]] = []
 
-        def add(category: str, name: str, status: str, detail: str, recommendation: str = "") -> None:
-            checks.append(_closeout_check(category, name, status, detail, recommendation))
+        def add(
+            category: str,
+            name: str,
+            status: str,
+            detail: str,
+            recommendation: str = "",
+            *,
+            related: list[dict[str, Any]] | None = None,
+        ) -> None:
+            checks.append(_closeout_check(category, name, status, detail, recommendation, related=related))
 
+        preflight_artifact_related = _closeout_artifact_links(closeout_artifacts.get("preflight"), ref_prefix="preflight")
+        preflight_review_related = preflight_artifact_related or _closeout_artifact_links(closeout_artifacts.get("preflight"), ref_prefix="preflight", expected_dir="agent/preflight/")
         if preflight_counts.get("fail", 0):
-            add("readiness", "safety_preflight", "fail", f"Preflight has {preflight_counts.get('fail', 0)} fail and {preflight_counts.get('warn', 0)} warn check(s).", "Run /preflight and resolve fail-level ROE/runtime issues before closeout.")
+            add(
+                "readiness",
+                "safety_preflight",
+                "fail",
+                f"Preflight has {preflight_counts.get('fail', 0)} fail and {preflight_counts.get('warn', 0)} warn check(s).",
+                "Run /preflight and resolve fail-level ROE/runtime issues before closeout.",
+                related=preflight_review_related,
+            )
         elif preflight_counts.get("warn", 0):
-            add("readiness", "safety_preflight", "warn", f"Preflight has {preflight_counts.get('warn', 0)} warning(s).", "Review /preflight warnings and document accepted limitations before closeout.")
+            add(
+                "readiness",
+                "safety_preflight",
+                "warn",
+                f"Preflight has {preflight_counts.get('warn', 0)} warning(s).",
+                "Review /preflight warnings and document accepted limitations before closeout.",
+                related=preflight_review_related,
+            )
         else:
-            add("readiness", "safety_preflight", "pass", "Safety preflight is ready with no fail/warn checks.")
+            add("readiness", "safety_preflight", "pass", "Safety preflight is ready with no fail/warn checks.", related=preflight_artifact_related)
 
+        approval_related = [
+            _closeout_entity_link("approval", approval.get("id"), status=approval.get("status") or "pending", title=approval.get("tool_name"))
+            for approval in pending_approvals
+        ]
         if pending_approvals:
-            add("operations", "pending_approvals", "fail", f"{len(pending_approvals)} approval(s) remain pending.", "Approve or deny queued state-changing/confirm-level actions before closeout so no ambiguous execution requests remain.")
+            add(
+                "operations",
+                "pending_approvals",
+                "fail",
+                f"{len(pending_approvals)} approval(s) remain pending.",
+                "Approve or deny queued state-changing/confirm-level actions before closeout so no ambiguous execution requests remain.",
+                related=approval_related,
+            )
         else:
             add("operations", "pending_approvals", "pass", "No pending approvals remain.")
 
         active_processes = [proc for proc in processes if str(proc.get("status") or "") in {"starting", "running"}]
         failed_processes = [proc for proc in processes if str(proc.get("status") or "") == "failed"]
+        active_process_related = [
+            _closeout_entity_link("process", proc.get("id"), status=proc.get("status"), title=proc.get("purpose"), target=proc.get("target"))
+            for proc in active_processes
+        ]
+        failed_process_related = [
+            _closeout_entity_link("process", proc.get("id"), status=proc.get("status"), title=proc.get("purpose"), target=proc.get("target"), exit_code=proc.get("exit_code"))
+            for proc in failed_processes
+        ]
         if active_processes:
-            add("operations", "background_processes", "fail", f"{len(active_processes)} tracked background process(es) are still active.", "Wait for, poll, or stop active processes before handing off or exporting closeout evidence.")
-        elif failed_processes:
-            add("operations", "background_processes", "warn", f"{len(failed_processes)} tracked background process(es) failed.", "Review failed process logs and decide whether the failure affects evidence completeness.")
+            add(
+                "operations",
+                "background_processes",
+                "fail",
+                f"{len(active_processes)} tracked background process(es) are still active.",
+                "Wait for, poll, or stop active processes before handing off or exporting closeout evidence.",
+                related=active_process_related,
+            )
         else:
             add("operations", "background_processes", "pass", f"No active background processes; {len(processes)} process record(s) total.")
+        if failed_processes:
+            add(
+                "operations",
+                "failed_processes",
+                "warn",
+                f"{len(failed_processes)} tracked background process(es) failed.",
+                "Review failed process logs and decide whether the failure affects evidence completeness.",
+                related=failed_process_related,
+            )
 
         open_tasks = [task for task in tasks if str(task.get("status") or "") not in {"completed", "cancelled"}]
+        open_task_related = [
+            _closeout_entity_link("task", task.get("id"), status=task.get("status"), title=task.get("content"))
+            for task in open_tasks
+        ]
         if open_tasks:
-            add("workflow", "open_tasks", "warn", f"{len(open_tasks)} task(s) are still pending or in progress.", "Complete, cancel, or explicitly carry forward open task-board items in the operator briefing.")
+            add(
+                "workflow",
+                "open_tasks",
+                "warn",
+                f"{len(open_tasks)} task(s) are still pending or in progress.",
+                "Complete, cancel, or explicitly carry forward open task-board items in the operator briefing.",
+                related=open_task_related,
+            )
         else:
             add("workflow", "open_tasks", "pass", "No open task-board items remain.")
 
@@ -1515,41 +1583,101 @@ class OffSecToolRegistry:
                 "advisory_gaps": len(review.get("advisory_gaps") or []),
                 "score": score,
             }))
+        all_finding_related = [
+            _closeout_entity_link("finding", item.get("id"), status=item.get("status"), title=item.get("title"), readiness=item.get("readiness"))
+            for item in finding_reviews
+        ]
         confirmed_statuses = {"confirmed", "resolved", "accepted-risk"}
         candidate_statuses = {"draft", "needs-evidence"}
         confirmed_with_blocking_gaps = [item for item in finding_reviews if item.get("status") in confirmed_statuses and item.get("readiness") == "needs_evidence"]
         candidate_findings = [item for item in finding_reviews if item.get("status") in candidate_statuses]
         if not findings:
-            add("findings", "finding_inventory", "warn", "No findings are recorded in the local DB.", "If this was a no-finding engagement, document that explicitly in the operator briefing/report notes.")
+            add(
+                "findings",
+                "finding_inventory",
+                "warn",
+                "No findings are recorded in the local DB.",
+                "If this was a no-finding engagement, document that explicitly in the operator briefing/report notes.",
+                related=_closeout_artifact_links(closeout_artifacts.get("finding_exports"), ref_prefix="artifact", expected_dir="agent/findings/"),
+            )
         elif confirmed_with_blocking_gaps:
-            add("findings", "finding_readiness", "fail", f"{len(confirmed_with_blocking_gaps)} confirmed/resolved/accepted-risk finding(s) still have blocking evidence gaps.", "Run /finding-review on each listed finding and close blocking gaps before client-ready export.")
+            related = [
+                _closeout_entity_link("finding", item.get("id"), status=item.get("status"), title=item.get("title"), readiness=item.get("readiness"))
+                for item in confirmed_with_blocking_gaps
+            ]
+            add(
+                "findings",
+                "finding_readiness",
+                "fail",
+                f"{len(confirmed_with_blocking_gaps)} confirmed/resolved/accepted-risk finding(s) still have blocking evidence gaps.",
+                "Run /finding-review on each listed finding and close blocking gaps before client-ready export.",
+                related=related,
+            )
         elif candidate_findings:
-            add("findings", "candidate_findings", "warn", f"{len(candidate_findings)} draft/needs-evidence finding(s) remain candidate records.", "Confirm, resolve, accept risk, or mark false-positive before closeout, or document them as internal-only notes.")
+            related = [
+                _closeout_entity_link("finding", item.get("id"), status=item.get("status"), title=item.get("title"), readiness=item.get("readiness"))
+                for item in candidate_findings
+            ]
+            add(
+                "findings",
+                "candidate_findings",
+                "warn",
+                f"{len(candidate_findings)} draft/needs-evidence finding(s) remain candidate records.",
+                "Confirm, resolve, accept risk, or mark false-positive before closeout, or document them as internal-only notes.",
+                related=related,
+            )
         else:
-            add("findings", "finding_readiness", "pass", f"{len(findings)} finding record(s) are in closeout-compatible lifecycle states.")
+            add("findings", "finding_readiness", "pass", f"{len(findings)} finding record(s) are in closeout-compatible lifecycle states.", related=all_finding_related)
 
         if int(artifact_inventory.get("files_seen", 0)) <= 0:
-            add("artifacts", "evidence_files", "warn", "No local evidence files were found under the engagement evidence root.", "Import or generate evidence artifacts before closeout, or document why the engagement has no local evidence files.")
+            add(
+                "artifacts",
+                "evidence_files",
+                "warn",
+                "No local evidence files were found under the engagement evidence root.",
+                "Import or generate evidence artifacts before closeout, or document why the engagement has no local evidence files.",
+                related=[_closeout_artifact_link(".", status="missing", title="engagement evidence root")],
+            )
         else:
             add("artifacts", "evidence_files", "pass", f"{artifact_inventory.get('files_seen')} local evidence file(s) recorded across {len(artifact_inventory.get('by_category', {}))} category/categories.")
         if int(artifact_inventory.get("skipped", 0)) > 0:
-            add("artifacts", "skipped_artifacts", "warn", f"{artifact_inventory.get('skipped')} artifact path(s) were skipped during safe metadata inventory.", "Review skipped symlinks/path errors so closeout packaging cannot miss expected evidence.")
+            add(
+                "artifacts",
+                "skipped_artifacts",
+                "warn",
+                f"{artifact_inventory.get('skipped')} artifact path(s) were skipped during safe metadata inventory.",
+                "Review skipped symlinks/path errors so closeout packaging cannot miss expected evidence.",
+                related=[_closeout_artifact_link("agent/", status="review", title="safe inventory skipped path(s)")],
+            )
 
+        artifact_expected_dirs = {"manifests": "agent/manifests/", "timelines": "agent/timelines/", "exports": "agent/exports/"}
         for key, label, recommendation in (
             ("manifests", "evidence manifest", "Run /manifest to write a SHA-256 inventory for chain-of-custody review."),
             ("timelines", "evidence timeline", "Run /timeline to write a redacted action/evidence chronology."),
             ("exports", "redacted export pack", "Run /export-pack after final QA to produce a redacted handoff ZIP."),
         ):
             count = int(closeout_artifacts.get(key, {}).get("count", 0)) if isinstance(closeout_artifacts.get(key), dict) else 0
+            related = _closeout_artifact_links(closeout_artifacts.get(key), ref_prefix="artifact", expected_dir=artifact_expected_dirs.get(key, "agent/"))
             if count:
-                add("artifacts", key, "pass", f"Found {count} {label} artifact(s).")
+                add("artifacts", key, "pass", f"Found {count} {label} artifact(s).", related=related)
             else:
-                add("artifacts", key, "warn", f"No {label} artifact found yet.", recommendation)
+                add("artifacts", key, "warn", f"No {label} artifact found yet.", recommendation, related=related)
 
+        tool_run_related = [
+            _closeout_entity_link("tool-run", run.get("id"), status=run.get("status"), title=run.get("tool_name"), target=run.get("target"))
+            for run in tool_runs
+        ]
         if not tool_runs and findings:
-            add("evidence", "structured_tool_runs", "warn", "Findings exist but no structured tool-run records are linked in this session.", "Prefer linking scanner/parser evidence or explicit artifact paths so findings are replayable.")
+            add(
+                "evidence",
+                "structured_tool_runs",
+                "warn",
+                "Findings exist but no structured tool-run records are linked in this session.",
+                "Prefer linking scanner/parser evidence or explicit artifact paths so findings are replayable.",
+                related=all_finding_related,
+            )
         else:
-            add("evidence", "structured_tool_runs", "pass", f"{len(tool_runs)} structured tool-run record(s) available.")
+            add("evidence", "structured_tool_runs", "pass", f"{len(tool_runs)} structured tool-run record(s) available.", related=tool_run_related)
 
         add("limitations", "live_plaintext_db", "info", "Local SQLite/WAL/SHM remain plaintext while the runtime is live; sealed exports/backups are portable protection, not transparent live DB encryption.")
         counts = _preflight_counts(checks)
@@ -1565,6 +1693,7 @@ class OffSecToolRegistry:
             "tool_runs": len(tool_runs),
             "artifact_inventory": artifact_inventory,
             "closeout_artifacts": closeout_artifacts,
+            "drilldown_links": sum(len(check.get("related") or []) for check in checks if check.get("status") in {"fail", "warn"}),
         })
         stamp = utc_now().replace(":", "").replace("+00:00", "Z")
         out = _scoped_artifact_output_path(
@@ -2286,17 +2415,132 @@ def _finding_review_markdown(finding: dict[str, Any], review: dict[str, Any]) ->
     return redact_secrets("\n".join(lines) + "\n") or ""
 
 
-def _closeout_check(category: str, name: str, status: str, detail: str, recommendation: str = "") -> dict[str, Any]:
+def _closeout_check(
+    category: str,
+    name: str,
+    status: str,
+    detail: str,
+    recommendation: str = "",
+    *,
+    related: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     normalized = status.strip().lower().replace("warning", "warn")
     if normalized not in {"pass", "warn", "fail", "info"}:
         normalized = "info"
-    return _redacted_mapping({
+    payload: dict[str, Any] = {
         "category": category,
         "name": name,
         "status": normalized,
         "detail": detail,
         "recommendation": recommendation,
-    })
+    }
+    links = _closeout_related(related or [])
+    if links:
+        payload["related"] = links
+    return _redacted_mapping(payload)
+
+
+def _closeout_entity_link(
+    kind: str,
+    ident: Any,
+    *,
+    status: Any = "",
+    title: Any = "",
+    target: Any = "",
+    readiness: Any = "",
+    exit_code: Any = None,
+    note: Any = "",
+) -> dict[str, Any]:
+    raw_id = str(ident or "").strip()
+    if not raw_id:
+        return {}
+    payload: dict[str, Any] = {"ref": f"{kind}:{raw_id}"}
+    for key, value in {
+        "status": status,
+        "title": title,
+        "target": target,
+        "readiness": readiness,
+        "exit_code": exit_code,
+        "note": note,
+    }.items():
+        if value is None or value == "":
+            continue
+        payload[key] = value
+    return _redacted_mapping(payload)
+
+
+def _closeout_artifact_link(path_value: Any, *, ref_prefix: str = "artifact", status: Any = "", title: Any = "") -> dict[str, Any]:
+    clean = str(path_value or "").strip().replace("\\", "/")
+    if not clean:
+        return {}
+    candidate = Path(clean)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        clean = candidate.name or "artifact"
+    clean = clean.lstrip("/") or "."
+    payload: dict[str, Any] = {"ref": f"{ref_prefix}:{clean}", "path": clean}
+    if status:
+        payload["status"] = status
+    if title:
+        payload["title"] = title
+    return _redacted_mapping(payload)
+
+
+def _closeout_artifact_links(
+    presence: Any,
+    *,
+    ref_prefix: str = "artifact",
+    expected_dir: str = "",
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    paths: list[Any] = []
+    if isinstance(presence, dict) and isinstance(presence.get("paths"), list):
+        paths = presence.get("paths", [])
+    links = [_closeout_artifact_link(path, ref_prefix=ref_prefix, status="present") for path in paths[:limit]]
+    links = [link for link in links if link]
+    if links:
+        return links
+    if expected_dir:
+        link = _closeout_artifact_link(expected_dir, ref_prefix=ref_prefix, status="missing", title="expected artifact directory")
+        return [link] if link else []
+    return []
+
+
+def _closeout_related(items: list[dict[str, Any]] | None, *, limit: int = 12) -> list[dict[str, Any]]:
+    allowed = {"ref", "status", "title", "tool", "target", "readiness", "path", "exit_code", "note"}
+    related: list[dict[str, Any]] = []
+    for item in items or []:
+        if not item:
+            continue
+        if isinstance(item, str):
+            payload: dict[str, Any] = {"ref": item}
+        elif isinstance(item, dict):
+            payload = {key: value for key, value in item.items() if key in allowed and value not in (None, "")}
+        else:
+            continue
+        ref = str(payload.get("ref") or "").strip()
+        if not ref:
+            continue
+        payload["ref"] = ref[:240]
+        for key in ("title", "target", "path", "note"):
+            if key in payload:
+                payload[key] = str(payload[key])[:240]
+        related.append(_redacted_mapping(payload))
+        if len(related) >= limit:
+            break
+    return related
+
+
+def _closeout_related_refs(items: Any) -> str:
+    if not isinstance(items, list):
+        return ""
+    labels: list[str] = []
+    for item in _closeout_related(items):
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        details = [str(item.get(key)) for key in ("status", "readiness", "title", "target") if item.get(key) not in (None, "")]
+        labels.append(f"{ref} ({', '.join(details[:3])})" if details else ref)
+    return "; ".join(labels[:12])
 
 
 def _closeout_artifact_inventory(evidence_root: Path) -> dict[str, Any]:
@@ -2332,6 +2576,7 @@ def _closeout_artifact_inventory(evidence_root: Path) -> dict[str, Any]:
 def _closeout_artifact_presence(evidence_root: Path) -> dict[str, Any]:
     root = evidence_root.resolve(strict=False)
     specs = {
+        "preflight": ("preflight", ("*.md",)),
         "manifests": ("manifests", ("*.json",)),
         "timelines": ("timelines", ("*.md",)),
         "exports": ("exports", ("*.zip",)),
@@ -2388,15 +2633,23 @@ def _closeout_review_markdown(
     ]
     for key in ("fail", "warn", "pass", "info"):
         lines.append(f"| {key} | {int(counts.get(key, 0))} |")
-    lines += ["", "## Closeout checks", "", "| Category | Check | Status | Detail | Recommendation |", "|---|---|---|---|---|"]
+    lines += ["", "## Closeout checks", "", "| Category | Check | Status | Detail | Recommendation | Related |", "|---|---|---|---|---|---|"]
     for check in checks:
-        lines.append("| " + " | ".join(_md_cell(value) for value in [check.get("category"), check.get("name"), check.get("status"), check.get("detail"), check.get("recommendation")]) + " |")
+        lines.append("| " + " | ".join(_md_cell(value) for value in [check.get("category"), check.get("name"), check.get("status"), check.get("detail"), check.get("recommendation"), _closeout_related_refs(check.get("related"))]) + " |")
     lines += ["", "## Finding readiness", "", "| ID | Severity | Status | Readiness | Blocking gaps | Advisory gaps | Title |", "|---|---|---|---|---|---|---|"]
     if finding_reviews:
         for item in finding_reviews:
             lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("id"), item.get("severity"), item.get("status"), item.get("readiness"), item.get("blocking_gaps"), item.get("advisory_gaps"), item.get("title")]) + " |")
     else:
         lines.append("| | | | | | | No findings recorded. |")
+    drilldown_checks = [check for check in checks if check.get("status") in {"fail", "warn"} and check.get("related")]
+    lines += ["", "## Drill-down", ""]
+    if drilldown_checks:
+        for check in drilldown_checks[:12]:
+            refs = _closeout_related_refs(check.get("related"))
+            lines.append(f"- `{_md_cell(check.get('name'))}` ({_md_cell(check.get('status'))}): {redact_secrets(refs)}")
+    else:
+        lines.append("- No local drill-down links for fail/warn checks.")
     recommendations = [check.get("recommendation") for check in checks if check.get("status") in {"fail", "warn"} and check.get("recommendation")]
     lines += ["", "## Next actions", ""]
     if recommendations:

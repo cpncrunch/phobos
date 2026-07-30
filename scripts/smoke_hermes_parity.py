@@ -450,6 +450,19 @@ def main(argv: list[str] | None = None) -> int:
             and "supersecret" not in json.dumps(closeout.to_dict()) + closeout_text + cli_closeout_stdout
             and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(closeout.to_dict()) + closeout_text
         )
+        closeout_related_refs = {
+            str(item.get("ref") or "")
+            for check in closeout.data.get("checks", [])
+            for item in (check.get("related") or [])
+            if isinstance(item, dict)
+        }
+        checks["closeout_drilldown_links_ok"] = (
+            any(ref.startswith("approval:") for ref in closeout_related_refs)
+            and "artifact:agent/exports/" in closeout_related_refs
+            and "## Drill-down" in closeout_text
+            and closeout.data.get("summary", {}).get("drilldown_links", 0) >= 2
+            and "supersecret" not in json.dumps(closeout.to_dict()) + closeout_text
+        )
 
         sealed_missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_MISSING"})
         sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_SEAL", "out": "smoke.sealed.json"})

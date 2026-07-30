@@ -280,9 +280,9 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report. These review tools perform no target activity.
+The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report with bounded local drill-down references such as `approval:<id>`, `task:<id>`, `finding:<id>`, `process:<id>`, and `artifact:<relative-path>`. These review tools perform no target activity.
 
-Current verification: 41 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 42 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews with local drill-down links, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -314,7 +314,7 @@ This turns the harness into a standalone agent-style application with:
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
-- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, closeout readiness reviews, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
+- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
 - local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
@@ -434,7 +434,8 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json closeout \
   --engagement engagement.json \
   --out closeout-review.md
 # Closeout reviews are read-only and report ready/review/blocked based only on
-# local ROE, approvals, tasks, findings, process state, and evidence metadata.
+# local ROE, approvals, tasks, findings, process state, and evidence metadata;
+# fail/warn rows include redacted local drill-down refs instead of raw commands.
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
@@ -551,7 +552,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 41 tests
+Ran 42 tests
 OK
 ```
 
@@ -594,6 +595,7 @@ media_artifacts_ok=True
 evidence_timeline_ok=True
 evidence_manifest_ok=True
 closeout_review_ok=True
+closeout_drilldown_links_ok=True
 sealed_snapshot_roundtrip_ok=True
 db_seal_at_rest_roundtrip_ok=True
 redacted_exports_not_db_encryption_ok=True
