@@ -158,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
                 "lcm_compact",
                 "wait_process",
                 "add_task",
+                "get_task",
+                "get_process",
                 "get_job",
                 "update_job",
                 "disable_job",
@@ -485,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
 
         started = runtime.registry.run(
             "start_process",
-            {"target": "app.example.test", "type": "host", "purpose": "background parity smoke", "command": "printf bg-parity-ok", "execute": True},
+            {"target": "app.example.test", "type": "host", "purpose": "background parity smoke token=supersecret", "command": "printf 'bg-parity-ok token=supersecret'", "execute": True},
         )
         write("process-start.json", json.dumps(started.to_dict(), indent=2))
         process_id = int(started.data["process_id"])
@@ -497,11 +499,17 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(0.05)
         log = runtime.registry.run("process_log", {"id": process_id})
         waited = runtime.registry.run("wait_process", {"id": process_id, "timeout": 5})
+        process_detail = runtime.registry.run("get_process", {"id": process_id})
+        raw_process_row = runtime.store.conn.execute("SELECT command, purpose, decision_json FROM processes WHERE id=?", (process_id,)).fetchone()
+        raw_process_text = "".join(str(raw_process_row[key] or "") for key in ["command", "purpose", "decision_json"]) if raw_process_row else ""
         write("process-poll.json", json.dumps(polled.to_dict(), indent=2))
         write("process-wait.json", json.dumps(waited.to_dict(), indent=2))
         write("process-log.json", json.dumps(log.to_dict(), indent=2))
+        write("process-detail.json", json.dumps(process_detail.to_dict(), indent=2))
         checks["background_process_completed"] = polled.status == "completed" and waited.status == "completed" and "bg-parity-ok" in log.data.get("stdout", "")
         checks["wait_process_ok"] = waited.status == "completed" and "bg-parity-ok" in waited.data.get("stdout", "")
+        process_storage_blob = json.dumps({"start": started.to_dict(), "poll": polled.to_dict(), "wait": waited.to_dict(), "log": log.to_dict(), "detail": process_detail.to_dict(), "raw": raw_process_text})
+        checks["process_detail_storage_redaction_ok"] = process_detail.status == "ok" and "token=<REDACTED>" in process_storage_blob and "supersecret" not in process_storage_blob
 
         process_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-process-smoke"))
         try:
@@ -512,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                 "poll": runtime.registry.run("poll_process", {"id": other_process_id}).to_dict(),
                 "log": runtime.registry.run("process_log", {"id": other_process_id}).to_dict(),
                 "wait": runtime.registry.run("wait_process", {"id": other_process_id, "timeout": 0}).to_dict(),
+                "detail": runtime.registry.run("get_process", {"id": other_process_id}).to_dict(),
                 "kill": runtime.registry.run("kill_process", {"id": other_process_id}).to_dict(),
                 "owner_poll_after_cross_kill": process_scope_runtime.registry.run("poll_process", {"id": other_process_id}).to_dict(),
             }
@@ -522,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
         write("session-bound-process.json", json.dumps(cross_process_results, indent=2))
         process_scope_ok = (
             other_process_id > 0
-            and all(cross_process_results[name]["status"] == "error" for name in ["poll", "log", "wait", "kill"])
+            and all(cross_process_results[name]["status"] == "error" for name in ["poll", "log", "wait", "detail", "kill"])
             and "not found in this session" in json.dumps(cross_process_results)
             and cross_process_results["owner_poll_after_cross_kill"]["status"] != "error"
         )
@@ -579,21 +588,27 @@ def main(argv: list[str] | None = None) -> int:
 
         add_task = handle("task-add", '/task-add content="Review parity smoke token=supersecret" status=pending')
         update_task = handle("task-update", "/task-update id=1 status=completed")
+        task_detail = handle("task-detail", "/task-detail id=1")
         task_list = handle("tasks", "/tasks status=all")
         auto_task = handle("auto-task", '/auto apply=true prompt="task: verify handoff import"')
-        checks["task_board_roundtrip"] = "Task 1 added" in add_task and '"status": "completed"' in update_task and "Review parity smoke" in task_list and '"tool": "add_task"' in auto_task
+        raw_task_row = runtime.store.conn.execute("SELECT content, metadata_json FROM tasks WHERE id=1").fetchone()
+        raw_task_text = "".join(str(raw_task_row[key] or "") for key in ["content", "metadata_json"]) if raw_task_row else ""
+        checks["task_board_roundtrip"] = "Task 1 added" in add_task and '"status": "completed"' in update_task and "Task 1 returned" in task_detail and "Review parity smoke" in task_list and '"tool": "add_task"' in auto_task
         task_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-task-smoke"))
         try:
             other_task = task_scope_runtime.registry.run("add_task", {"content": "Other session task scope sentinel", "status": "pending"})
             other_task_id = int(other_task.data.get("task", {}).get("id", 0))
             cross_task_update = runtime.registry.run("update_task", {"id": other_task_id, "status": "completed"})
+            cross_task_detail = runtime.registry.run("get_task", {"id": other_task_id})
             unchanged_task = task_scope_runtime.store.get_task(other_task_id, session_id=task_scope_runtime.session_id) or {}
-            cross_task_results = {"other_task": other_task.to_dict(), "cross_update": cross_task_update.to_dict(), "owner_task_after_cross_update": unchanged_task}
+            cross_task_results = {"other_task": other_task.to_dict(), "cross_update": cross_task_update.to_dict(), "cross_detail": cross_task_detail.to_dict(), "owner_task_after_cross_update": unchanged_task}
         finally:
             task_scope_runtime.close()
         write("session-bound-task.json", json.dumps(cross_task_results, indent=2))
-        task_scope_ok = other_task_id > 0 and cross_task_update.status == "error" and "not found in this session" in cross_task_update.message and unchanged_task.get("status") == "pending"
+        task_scope_ok = other_task_id > 0 and cross_task_update.status == "error" and cross_task_detail.status == "error" and "not found in this session" in cross_task_update.message + cross_task_detail.message and unchanged_task.get("status") == "pending"
         checks["session_bound_task_process_ok"] = bool(process_scope_ok and task_scope_ok)
+        task_storage_blob = json.dumps({"add": add_task, "update": update_task, "detail": task_detail, "list": task_list, "raw": raw_task_text})
+        checks["task_detail_storage_redaction_ok"] = "token=<REDACTED>" in task_storage_blob and "supersecret" not in task_storage_blob
 
         compact = handle("compact", "/compact limit=80")
         context = handle("context", "/context query=smoke-client limit=8")
@@ -1050,7 +1065,9 @@ def main(argv: list[str] | None = None) -> int:
         delegation_route = f"/delegation?id={delegation_id}"
         media_detail_route = f"/media-detail?id={media_id}"
         job_route = f"/job?id={job_id}"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        task_route = "/task?id=1"
+        process_route = f"/process?id={process_id}"
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1121,12 +1138,14 @@ def main(argv: list[str] | None = None) -> int:
         approval_route = gateway_gets.get("/approval?id=1") or {}
         finding_route_payload = gateway_gets.get(finding_route) or {}
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
+        task_route_payload = gateway_gets.get(task_route) or {}
         job_route_payload = gateway_gets.get(job_route) or {}
+        process_route_payload = gateway_gets.get(process_route) or {}
         delegation_route_payload = gateway_gets.get(delegation_route) or {}
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(job_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

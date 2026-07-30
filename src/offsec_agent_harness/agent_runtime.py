@@ -266,6 +266,9 @@ class OffSecAgentRuntime:
             "process-wait": "wait_process",
             "log": "process_log",
             "process-log": "process_log",
+            "process": "get_process",
+            "process-get": "get_process",
+            "process-detail": "get_process",
             "kill": "kill_process",
             "process-kill": "kill_process",
             "processes": "list_processes",
@@ -377,6 +380,9 @@ class OffSecAgentRuntime:
             "import-session": "import_session",
             "tasks": "list_tasks",
             "task-list": "list_tasks",
+            "task": "get_task",
+            "task-get": "get_task",
+            "task-detail": "get_task",
             "task-add": "add_task",
             "task-update": "update_task",
         }
@@ -881,6 +887,7 @@ HELP_TEXT = """Phobos Agent commands:
 /run target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /start target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /processes
+/process-detail id=<process-id>
 /poll id=<process-id>
 /wait id=<process-id> timeout=30
 /log id=<process-id> limit=4000
@@ -930,6 +937,7 @@ HELP_TEXT = """Phobos Agent commands:
 /manifest-verify path=<manifest.json> out=<optional.json>
 /closeout out=<optional.md>
 /tasks status=all
+/task-detail id=<task-id>
 /task-add content=<task> status=pending
 /task-update id=<task-id> status=completed content=<optional>
 /handoff out=<optional.json>

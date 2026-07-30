@@ -327,8 +327,18 @@ class AgentRuntimeTests(unittest.TestCase):
             runtime, _ = self.make_runtime(tmp)
             other_runtime = None
             try:
-                own_task = runtime.registry.run("add_task", {"content": "own task"})
+                own_task = runtime.registry.run("add_task", {"content": "own task token=supersecret"})
                 self.assertEqual(own_task.status, "ok", own_task.to_dict())
+                self.assertIn("token=<REDACTED>", json.dumps(own_task.to_dict()))
+                self.assertNotIn("supersecret", json.dumps(own_task.to_dict()))
+                own_task_id = int(own_task.data["task"]["id"])
+                own_task_detail = runtime.registry.run("get_task", {"id": own_task_id})
+                self.assertEqual(own_task_detail.status, "ok", own_task_detail.to_dict())
+                self.assertIn("token=<REDACTED>", json.dumps(own_task_detail.to_dict()))
+                raw_task = runtime.store.conn.execute("SELECT content, metadata_json FROM tasks WHERE id=?", (own_task_id,)).fetchone()
+                raw_task_text = (raw_task["content"] or "") + (raw_task["metadata_json"] or "")
+                self.assertIn("token=<REDACTED>", raw_task_text)
+                self.assertNotIn("supersecret", raw_task_text)
                 other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(
                     engagement_path=runtime.config.engagement_path,
                     db_path=runtime.config.db_path,
@@ -338,8 +348,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(other_task.status, "ok", other_task.to_dict())
                 other_task_id = int(other_task.data["task"]["id"])
                 cross_task = runtime.registry.run("update_task", {"id": other_task_id, "status": "completed"})
+                cross_task_detail = runtime.registry.run("get_task", {"id": other_task_id})
                 self.assertEqual(cross_task.status, "error", cross_task.to_dict())
+                self.assertEqual(cross_task_detail.status, "error", cross_task_detail.to_dict())
                 self.assertIn("not found in this session", cross_task.message)
+                self.assertIn("not found in this session", cross_task_detail.message)
                 unchanged_task = other_runtime.store.get_task(other_task_id, session_id=other_runtime.session_id)
                 self.assertIsNotNone(unchanged_task)
                 assert unchanged_task is not None
@@ -348,11 +361,16 @@ class AgentRuntimeTests(unittest.TestCase):
                 own_process = runtime.registry.run("start_process", {
                     "target": "app.example.test",
                     "type": "host",
-                    "purpose": "own process scope proof",
-                    "command": "printf own-process-ok",
+                    "purpose": "own process scope proof token=supersecret",
+                    "command": "printf 'own-process-ok token=supersecret'",
                     "execute": True,
                 })
                 self.assertEqual(own_process.status, "started", own_process.to_dict())
+                own_process_id = int(own_process.data["process_id"])
+                raw_process = runtime.store.conn.execute("SELECT command, purpose, decision_json FROM processes WHERE id=?", (own_process_id,)).fetchone()
+                raw_process_text = (raw_process["command"] or "") + (raw_process["purpose"] or "") + (raw_process["decision_json"] or "")
+                self.assertIn("token=<REDACTED>", raw_process_text)
+                self.assertNotIn("supersecret", raw_process_text)
                 other_process = other_runtime.registry.run("start_process", {
                     "target": "app.example.test",
                     "type": "host",
@@ -366,6 +384,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("poll_process", {"id": other_process_id}),
                     ("process_log", {"id": other_process_id}),
                     ("wait_process", {"id": other_process_id, "timeout": 0}),
+                    ("get_process", {"id": other_process_id}),
                     ("kill_process", {"id": other_process_id}),
                 ):
                     cross_process = runtime.registry.run(tool_name, args)
@@ -374,9 +393,15 @@ class AgentRuntimeTests(unittest.TestCase):
                 other_after_cross_kill = other_runtime.registry.run("poll_process", {"id": other_process_id})
                 self.assertIn(other_after_cross_kill.status, {"running", "started", "completed", "unknown"}, other_after_cross_kill.to_dict())
 
-                own_wait = runtime.registry.run("wait_process", {"id": own_process.data["process_id"], "timeout": 5})
+                own_wait = runtime.registry.run("wait_process", {"id": own_process_id, "timeout": 5})
                 self.assertEqual(own_wait.status, "completed", own_wait.to_dict())
                 self.assertIn("own-process-ok", own_wait.data["stdout"])
+                self.assertIn("token=<REDACTED>", json.dumps(own_wait.to_dict()))
+                self.assertNotIn("supersecret", json.dumps(own_wait.to_dict()))
+                own_process_detail = runtime.registry.run("get_process", {"id": own_process_id})
+                self.assertEqual(own_process_detail.status, "ok", own_process_detail.to_dict())
+                self.assertIn("token=<REDACTED>", json.dumps(own_process_detail.to_dict()))
+                self.assertNotIn("supersecret", json.dumps(own_process_detail.to_dict()))
             finally:
                 if other_runtime is not None:
                     for process in other_runtime.store.list_processes(other_runtime.session_id, limit=10):

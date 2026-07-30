@@ -174,7 +174,20 @@ class AgentGateway:
                         _write_json(self, runtime.registry.run("closeout_review", args).to_dict())
                         return
                     if path == "/tasks":
-                        _write_json(self, runtime.registry.run("list_tasks", {"status": "all"}).to_dict())
+                        query = parse_qs(parsed.query)
+                        args = {
+                            "status": (query.get("status") or ["all"])[0],
+                            "limit": int((query.get("limit") or [100])[0]),
+                        }
+                        _write_json(self, runtime.registry.run("list_tasks", args).to_dict())
+                        return
+                    if path in {"/task", "/task-detail"}:
+                        query = parse_qs(parsed.query)
+                        task_id = (query.get("id") or query.get("task_id") or [""])[0]
+                        if not task_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_task", {"id": task_id}).to_dict())
                         return
                     if path == "/findings":
                         query = parse_qs(parsed.query)
@@ -215,7 +228,17 @@ class AgentGateway:
                         _write_json(self, runtime.registry.run("get_job", {"id": job_id}).to_dict())
                         return
                     if path == "/processes":
-                        _write_json(self, runtime.registry.run("list_processes", {}).to_dict())
+                        query = parse_qs(parsed.query)
+                        args = {"limit": int((query.get("limit") or [20])[0])}
+                        _write_json(self, runtime.registry.run("list_processes", args).to_dict())
+                        return
+                    if path in {"/process", "/process-detail"}:
+                        query = parse_qs(parsed.query)
+                        process_id = (query.get("id") or query.get("process_id") or [""])[0]
+                        if not process_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_process", {"id": process_id}).to_dict())
                         return
                     if path == "/lcm":
                         _write_json(self, runtime.registry.run("context_describe", {}).to_dict())
@@ -349,6 +372,8 @@ def _gateway_paths() -> list[str]:
         "/closeout-review",
         "/lcm",
         "/tasks",
+        "/task",
+        "/task-detail",
         "/findings",
         "/finding-detail",
         "/tool-runs",
@@ -358,6 +383,8 @@ def _gateway_paths() -> list[str]:
         "/job",
         "/job-detail",
         "/processes",
+        "/process",
+        "/process-detail",
         "/approvals",
         "/approval",
         "/approval-detail",

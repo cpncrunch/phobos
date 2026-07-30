@@ -574,9 +574,11 @@ class AgentStore:
 
     def create_task(self, session_id: str, content: str, status: str = "pending", metadata: dict[str, Any] | None = None) -> int:
         now = utc_now()
+        safe_content = redact_secrets(content) or ""
+        safe_metadata = _redact_json_value(metadata or {})
         cur = self.conn.execute(
             "INSERT INTO tasks(session_id, content, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, content, status, json.dumps(metadata or {}, sort_keys=True), now, now),
+            (session_id, safe_content, status, json.dumps(safe_metadata, sort_keys=True), now, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -594,13 +596,13 @@ class AgentStore:
         values: list[Any] = []
         if content is not None:
             fields.append("content=?")
-            values.append(content)
+            values.append(redact_secrets(content) or "")
         if status is not None:
             fields.append("status=?")
             values.append(status)
         if metadata is not None:
             fields.append("metadata_json=?")
-            values.append(json.dumps(metadata, sort_keys=True))
+            values.append(json.dumps(_redact_json_value(metadata), sort_keys=True))
         if not fields:
             return self.get_task(task_id, session_id=session_id)
         fields.append("updated_at=?")
@@ -1025,12 +1027,25 @@ class AgentStore:
         decision: dict[str, Any],
         approval_id: int | None = None,
     ) -> int:
+        safe_decision = _redact_json_value(decision)
         cur = self.conn.execute(
             """
             INSERT INTO processes(session_id, command, target, action_type, purpose, pid, status, started_at, stdout_path, stderr_path, rc_path, decision_json, approval_id)
             VALUES (?, ?, ?, ?, ?, NULL, 'starting', ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, command, target, action_type, purpose, utc_now(), stdout_path, stderr_path, rc_path, json.dumps(decision, sort_keys=True), approval_id),
+            (
+                session_id,
+                redact_secrets(command) or "",
+                redact_secrets(target) or "",
+                redact_secrets(action_type) or "",
+                redact_secrets(purpose) or "",
+                utc_now(),
+                stdout_path,
+                stderr_path,
+                rc_path,
+                json.dumps(safe_decision, sort_keys=True),
+                approval_id,
+            ),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1062,7 +1077,11 @@ class AgentStore:
         if not row:
             return None
         data = dict(row)
-        data["decision"] = json.loads(data.pop("decision_json") or "{}")
+        data["command"] = redact_secrets(data.get("command") or "") or ""
+        data["target"] = redact_secrets(data.get("target") or "") or ""
+        data["action_type"] = redact_secrets(data.get("action_type") or "") or ""
+        data["purpose"] = redact_secrets(data.get("purpose") or "") or ""
+        data["decision"] = _redact_json_value(json.loads(data.pop("decision_json") or "{}"))
         return data
 
     def list_processes(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -1073,7 +1092,11 @@ class AgentStore:
         out = []
         for row in rows:
             data = dict(row)
-            data["decision"] = json.loads(data.pop("decision_json") or "{}")
+            data["command"] = redact_secrets(data.get("command") or "") or ""
+            data["target"] = redact_secrets(data.get("target") or "") or ""
+            data["action_type"] = redact_secrets(data.get("action_type") or "") or ""
+            data["purpose"] = redact_secrets(data.get("purpose") or "") or ""
+            data["decision"] = _redact_json_value(json.loads(data.pop("decision_json") or "{}"))
             out.append(data)
         return out
 
@@ -1188,9 +1211,9 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "session_id": row["session_id"],
-        "content": row["content"],
+        "content": redact_secrets(row["content"]) or "",
         "status": row["status"],
-        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "metadata": _redact_json_value(json.loads(row["metadata_json"] or "{}")),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

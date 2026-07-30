@@ -146,6 +146,7 @@ class OffSecToolRegistry:
         self.register_tool("process_log", self.process_log, _spec("process_log", "Read redacted stdout/stderr tails for a background process.", {"id": {"type": "integer"}, "limit": {"type": "integer"}}, ["id"]))
         self.register_tool("kill_process", self.kill_process, _spec("kill_process", "Terminate a tracked background process.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("list_processes", self.list_processes, _spec("list_processes", "List tracked background processes for the current session.", {"limit": {"type": "integer"}}))
+        self.register_tool("get_process", self.get_process, _spec("get_process", "Get one current-session tracked background process by id with redacted command metadata.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("approve", self.approve, _spec("approve", "Approve and execute/start a pending confirm-level action.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("deny", self.deny, _spec("deny", "Deny a pending approval.", {"id": {"type": "integer"}, "reason": _string("Reason for audit log.")}, ["id"]))
         self.register_tool("impact_plan", self.impact_plan, _spec("impact_plan", "Generate a safe impact-validation plan from an observed finding.", {"finding": _string("Observed weakness or finding draft.")}, ["finding"]))
@@ -218,6 +219,7 @@ class OffSecToolRegistry:
         self.register_tool("export_session", self.export_session, _spec("export_session", "Export a redacted portable session handoff JSON bundle.", {"out": _string("Optional JSON output path; relative paths are written under agent/session-exports."), "message_limit": {"type": "integer"}}))
         self.register_tool("import_session", self.import_session, _spec("import_session", "Import memories and context summary from a portable session handoff JSON bundle; no commands are executed.", {"path": _string("Path to exported session JSON."), "merge_memories": {"type": "boolean"}}, ["path"]))
         self.register_tool("list_tasks", self.list_tasks, _spec("list_tasks", "List the current session task board.", {"status": _string("Filter by pending/in_progress/completed/cancelled/all."), "limit": {"type": "integer"}}))
+        self.register_tool("get_task", self.get_task, _spec("get_task", "Get one current-session task board item by id with redacted content.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("add_task", self.add_task, _spec("add_task", "Add an item to the current session task board.", {"content": _string("Task description."), "status": _string("pending/in_progress/completed/cancelled; default pending.")}, ["content"]))
         self.register_tool("update_task", self.update_task, _spec("update_task", "Update a task board item by id.", {"id": {"type": "integer"}, "content": _string("Optional replacement content."), "status": _string("pending/in_progress/completed/cancelled.")}, ["id"]))
 
@@ -288,7 +290,7 @@ class OffSecToolRegistry:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
         if not process:
             return ToolResult("error", "Process not found in this session.")
-        return ToolResult(process["status"], f"Process {process['id']} is {process['status']}.", {"process": process})
+        return ToolResult(process["status"], f"Process {process['id']} is {process['status']}.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
 
     def wait_process(self, args: dict[str, Any]) -> ToolResult:
         process_id = int(args.get("id") or args.get("process_id"))
@@ -300,7 +302,7 @@ class OffSecToolRegistry:
         if not process:
             return ToolResult("error", "Process not found in this session.")
         log = self.process_log({"id": process_id, "limit": int(args.get("limit", 4000))})
-        return ToolResult(process["status"], f"Process {process_id} wait ended with status {process['status']}.", {"process": process, "stdout": log.data.get("stdout", ""), "stderr": log.data.get("stderr", "")})
+        return ToolResult(process["status"], f"Process {process_id} wait ended with status {process['status']}.", {"process": _redacted_mapping(process), "stdout": log.data.get("stdout", ""), "stderr": log.data.get("stderr", ""), "secret_values_redacted": True})
 
     def process_log(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
@@ -309,7 +311,7 @@ class OffSecToolRegistry:
         limit = int(args.get("limit", 4000))
         stdout = redact_secrets(_tail(Path(process["stdout_path"]), limit))
         stderr = redact_secrets(_tail(Path(process["stderr_path"]), limit))
-        return ToolResult("ok", f"Process {process['id']} log tails.", {"process": process, "stdout": stdout, "stderr": stderr})
+        return ToolResult("ok", f"Process {process['id']} log tails.", {"process": _redacted_mapping(process), "stdout": stdout, "stderr": stderr, "secret_values_redacted": True})
 
     def kill_process(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
@@ -317,18 +319,27 @@ class OffSecToolRegistry:
             return ToolResult("error", "Process not found in this session.")
         pid = process.get("pid")
         if process.get("status") not in {"running", "starting"} or not pid:
-            return ToolResult("ok", f"Process {process['id']} is already {process.get('status')}.", {"process": process})
+            return ToolResult("ok", f"Process {process['id']} is already {process.get('status')}.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
         try:
             os.killpg(int(pid), signal.SIGTERM)
         except ProcessLookupError:
             pass
         self.store.update_process(int(process["id"]), session_id=self.session_id, status="killed", ended_at=utc_now())
         process = self.store.get_process(int(process["id"]), session_id=self.session_id) or process
-        return ToolResult("killed", f"Process {process['id']} terminated.", {"process": process})
+        return ToolResult("killed", f"Process {process['id']} terminated.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
 
     def list_processes(self, args: dict[str, Any]) -> ToolResult:
         rows = [self._refresh_process(int(row["id"])) or row for row in self.store.list_processes(self.session_id, limit=int(args.get("limit", 20)))]
-        return ToolResult("ok", f"Found {len(rows)} processes.", {"processes": rows})
+        return ToolResult("ok", f"Found {len(rows)} processes.", {"processes": [_redacted_mapping(row) for row in rows], "secret_values_redacted": True})
+
+    def get_process(self, args: dict[str, Any]) -> ToolResult:
+        process_id = _first_int_arg(args, "id", "process_id")
+        if process_id is None:
+            return ToolResult("error", "process id is required.")
+        process = self._refresh_process(process_id)
+        if not process:
+            return ToolResult("error", f"Process {process_id} not found in this session.")
+        return ToolResult("ok", f"Process {process_id} returned.", {"process": _redacted_mapping(process), "secret_values_redacted": True})
 
     def approve(self, args: dict[str, Any]) -> ToolResult:
         approval_id = int(args.get("id") or args.get("approval_id"))
@@ -2351,7 +2362,16 @@ class OffSecToolRegistry:
 
     def list_tasks(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_tasks(self.session_id, status=str(args.get("status", "all")), limit=int(args.get("limit", 100)))
-        return ToolResult("ok", f"Found {len(rows)} task(s).", {"tasks": rows})
+        return ToolResult("ok", f"Found {len(rows)} task(s).", {"tasks": [_redacted_mapping(row) for row in rows], "secret_values_redacted": True})
+
+    def get_task(self, args: dict[str, Any]) -> ToolResult:
+        task_id = _first_int_arg(args, "id", "task_id")
+        if task_id is None:
+            return ToolResult("error", "task id is required.")
+        task = self.store.get_task(task_id, session_id=self.session_id)
+        if not task:
+            return ToolResult("error", f"Task {task_id} not found in this session.")
+        return ToolResult("ok", f"Task {task_id} returned.", {"task": _redacted_mapping(task), "secret_values_redacted": True})
 
     def add_task(self, args: dict[str, Any]) -> ToolResult:
         content = str(args.get("content") or args.get("task") or "").strip()
@@ -2359,7 +2379,7 @@ class OffSecToolRegistry:
             return ToolResult("error", "content is required.")
         status = _normalize_task_status(str(args.get("status", "pending")))
         task_id = self.store.create_task(self.session_id, content, status=status)
-        return ToolResult("ok", f"Task {task_id} added.", {"task": self.store.get_task(task_id, session_id=self.session_id)})
+        return ToolResult("ok", f"Task {task_id} added.", {"task": _redacted_mapping(self.store.get_task(task_id, session_id=self.session_id) or {}), "secret_values_redacted": True})
 
     def update_task(self, args: dict[str, Any]) -> ToolResult:
         task_id = int(args.get("id") or args.get("task_id"))
@@ -2369,7 +2389,7 @@ class OffSecToolRegistry:
         task = self.store.update_task(task_id, session_id=self.session_id, content=str(content) if content is not None else None, status=normalized)
         if not task:
             return ToolResult("error", f"Task {task_id} not found in this session.")
-        return ToolResult("ok", f"Task {task_id} updated.", {"task": task})
+        return ToolResult("ok", f"Task {task_id} updated.", {"task": _redacted_mapping(task), "secret_values_redacted": True})
 
     def _execute_allowed_command(self, request: ActionRequest, timeout: int, approval_id: int | None) -> ToolResult:
         if not request.command:
