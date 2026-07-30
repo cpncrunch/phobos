@@ -132,6 +132,17 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(tool_payload["result"]["message"], "limit must be an integer.")
                 self.assertNotIn("invalid literal", json.dumps(tool_payload))
                 self.assertNotIn("Traceback", json.dumps(tool_payload))
+                bool_tool_req = urllib.request.Request(
+                    f"http://{host}:{port}/tool",
+                    data=json.dumps({"name": "run_command", "args": {"execute": "maybe"}}, separators=(",", ":")).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(bool_tool_req, timeout=5) as response:
+                    bool_tool_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(bool_tool_payload["result"]["status"], "error")
+                self.assertEqual(bool_tool_payload["result"]["message"], "execute must be a boolean.")
+                self.assertNotIn("Traceback", json.dumps(bool_tool_payload))
                 oversized_req = urllib.request.Request(
                     f"http://{host}:{port}/message",
                     data=json.dumps({"message": "x" * 128}).encode("utf-8"),
@@ -166,7 +177,7 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_tool_registry_validates_schema_integer_args_before_dispatch_or_approval(self):
+    def test_tool_registry_validates_schema_scalar_args_before_dispatch_or_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)
             try:
@@ -175,6 +186,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("poll_process", {"id": "not-an-int"}, "id must be an integer."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
+                    ("run_command", {"execute": "maybe"}, "execute must be a boolean."),
+                    ("workspace_write", {"path": "notes/bad.md", "content": "bad", "append": "sometimes"}, "append must be a boolean."),
                 ]
                 for tool_name, tool_args, expected_message in invalid_cases:
                     with self.subTest(tool=tool_name):
@@ -187,21 +200,33 @@ class AgentRuntimeTests(unittest.TestCase):
 
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
+                dry_run = runtime.registry.run("run_command", {"target": "app.example.test", "type": "local", "purpose": "boolean dry-run regression", "command": "printf bool-validation-ok", "execute": "false"})
+                self.assertEqual(dry_run.status, "dry_run", dry_run.to_dict())
+                runtime.registry.run("workspace_write", {"path": "notes/boolean.md", "content": "old"})
+                overwrite = runtime.registry.run("workspace_write", {"path": "notes/boolean.md", "content": "new", "append": "false"})
+                append = runtime.registry.run("workspace_write", {"path": "notes/boolean.md", "content": "-tail", "append": "true"})
+                self.assertEqual(overwrite.status, "ok", overwrite.to_dict())
+                self.assertEqual(append.status, "ok", append.to_dict())
+                self.assertEqual((runtime.registry.workspace_root / "notes" / "boolean.md").read_text(encoding="utf-8"), "new-tail")
+                self.assertFalse((runtime.registry.workspace_root / "notes" / "bad.md").exists())
 
                 confirm_runtime = OffSecAgentRuntime(
                     AgentRuntimeConfig(
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings",),
+                        confirm_tools=("list_findings", "workspace_write"),
                     )
                 )
                 try:
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
+                    rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     self.assertEqual(rejected.status, "error")
                     self.assertEqual(rejected.message, "limit must be an integer.")
+                    self.assertEqual(rejected_bool.status, "error")
+                    self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(before, after)
                 finally:
                     confirm_runtime.close()

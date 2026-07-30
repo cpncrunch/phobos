@@ -131,10 +131,11 @@ class OffSecToolRegistry:
         """Validate schema-declared scalar arguments before dispatch/approval.
 
         Tool handlers are still defensive, but malformed operator-controlled
-        integer fields should not fall through to Python ``ValueError`` strings
-        or get queued for later approval replay.  The registry owns the generic
-        ``/tool`` and gateway dispatch boundary, so normalize integer-looking
-        strings here and reject booleans/non-numeric values with clean errors.
+        scalar fields should not fall through to Python ``ValueError`` strings,
+        Python truthiness surprises, or queued approval replay.  The registry
+        owns the generic ``/tool`` and gateway dispatch boundary, so normalize
+        safe integer/boolean strings and reject ambiguous values with clean
+        operator errors before policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -144,17 +145,25 @@ class OffSecToolRegistry:
             return dict(args), None
         validated = dict(args)
         for arg_name, arg_schema in properties.items():
-            if not isinstance(arg_schema, dict) or arg_schema.get("type") != "integer":
+            if not isinstance(arg_schema, dict):
                 continue
+            arg_type = arg_schema.get("type")
             if arg_name not in validated or validated.get(arg_name) in (None, ""):
                 continue
             raw_value = validated.get(arg_name)
-            if raw_value is None or isinstance(raw_value, bool):
-                return validated, ToolResult("error", f"{arg_name} must be an integer.")
-            try:
-                validated[arg_name] = int(raw_value)
-            except (TypeError, ValueError):
-                return validated, ToolResult("error", f"{arg_name} must be an integer.")
+            if arg_type == "integer":
+                if raw_value is None or isinstance(raw_value, bool):
+                    return validated, ToolResult("error", f"{arg_name} must be an integer.")
+                try:
+                    validated[arg_name] = int(raw_value)
+                except (TypeError, ValueError):
+                    return validated, ToolResult("error", f"{arg_name} must be an integer.")
+                continue
+            if arg_type == "boolean":
+                parsed, ok = _parse_schema_bool(raw_value)
+                if not ok:
+                    return validated, ToolResult("error", f"{arg_name} must be a boolean.")
+                validated[arg_name] = parsed
         return validated, None
 
     def _register_builtins(self) -> None:
@@ -4690,18 +4699,32 @@ def _contains_redacted_marker(value: Any) -> bool:
     return False
 
 
+def _parse_schema_bool(value: Any) -> tuple[bool, bool]:
+    """Return (parsed, ok) for schema-declared boolean values.
+
+    JSON booleans are accepted directly. Common operator strings and 0/1 values
+    are normalized so slash/gateway callers can pass form-style payloads without
+    Python's non-empty-string truthiness accidentally enabling execution.
+    """
+
+    if isinstance(value, bool):
+        return value, True
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value), True
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True, True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False, True
+    return False, False
+
+
 def _truthy_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if not text:
-        return default
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
+    parsed, ok = _parse_schema_bool(value)
+    if ok:
+        return parsed
     return default
 
 

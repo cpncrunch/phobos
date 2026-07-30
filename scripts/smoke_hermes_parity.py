@@ -213,6 +213,29 @@ def main(argv: list[str] | None = None) -> int:
             and "invalid literal" not in json.dumps(integer_validation_payload)
             and "Traceback" not in json.dumps(integer_validation_payload)
         )
+        invalid_tool_boolean = runtime.registry.run("run_command", {"execute": "maybe"})
+        dry_tool_boolean = runtime.registry.run("run_command", {"target": "app.example.test", "type": "local", "purpose": "boolean schema dry-run regression", "command": "printf bool-validation-ok", "execute": "false"})
+        runtime.registry.run("workspace_write", {"path": "notes/schema-bool.md", "content": "old"})
+        overwrite_tool_boolean = runtime.registry.run("workspace_write", {"path": "notes/schema-bool.md", "content": "new", "append": "false"})
+        append_tool_boolean = runtime.registry.run("workspace_write", {"path": "notes/schema-bool.md", "content": "-tail", "append": "true"})
+        boolean_workspace_text = (runtime.registry.workspace_root / "notes" / "schema-bool.md").read_text(encoding="utf-8")
+        boolean_validation_payload = {
+            "invalid": invalid_tool_boolean.to_dict(),
+            "dry_run": dry_tool_boolean.to_dict(),
+            "overwrite": overwrite_tool_boolean.to_dict(),
+            "append": append_tool_boolean.to_dict(),
+            "workspace_text": boolean_workspace_text,
+        }
+        write("tool-schema-boolean-validation.json", json.dumps(boolean_validation_payload, indent=2))
+        checks["tool_schema_boolean_validation_ok"] = (
+            invalid_tool_boolean.status == "error"
+            and invalid_tool_boolean.message == "execute must be a boolean."
+            and dry_tool_boolean.status == "dry_run"
+            and overwrite_tool_boolean.status == "ok"
+            and append_tool_boolean.status == "ok"
+            and boolean_workspace_text == "new-tail"
+            and "Traceback" not in json.dumps(boolean_validation_payload)
+        )
 
         scope_summary = handle("scope-summary", "/scope")
         scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
