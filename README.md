@@ -308,7 +308,7 @@ This turns the harness into a standalone agent-style application with:
 - approval queue for confirm-level actions, with current-session lookup and replay enforced in both runtime and store helpers; approval args/results are redacted before SQLite storage, and approvals whose arguments were redacted are review-only until the operator re-submits fresh execution input;
 - runtime policy that can block or approval-gate arbitrary tools;
 - durable scheduled jobs runnable with `phobos-agent run-due`, plus session-bound redacted `/job-detail`, `/job-update`, `/job-enable`, and `/job-disable` controls so automation can be paused without losing audit history;
-- role-based subagent reviews and durable local delegation batches with session-bound detail views for per-task child sessions/artifacts;
+- role-based subagent reviews and durable local delegation batches with session-bound detail/completion paths for per-task child sessions/artifacts, with delegation prompts/tasks/results redacted before SQLite storage;
 - model adapter fallback chains;
 - engagement workspace file tools that resolve candidate paths before reading/searching so symlink escapes stay blocked;
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
@@ -603,6 +603,7 @@ hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
 delegation_detail_session_bound_ok=True
+delegation_storage_redaction_ok=True
 auth_status_redacted_ok=True
 safety_preflight_ok=True
 media_artifacts_ok=True
@@ -630,7 +631,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=234
+artifact_count=235
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

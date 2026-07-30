@@ -1105,7 +1105,13 @@ class OffSecToolRegistry:
             summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']}){session_note}", "", str(result["content"])[:4000], ""]
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
         status = "ok" if all(result["status"] == "ok" for result in results) else "error"
-        delegation = self.store.complete_delegation(delegation_id, status, results, {"summary": str(summary_path), "dir": str(out_dir), "isolated_child_sessions": isolate})
+        delegation = self.store.complete_delegation(
+            delegation_id,
+            status,
+            results,
+            {"summary": str(summary_path), "dir": str(out_dir), "isolated_child_sessions": isolate},
+            session_id=self.session_id,
+        )
         return ToolResult(status, f"Delegation {delegation_id} completed with {len(results)} task(s).", {"delegation": delegation}, {"summary": str(summary_path), "directory": str(out_dir)})
 
     def list_delegations(self, args: dict[str, Any]) -> ToolResult:

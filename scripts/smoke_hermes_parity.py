@@ -619,14 +619,41 @@ def main(argv: list[str] | None = None) -> int:
         delegation_id = int(delegation.data.get("delegation", {}).get("id", 0)) if delegation.data.get("delegation") else 0
         delegation_detail = runtime.registry.run("get_delegation", {"id": delegation_id})
         other_delegation_id = runtime.store.create_delegation("foreign-delegation-smoke", "foreign delegation token=supersecret", [{"role": "scope", "prompt": "foreign delegation token=supersecret"}])
-        runtime.store.complete_delegation(other_delegation_id, "ok", [{"role": "scope", "content": "foreign delegation token=supersecret"}], {})
+        runtime.store.complete_delegation(
+            other_delegation_id,
+            "ok",
+            [{"role": "scope", "content": "foreign delegation token=supersecret"}],
+            {"note": "foreign delegation artifact token=supersecret", "api_key": "foreign-delegation-key"},
+            session_id="foreign-delegation-smoke",
+        )
+        cross_complete_delegation = runtime.store.complete_delegation(
+            other_delegation_id,
+            "error",
+            [{"role": "scope", "content": "cross delegation mutation token=supersecret"}],
+            {"note": "cross delegation artifact token=supersecret"},
+            session_id=runtime.session_id,
+        )
+        raw_delegation_row = runtime.store.conn.execute(
+            "SELECT status, prompt, tasks_json, results_json, artifacts_json FROM delegations WHERE id=?",
+            (other_delegation_id,),
+        ).fetchone()
+        raw_delegation = dict(raw_delegation_row) if raw_delegation_row else {}
+        raw_delegation_text = "".join(str(raw_delegation.get(key) or "") for key in ["prompt", "tasks_json", "results_json", "artifacts_json"])
         cross_delegation_detail = runtime.registry.run("get_delegation", {"id": other_delegation_id})
         write("delegation.json", json.dumps(delegation.to_dict(), indent=2))
         write("delegations.json", json.dumps(delegation_list.to_dict(), indent=2))
+        write("delegation-storage.json", json.dumps({"cross_complete": cross_complete_delegation, "raw_delegation": raw_delegation}, indent=2))
         child_session_ids = [item.get("child_session_id") for item in delegation.data.get("delegation", {}).get("results", [])]
         checks["delegation_batches_ok"] = delegation.status == "ok" and delegation_list.data.get("delegations") and Path(delegation.artifacts.get("summary", "")).exists()
         checks["isolated_delegation_sessions_ok"] = len([sid for sid in child_session_ids if sid]) == 2 and all(sid != runtime.session_id for sid in child_session_ids)
         checks["delegation_detail_session_bound_ok"] = delegation_detail.status == "ok" and cross_delegation_detail.status == "error" and "not found in this session" in cross_delegation_detail.message and "supersecret" not in json.dumps(cross_delegation_detail.to_dict())
+        checks["delegation_storage_redaction_ok"] = (
+            cross_complete_delegation is None
+            and raw_delegation.get("status") == "ok"
+            and "supersecret" not in raw_delegation_text
+            and "cross delegation mutation" not in raw_delegation_text
+            and "<REDACTED>" in raw_delegation_text
+        )
 
         auth = runtime.registry.run("auth_status", {})
         write("auth-status.json", json.dumps(auth.to_dict(), indent=2))

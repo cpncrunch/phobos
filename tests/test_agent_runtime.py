@@ -836,9 +836,33 @@ class AgentRuntimeTests(unittest.TestCase):
                         "foreign delegation detail secret token=supersecret",
                         [{"role": "scope", "prompt": "foreign delegation detail secret token=supersecret"}],
                     )
-                    other_context.store.complete_delegation(other_delegation_id, "ok", [{"role": "scope", "content": "foreign delegation detail secret token=supersecret"}], {})
+                    other_context.store.complete_delegation(
+                        other_delegation_id,
+                        "ok",
+                        [{"role": "scope", "content": "foreign delegation detail secret token=supersecret"}],
+                        {"note": "foreign delegation artifact token=supersecret", "api_key": "foreign-delegation-key"},
+                        session_id=other_context.session_id,
+                    )
                 finally:
                     other_context.close()
+                cross_complete = runtime.store.complete_delegation(
+                    other_delegation_id,
+                    "error",
+                    [{"role": "scope", "content": "cross-session mutation token=supersecret"}],
+                    {"note": "cross-session artifact token=supersecret"},
+                    session_id=runtime.session_id,
+                )
+                raw_delegation_row = runtime.store.conn.execute(
+                    "SELECT status, prompt, tasks_json, results_json, artifacts_json FROM delegations WHERE id=?",
+                    (other_delegation_id,),
+                ).fetchone()
+                raw_delegation_text = "".join(str(raw_delegation_row[key] or "") for key in ["prompt", "tasks_json", "results_json", "artifacts_json"]) if raw_delegation_row else ""
+                self.assertIsNone(cross_complete)
+                self.assertIsNotNone(raw_delegation_row)
+                self.assertEqual(raw_delegation_row["status"], "ok")
+                self.assertNotIn("supersecret", raw_delegation_text)
+                self.assertNotIn("cross-session mutation", raw_delegation_text)
+                self.assertIn("<REDACTED>", raw_delegation_text)
                 cross_describe = runtime.registry.run("context_describe", {"id": other_node_id})
                 cross_expand = runtime.registry.run("context_expand", {"id": other_node_id})
                 current_describe = runtime.registry.run("context_describe", {"id": 1})

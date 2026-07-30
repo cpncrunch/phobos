@@ -21,7 +21,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; redacted session-bound detail/update/enable/disable controls; run via `phobos-agent run-due` or external cron.
-- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail views, per-task artifacts, and child session records by default.
+- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail/completion paths, per-task artifacts, and child session records by default. Delegation prompts, task specs, results, and artifact metadata are redacted before SQLite storage.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it and `/media-get` returns session-bound metadata without reading file contents.
@@ -758,6 +758,7 @@ hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
 delegation_detail_session_bound_ok=True
+delegation_storage_redaction_ok=True
 auth_status_redacted_ok=True
 safety_preflight_ok=True
 media_artifacts_ok=True
@@ -785,7 +786,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=234
+artifact_count=235
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -833,6 +834,7 @@ closeout-cli.stderr.txt
 closeout-cli.stdout.txt
 closeout-review.json
 delegation.json
+delegation-storage.json
 delegations.json
 deploy-kit.stdout.txt
 deploy-kit-invalid.stderr.txt

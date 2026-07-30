@@ -638,23 +638,41 @@ class AgentStore:
 
     def create_delegation(self, session_id: str, prompt: str, tasks: list[dict[str, Any]]) -> int:
         now = utc_now()
+        redacted_prompt = redact_secrets(prompt) or ""
+        redacted_tasks = _redact_json_value(tasks)
         cur = self.conn.execute(
             """
             INSERT INTO delegations(session_id, status, prompt, tasks_json, results_json, artifacts_json, created_at, updated_at)
             VALUES (?, 'running', ?, ?, '[]', '{}', ?, ?)
             """,
-            (session_id, prompt, json.dumps(tasks, sort_keys=True), now, now),
+            (session_id, redacted_prompt, json.dumps(redacted_tasks, sort_keys=True), now, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def complete_delegation(self, delegation_id: int, status: str, results: list[dict[str, Any]], artifacts: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        self.conn.execute(
-            "UPDATE delegations SET status=?, results_json=?, artifacts_json=?, updated_at=? WHERE id=?",
-            (status, json.dumps(results, sort_keys=True), json.dumps(artifacts or {}, sort_keys=True), utc_now(), delegation_id),
+    def complete_delegation(
+        self,
+        delegation_id: int,
+        status: str,
+        results: list[dict[str, Any]],
+        artifacts: dict[str, Any] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        redacted_results = _redact_json_value(results)
+        redacted_artifacts = _redact_json_value(artifacts or {})
+        values: list[Any] = [status, json.dumps(redacted_results, sort_keys=True), json.dumps(redacted_artifacts, sort_keys=True), utc_now(), delegation_id]
+        where = "id=?"
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(
+            f"UPDATE delegations SET status=?, results_json=?, artifacts_json=?, updated_at=? WHERE {where}",
+            values,
         )
         self.conn.commit()
-        return self.get_delegation(delegation_id)
+        if cur.rowcount < 1:
+            return None
+        return self.get_delegation(delegation_id, session_id=session_id)
 
     def get_delegation(self, delegation_id: int, session_id: str | None = None) -> dict[str, Any] | None:
         if session_id is not None:
@@ -1086,12 +1104,13 @@ def next_run_for_schedule(schedule: str) -> str:
 
 
 def _redact_json_value(value: Any) -> Any:
-    """Recursively redact secret-like strings before audit storage/display.
+    """Recursively redact secret-like strings before local SQLite storage/display.
 
-    Audit events are intentionally useful for troubleshooting and closeout, but
-    they are still local logs. Redacting at both write and read time prevents a
-    plugin/tool boundary from accidentally persisting bearer tokens, passwords,
-    or API keys and also sanitizes rows written by older Phobos versions.
+    Audit events, approvals, and delegation batches are intentionally useful for
+    troubleshooting and closeout, but they are still plaintext local records.
+    Redacting at write time prevents a plugin/tool/delegation boundary from
+    accidentally persisting bearer tokens, passwords, or API keys; read paths can
+    apply it again to sanitize rows written by older Phobos versions.
     """
 
     if isinstance(value, dict):
