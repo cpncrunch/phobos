@@ -151,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
                 "context_compact_node",
                 "delegate_tasks",
                 "auth_status",
+                "safety_preflight",
                 "media_import",
                 "sealed_export",
                 "hindsight_retain",
@@ -376,6 +377,22 @@ def main(argv: list[str] | None = None) -> int:
         write("auth-status.json", json.dumps(auth.to_dict(), indent=2))
         checks["auth_status_redacted_ok"] = auth.status == "ok" and auth.data.get("secret_values_redacted") is True and "smoke-passphrase-for-sealed-export" not in json.dumps(auth.to_dict())
 
+        preflight = runtime.registry.run("safety_preflight", {"out": "smoke-preflight.md"})
+        cli_preflight_stdout = run_cmd("preflight-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "preflight", "--engagement", str(engagement_path), "--out", "smoke-cli-preflight.md"])
+        cli_preflight = json.loads(cli_preflight_stdout)
+        write("safety-preflight.json", json.dumps(preflight.to_dict(), indent=2))
+        preflight_path = Path(preflight.artifacts.get("markdown", ""))
+        preflight_markdown = preflight_path.read_text(encoding="utf-8") if preflight_path.exists() else ""
+        checks["safety_preflight_ok"] = (
+            preflight.status == "ok"
+            and preflight.data.get("readiness") in {"ready", "review"}
+            and preflight.data.get("no_target_activity") is True
+            and preflight.data.get("secret_values_redacted") is True
+            and "Phobos Safety Preflight" in preflight_markdown
+            and cli_preflight.get("status") == "ok"
+            and "smoke-passphrase-for-sealed-export" not in json.dumps(preflight.to_dict()) + preflight_markdown + cli_preflight_stdout
+        )
+
         media_source.write_text("media proof token=supersecret", encoding="utf-8")
         media_import = runtime.registry.run("media_import", {"path": str(media_source)})
         media_list = runtime.registry.run("media_list", {})
@@ -573,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -624,8 +641,13 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-guardrails.json", json.dumps({"before": gateway_gets.get("/guardrails"), "after": gateway_guardrail_update}, indent=2))
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
+        preflight_route_obj = gateway_gets.get("/preflight")
+        preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
+        preflight_data_obj = preflight_route.get("data")
+        preflight_route_data: dict[str, object] = preflight_data_obj if isinstance(preflight_data_obj, dict) else {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

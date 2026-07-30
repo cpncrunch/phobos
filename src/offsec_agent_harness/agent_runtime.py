@@ -75,6 +75,7 @@ class OffSecAgentRuntime:
             default_timeout=config.tool_timeout,
             blocked_tools=config.blocked_tools,
             confirm_tools=config.confirm_tools,
+            runtime_metadata=_runtime_metadata(config),
         )
         self.plugins = load_plugins(self.registry, config.plugin_dirs)
         self.available_skills = discover_skills(config.skill_dirs)
@@ -333,6 +334,9 @@ class OffSecAgentRuntime:
             "delegations": "list_delegations",
             "auth-status": "auth_status",
             "auth": "auth_status",
+            "preflight": "safety_preflight",
+            "safety-preflight": "safety_preflight",
+            "readiness": "safety_preflight",
             "media-import": "media_import",
             "media-list": "media_list",
             "sealed-export": "sealed_export",
@@ -450,6 +454,61 @@ class OffSecAgentRuntime:
         self.loaded_skills[skill.name] = skill
         self.store.audit(self.session_id, "skill_loaded", {"skill": skill.name, "path": skill.path})
         return skill
+
+
+def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
+    bridge_keys = {
+        "enabled",
+        "token_env",
+        "bot_token_env",
+        "app_token_env",
+        "allowed_channel_ids",
+        "allowed_user_ids",
+        "command_prefix",
+        "mention_required",
+        "allow_all",
+        "allow_approval_actions",
+        "ignore_bots",
+        "max_response_chars",
+        "max_message_chars",
+    }
+    bridges: dict[str, dict[str, Any]] = {}
+    for name, data in (config.bridges or {}).items():
+        if isinstance(data, dict):
+            bridges[str(name)] = {key: data.get(key) for key in bridge_keys if key in data}
+    providers = []
+    for provider in config.model_providers:
+        if isinstance(provider, dict):
+            providers.append({
+                "provider": provider.get("provider"),
+                "model": provider.get("model"),
+                "key_env": provider.get("key_env"),
+                "base_url": _redact_url_userinfo(str(provider.get("base_url") or "")),
+            })
+    return {
+        "config_path": config.config_path,
+        "db_path": config.db_path,
+        "workspace_dir": config.workspace_dir,
+        "plugin_dirs": list(config.plugin_dirs),
+        "skill_dirs": list(config.skill_dirs),
+        "preload_skills": list(config.preload_skills),
+        "tool_timeout": config.tool_timeout,
+        "auto_execute_natural": config.auto_execute_natural,
+        "auto_model_planning": config.auto_model_planning,
+        "max_auto_steps": config.max_auto_steps,
+        "provider": config.provider,
+        "model": config.model,
+        "key_env": config.key_env,
+        "base_url": _redact_url_userinfo(config.base_url or ""),
+        "model_providers": providers,
+        "bridges": bridges,
+    }
+
+
+def _redact_url_userinfo(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"(https?://)[^/@\s]+@", r"\1<redacted>@", value)
 
 
 def _render_chat_response(response: str, *, message: str, platform: str, runtime: OffSecAgentRuntime) -> str:
@@ -825,6 +884,7 @@ HELP_TEXT = """Phobos Agent commands:
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20
 /auth-status
+/preflight out=<optional.md>
 /media-import path=<local-file> kind=<optional>
 /media-list
 /sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>

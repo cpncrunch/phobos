@@ -7,6 +7,41 @@ from pathlib import Path
 
 
 class CliTests(unittest.TestCase):
+    def test_agent_preflight_cli_writes_redacted_readiness_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            init = subprocess.run(
+                [
+                    sys.executable, "-m", "offsec_agent_harness", "init",
+                    "--name", "Preflight CLI", "--scope", "app.example.test,10.10.0.0/24",
+                    "--evidence-dir", str(tmp_path / "evidence"), "--out", str(engagement),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr)
+            result = subprocess.run(
+                [
+                    sys.executable, "-m", "phobos_agent.agent_cli",
+                    "--db", str(tmp_path / "agent.db"),
+                    "preflight", "--engagement", str(engagement), "--out", "cli-preflight.md",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["data"]["readiness"], "ready")
+            report = Path(payload["artifacts"]["markdown"])
+            self.assertTrue(report.exists())
+            text = report.read_text(encoding="utf-8")
+            self.assertIn("Phobos Safety Preflight", text)
+            self.assertNotIn("supersecret", json.dumps(payload) + text)
+
     def test_agent_deploy_kit_is_token_auth_bound_and_validated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

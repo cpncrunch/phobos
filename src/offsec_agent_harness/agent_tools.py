@@ -66,6 +66,7 @@ class OffSecToolRegistry:
         default_timeout: int = 30,
         blocked_tools: tuple[str, ...] = (),
         confirm_tools: tuple[str, ...] = (),
+        runtime_metadata: dict[str, Any] | None = None,
     ):
         self.roe = roe
         self.harness = OffSecHarness(roe)
@@ -75,7 +76,8 @@ class OffSecToolRegistry:
         self.default_timeout = default_timeout
         self.blocked_tools = {name.strip() for name in blocked_tools if name.strip()}
         self.confirm_tools = {name.strip() for name in confirm_tools if name.strip()}
-        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "tool_schemas", "runtime_status", "audit_log"}
+        self.runtime_metadata = runtime_metadata or {}
+        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight"}
         self.workspace_root = Path(workspace_dir) if workspace_dir else self.harness.store.root / "agent" / "workspace"
         if not self.workspace_root.is_absolute():
             self.workspace_root = (self.harness.store.root / self.workspace_root).resolve()
@@ -191,6 +193,7 @@ class OffSecToolRegistry:
         self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted."), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
+        self.register_tool("safety_preflight", self.safety_preflight, _spec("safety_preflight", "Run a read-only engagement/runtime readiness preflight and write a redacted Markdown report.", {"out": _string("Optional Markdown output path; relative paths go under agent/preflight.")}, []))
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
         self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
@@ -1025,6 +1028,47 @@ class OffSecToolRegistry:
             env_names[name] = name
         env = {name: {"set": bool(os.environ.get(name)), "length": len(os.environ.get(name, "")) if args.get("include_environment", False) and os.environ.get(name) else None} for name in sorted(set(env_names.values()))}
         return ToolResult("ok", "Auth and token environment checked without revealing values.", {"provider": adapter_provider, "environment": env, "secret_values_redacted": True})
+
+    def safety_preflight(self, args: dict[str, Any]) -> ToolResult:
+        checks = _preflight_checks(
+            self.roe,
+            self.harness.store.root,
+            self.workspace_root,
+            self.store,
+            self.session_id,
+            self.blocked_tools,
+            self.confirm_tools,
+            sorted(self.tool_specs),
+            self.runtime_metadata,
+        )
+        counts = _preflight_counts(checks)
+        readiness = "blocked" if counts.get("fail", 0) else "review" if counts.get("warn", 0) else "ready"
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "preflight",
+            str(args.get("out") or "").strip(),
+            f"safety-preflight-{stamp}.md",
+            suffix=".md",
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        report = _preflight_markdown(self.roe.name, readiness, checks, counts)
+        out.write_text(report, encoding="utf-8")
+        data = _redacted_mapping({
+            "readiness": readiness,
+            "counts": counts,
+            "checks": checks,
+            "path": str(out),
+            "no_target_activity": True,
+            "secret_values_redacted": True,
+            "plaintext_db_caveat": "Local SQLite/WAL/SHM files remain plaintext unless the deployment adds filesystem encryption, SQLCipher, or uses db-seal backups with plaintext removal while runtimes are closed.",
+        })
+        return ToolResult(
+            "ok",
+            f"Safety preflight {readiness}: {counts.get('fail', 0)} fail, {counts.get('warn', 0)} warn, {counts.get('pass', 0)} pass.",
+            data,
+            {"markdown": str(out)},
+        )
 
     def media_import(self, args: dict[str, Any]) -> ToolResult:
         src = Path(str(args.get("path", ""))).expanduser()
@@ -2064,6 +2108,281 @@ def _timeline_audit_preview(event: str, data: dict[str, Any]) -> tuple[str, str,
         return ("Agent initialized", "ok", json.dumps({key: data.get(key) for key in ("engagement", "safety_mode", "scope") if key in data}, sort_keys=True)[:800])
     summary = json.dumps(data, sort_keys=True, default=str)[:800] if data else ""
     return (event.replace("_", " ").title() or "Audit event", "", summary)
+
+
+def _preflight_check(category: str, name: str, status: str, detail: str, recommendation: str = "") -> dict[str, Any]:
+    normalized = status.strip().lower().replace("warning", "warn")
+    if normalized not in {"pass", "warn", "fail", "info"}:
+        normalized = "info"
+    return _redacted_mapping({
+        "category": category,
+        "name": name,
+        "status": normalized,
+        "detail": detail,
+        "recommendation": recommendation,
+    })
+
+
+def _preflight_counts(checks: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"pass": 0, "warn": 0, "fail": 0, "info": 0}
+    for check in checks:
+        status = str(check.get("status") or "info")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _preflight_checks(
+    roe: EngagementROE,
+    evidence_root: Path,
+    workspace_root: Path,
+    store: AgentStore,
+    session_id: str,
+    blocked_tools: set[str],
+    confirm_tools: set[str],
+    registered_tools: list[str],
+    runtime_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+
+    def add(category: str, name: str, status: str, detail: str, recommendation: str = "") -> None:
+        checks.append(_preflight_check(category, name, status, detail, recommendation))
+
+    add(
+        "roe",
+        "authorization",
+        "pass" if roe.authorized else "fail",
+        "Engagement is marked authorized." if roe.authorized else "Engagement is not marked authorized.",
+        "Load an ROE JSON with authorized=true before assessing or executing target-affecting actions." if not roe.authorized else "",
+    )
+
+    targets = [str(item).strip() for item in roe.in_scope_targets if str(item).strip()]
+    broad_targets = [target for target in targets if _looks_broad_scope_target(target)]
+    if not targets:
+        add("roe", "scope_targets", "fail", "No in-scope targets are defined.", "Add exact hostnames, IPs, CIDRs, or URLs to in_scope_targets before use.")
+    elif broad_targets:
+        add(
+            "roe",
+            "scope_targets",
+            "warn",
+            f"{len(targets)} target pattern(s) configured; broad patterns present: {', '.join(broad_targets[:4])}.",
+            "Prefer explicit assets or CIDRs from the signed ROE; broad catch-alls make out-of-scope blocking weaker.",
+        )
+    else:
+        add("roe", "scope_targets", "pass", f"{len(targets)} explicit target pattern(s) configured.")
+
+    safety_mode = (roe.safety_mode or "").strip().lower().replace("-", "_")
+    if safety_mode in {"non_destructive", "standard"}:
+        add("guardrails", "safety_mode", "pass", f"Safety mode is {safety_mode}.")
+    else:
+        add("guardrails", "safety_mode", "warn", f"Unknown safety mode {roe.safety_mode!r}; guardrails fall back conservatively.", "Use non_destructive for operator-default active testing, or standard for conservative demos/customers.")
+
+    required_prohibitions = {"dos", "destructive", "persistence", "evasion", "malware"}
+    configured_prohibitions = {str(item).strip().lower().replace("-", "_") for item in roe.prohibited_techniques if str(item).strip()}
+    missing_prohibitions = sorted(required_prohibitions - configured_prohibitions)
+    if missing_prohibitions:
+        add(
+            "guardrails",
+            "prohibited_techniques",
+            "warn",
+            f"ROE prohibited_techniques is missing default hard classes: {', '.join(missing_prohibitions)}.",
+            "Keep dos, destructive, persistence, evasion, and malware in prohibited_techniques even though built-in pattern rules also block common forms.",
+        )
+    else:
+        add("guardrails", "prohibited_techniques", "pass", "Default hard-stop technique classes are present in the ROE.")
+
+    stop_conditions = [str(item).strip() for item in roe.stop_conditions if str(item).strip()]
+    if len(stop_conditions) < 2:
+        add("roe", "stop_conditions", "warn", f"Only {len(stop_conditions)} stop condition(s) configured.", "Record explicit stop conditions for production impact, personal data, lockouts, availability, persistence/evasion, and client escalation.")
+    else:
+        add("roe", "stop_conditions", "pass", f"{len(stop_conditions)} stop condition(s) configured.")
+
+    try:
+        evidence_resolved = evidence_root.resolve(strict=False)
+        evidence_ok = evidence_root.exists() and evidence_root.is_dir()
+    except (OSError, RuntimeError):
+        evidence_resolved = evidence_root
+        evidence_ok = False
+    add(
+        "artifacts",
+        "evidence_root",
+        "pass" if evidence_ok else "fail",
+        f"Evidence root: {evidence_resolved}",
+        "Ensure the evidence directory exists and is writable before running tools." if not evidence_ok else "",
+    )
+
+    try:
+        workspace_resolved = workspace_root.resolve(strict=False)
+        workspace_ok = workspace_root.exists() and workspace_root.is_dir()
+    except (OSError, RuntimeError):
+        workspace_resolved = workspace_root
+        workspace_ok = False
+    add(
+        "artifacts",
+        "workspace_root",
+        "pass" if workspace_ok else "warn",
+        f"Workspace root: {workspace_resolved}",
+        "Create the workspace before using /read, /write, /workspace-search, or /patch-file." if not workspace_ok else "",
+    )
+
+    schema = store.schema_info()
+    add("state", "sqlite_schema", "pass" if schema.get("schema_version") == schema.get("latest_supported_schema_version") else "warn", f"Schema version {schema.get('schema_version')} (latest supported {schema.get('latest_supported_schema_version')}); FTS available={schema.get('fts_available')}.")
+    add("state", "session_record", "pass" if store.get_session(session_id) else "fail", f"Session ID {session_id} exists in the local DB." if store.get_session(session_id) else f"Session ID {session_id} was not found in the local DB.")
+
+    plaintext_files = []
+    for path in [store.path, Path(str(store.path) + "-wal"), Path(str(store.path) + "-shm")]:
+        try:
+            plaintext_files.append(f"{path.name}:exists={path.exists()} bytes={path.stat().st_size if path.exists() else 0}")
+        except OSError:
+            plaintext_files.append(f"{path.name}:status=unreadable")
+    add(
+        "state",
+        "plaintext_db_caveat",
+        "info",
+        "; ".join(plaintext_files),
+        "Exports and sealed snapshots can be encrypted/redacted, but the live SQLite DB/WAL/SHM remain plaintext unless the deployment adds filesystem encryption or SQLCipher.",
+    )
+
+    expected_core_tools = {"assess_action", "run_command", "start_process", "list_approvals", "approve", "deny", "runtime_status", "safety_preflight"}
+    missing_tools = sorted(expected_core_tools - set(registered_tools))
+    add("runtime", "core_tools_registered", "fail" if missing_tools else "pass", "Missing core tools: " + ", ".join(missing_tools) if missing_tools else f"{len(registered_tools)} tools registered including core guardrail/status tools.")
+
+    policy_sensitive = expected_core_tools | {"tool_schemas", "auth_status"}
+    blocked_sensitive = sorted(policy_sensitive & blocked_tools)
+    confirm_sensitive = sorted({"safety_preflight", "runtime_status", "list_approvals", "tool_schemas"} & confirm_tools)
+    if blocked_sensitive or confirm_sensitive:
+        add(
+            "runtime",
+            "tool_policy",
+            "warn",
+            f"Policy affects safety/inspection tools: blocked={blocked_sensitive}; confirm={confirm_sensitive}.",
+            "Avoid blocking or approval-gating read-only status/preflight/schema tools; keep policy gates for side-effecting tools.",
+        )
+    else:
+        add("runtime", "tool_policy", "pass", f"Runtime policy configured: blocked={len(blocked_tools)}, confirm={len(confirm_tools)}; read-only inspection tools remain reachable.")
+
+    auto_execute = bool(runtime_metadata.get("auto_execute_natural", False))
+    add(
+        "runtime",
+        "natural_language_execution",
+        "warn" if auto_execute else "pass",
+        f"auto_execute_natural={auto_execute}; auto_model_planning={bool(runtime_metadata.get('auto_model_planning', False))}; max_auto_steps={runtime_metadata.get('max_auto_steps', 'unknown')}.",
+        "Keep auto_execute_natural=false for production/default operation; use explicit /auto apply=true and execute=true when action is intended." if auto_execute else "",
+    )
+
+    timeout = int(runtime_metadata.get("tool_timeout") or 0)
+    add("runtime", "tool_timeout", "warn" if timeout and timeout > 300 else "pass", f"tool_timeout={timeout or 'unknown'} seconds.", "Keep foreground tool timeouts bounded; use tracked background processes for longer local jobs." if timeout and timeout > 300 else "")
+
+    _add_provider_preflight(checks, runtime_metadata)
+    _add_path_list_preflight(checks, "plugins", "plugin_dirs", runtime_metadata.get("plugin_dirs"))
+    _add_path_list_preflight(checks, "skills", "skill_dirs", runtime_metadata.get("skill_dirs"))
+    _add_bridge_preflight(checks, runtime_metadata.get("bridges"))
+    return checks
+
+
+def _add_provider_preflight(checks: list[dict[str, Any]], runtime_metadata: dict[str, Any]) -> None:
+    providers = runtime_metadata.get("model_providers")
+    if not isinstance(providers, list) or not providers:
+        provider = str(runtime_metadata.get("provider") or "").strip()
+        providers = [{"provider": provider, "model": runtime_metadata.get("model"), "key_env": runtime_metadata.get("key_env"), "base_url": runtime_metadata.get("base_url")}] if provider else []
+    if not providers:
+        checks.append(_preflight_check("models", "provider_chain", "info", "No model provider metadata available; heuristic fallback may still be active."))
+        return
+    warnings: list[str] = []
+    descriptions: list[str] = []
+    for item in providers:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider") or "unknown")
+        model = str(item.get("model") or "")
+        key_env = str(item.get("key_env") or "")
+        base_url = str(item.get("base_url") or "")
+        local_base = base_url.startswith(("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost"))
+        descriptions.append(f"{provider}/{model or 'default'} key_env={key_env or 'none'} env_set={bool(os.environ.get(key_env)) if key_env else 'n/a'}")
+        if provider in {"openai"} and key_env and not os.environ.get(key_env) and not local_base:
+            warnings.append(f"{provider} key env {key_env} is absent")
+    checks.append(_preflight_check("models", "provider_chain", "warn" if warnings else "pass", "; ".join(descriptions) or "Provider metadata present.", "; ".join(warnings) if warnings else ""))
+
+
+def _add_path_list_preflight(checks: list[dict[str, Any]], category: str, name: str, value: Any) -> None:
+    paths = [str(item) for item in value] if isinstance(value, list | tuple) else []
+    if not paths:
+        checks.append(_preflight_check(category, name, "info", f"No {name} configured."))
+        return
+    missing = []
+    for item in paths:
+        try:
+            if not Path(item).expanduser().exists():
+                missing.append(item)
+        except OSError:
+            missing.append(item)
+    checks.append(_preflight_check(category, name, "warn" if missing else "pass", f"Configured paths: {len(paths)}; missing/unreadable: {len(missing)}.", "Create or remove missing configured directories: " + ", ".join(missing[:4]) if missing else ""))
+
+
+def _add_bridge_preflight(checks: list[dict[str, Any]], bridges: Any) -> None:
+    if not isinstance(bridges, dict):
+        checks.append(_preflight_check("bridges", "bridge_configs", "info", "No bridge config metadata available."))
+        return
+    enabled = {str(name): data for name, data in bridges.items() if isinstance(data, dict) and bool(data.get("enabled", False))}
+    if not enabled:
+        checks.append(_preflight_check("bridges", "bridge_configs", "pass", "No chat bridges are enabled in config; CLI bridge commands can still start explicitly with allowlists."))
+        return
+    for name, data in enabled.items():
+        issues: list[str] = []
+        token_envs = [str(data.get(key) or "").strip() for key in ("token_env", "bot_token_env", "app_token_env") if str(data.get(key) or "").strip()]
+        missing_envs = [env for env in token_envs if not os.environ.get(env)]
+        if missing_envs:
+            issues.append("missing env vars: " + ", ".join(missing_envs))
+        allowed_channels = data.get("allowed_channel_ids") if isinstance(data.get("allowed_channel_ids"), list | tuple) else []
+        allowed_users = data.get("allowed_user_ids") if isinstance(data.get("allowed_user_ids"), list | tuple) else []
+        if bool(data.get("allow_all", False)):
+            issues.append("allow_all=true")
+        elif not allowed_channels and not allowed_users:
+            issues.append("no channel/user allowlist configured")
+        if bool(data.get("allow_approval_actions", False)):
+            issues.append("approval actions enabled over bridge")
+        if not bool(data.get("ignore_bots", True)):
+            issues.append("bot senders are not ignored")
+        if not str(data.get("command_prefix") or "").strip() and not bool(data.get("mention_required", False)):
+            issues.append("no prefix or mention gate configured")
+        checks.append(_preflight_check(
+            "bridges",
+            f"{name}_bridge",
+            "warn" if issues else "pass",
+            "; ".join(issues) if issues else "Enabled bridge has token-env metadata, allowlist/trigger gates, and approval actions disabled.",
+            "Use env-var tokens, explicit channel/user allowlists or intentionally documented allow_all, prefix/mention gates, bot ignores, and keep bridge approvals disabled by default." if issues else "",
+        ))
+
+
+def _looks_broad_scope_target(target: str) -> bool:
+    normalized = target.strip().lower()
+    return normalized in {"*", "any", "all", "internet", "0/0", "0.0.0.0/0", "::/0"}
+
+
+def _preflight_markdown(engagement_name: str, readiness: str, checks: list[dict[str, Any]], counts: dict[str, int]) -> str:
+    lines = [
+        "# Phobos Safety Preflight",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Readiness: `{readiness}`",
+        "No target activity was performed by this preflight.",
+        "",
+        "## Summary",
+        "",
+        f"- Pass: {counts.get('pass', 0)}",
+        f"- Warn: {counts.get('warn', 0)}",
+        f"- Fail: {counts.get('fail', 0)}",
+        f"- Info: {counts.get('info', 0)}",
+        "- Local SQLite/WAL/SHM remain plaintext unless deployment adds filesystem encryption, SQLCipher, or uses sealed backups with plaintext removal while runtimes are closed.",
+        "",
+        "## Checks",
+        "",
+        "| Category | Check | Status | Detail | Recommendation |",
+        "|---|---|---|---|---|",
+    ]
+    for check in checks:
+        lines.append("| " + " | ".join(_md_cell(check.get(key)) for key in ["category", "name", "status", "detail", "recommendation"]) + " |")
+    return redact_secrets("\n".join(lines) + "\n") or ""
 
 
 def _timeline_markdown(engagement_name: str, entries: list[dict[str, Any]], counts: dict[str, int], total_entries: int, category_filter: set[str], include_audit: bool) -> str:

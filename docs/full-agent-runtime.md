@@ -14,7 +14,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
-- **Profiles and auth status:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values.
+- **Profiles, auth status, and preflight:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report.
 - **Approvals:** confirm-level commands are queued in SQLite and require `/approve id=<n>` before execution/start.
 - **Runtime tool policy:** config/CLI and the authenticated gateway UI/API can block or approval-gate arbitrary tool names, independent of ROE guardrails.
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
@@ -26,7 +26,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
-- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, timelines, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
+- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, preflight readiness, findings, tool runs, timelines, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default while raw runtime output is retained in local session/audit state.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
@@ -95,6 +95,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20
 /auth-status
+/preflight out=<optional.md>
 /media-import path=<local-file> kind=<optional>
 /media-list
 /sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
@@ -263,6 +264,18 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 ```
 
 Without `apply=true`, `/auto` returns a plan only. With `apply=true`, recognized non-command tools are invoked. If the plan contains `run_command` or `start_process`, the generated command still passes through normal ROE guardrails and is left as `execute=false` unless `/auto execute=true` is also supplied. Confirm-level actions still queue for approval.
+
+## Read-only safety preflight
+
+Run a preflight before opening a new operator session, enabling a bridge, or handing the agent to a teammate:
+
+```bash
+phobos-agent --db data/phobos-agent.db --config agent.config.json preflight \
+  --engagement engagement.json \
+  --out operator-preflight.md
+```
+
+The same check is available as `/preflight`, generic tool `safety_preflight`, and gateway `GET /preflight`. It performs no target activity. The report checks ROE authorization/scope, default hard-stop technique classes, stop conditions, evidence/workspace paths, SQLite schema/FTS status, the plaintext live-DB caveat, core tool registration, runtime tool policy, natural-language execution flags, provider env-var presence metadata, plugin/skill directories, and enabled bridge allowlist/token-gate posture. Output is JSON plus a redacted Markdown file under `agent/preflight/`.
 
 ## Non-destructive policy examples
 
@@ -556,6 +569,7 @@ GET  /ui-client     standalone browser client for local/VPS gateway use
 GET  /health
 GET  /routes
 GET  /status
+GET  /preflight
 GET  /tools
 GET  /schemas?name=<optional-tool>
 GET  /sessions
@@ -637,7 +651,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 37 tests
+Ran 39 tests
 OK
 ```
 
@@ -681,6 +695,7 @@ hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
 auth_status_redacted_ok=True
+safety_preflight_ok=True
 media_artifacts_ok=True
 evidence_timeline_ok=True
 sealed_snapshot_roundtrip_ok=True
@@ -700,7 +715,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=189
+artifact_count=196
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

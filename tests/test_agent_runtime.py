@@ -54,6 +54,73 @@ class AgentRuntimeTests(unittest.TestCase):
         runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(tmp_path / "agent.db"), session_name="unit"))
         return runtime, engagement
 
+    def test_safety_preflight_reports_readiness_without_target_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, engagement = self.make_runtime(tmp)
+            gateway = None
+            try:
+                preflight = runtime.registry.run("safety_preflight", {"out": "unit-preflight"})
+                self.assertEqual(preflight.status, "ok", preflight.to_dict())
+                self.assertEqual(preflight.data["readiness"], "ready")
+                self.assertTrue(preflight.data["no_target_activity"])
+                self.assertTrue(preflight.data["secret_values_redacted"])
+                markdown_path = Path(preflight.artifacts["markdown"])
+                self.assertTrue(markdown_path.exists())
+                markdown = markdown_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Safety Preflight", markdown)
+                self.assertIn("Local SQLite/WAL/SHM remain plaintext", markdown)
+
+                slash = runtime.handle_message("/preflight out=slash-preflight.md")
+                self.assertIn("Safety preflight ready", slash)
+                self.assertIn("safety_preflight", runtime.handle_message("/schemas name=safety_preflight"))
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/preflight", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["data"]["readiness"], "ready")
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
+            unsafe_engagement = Path(tmp) / "unsafe-engagement.json"
+            EngagementROE(
+                name="Unsafe Readiness",
+                authorized=False,
+                in_scope_targets=["0.0.0.0/0"],
+                prohibited_techniques=[],
+                stop_conditions=[],
+                evidence_dir=str(Path(tmp) / "unsafe-evidence"),
+            ).save(unsafe_engagement)
+            old_token = os.environ.get("PHOBOS_PREFLIGHT_TOKEN")
+            os.environ["PHOBOS_PREFLIGHT_TOKEN"] = "token=supersecret"
+            unsafe_runtime = OffSecAgentRuntime(AgentRuntimeConfig(
+                engagement_path=str(unsafe_engagement),
+                db_path=str(Path(tmp) / "unsafe-agent.db"),
+                session_name="unsafe",
+                auto_execute_natural=True,
+                bridges={"discord": {"enabled": True, "token_env": "PHOBOS_PREFLIGHT_TOKEN", "allow_all": True, "allow_approval_actions": True, "ignore_bots": False}},
+            ))
+            try:
+                unsafe = unsafe_runtime.registry.run("safety_preflight", {})
+                self.assertEqual(unsafe.status, "ok", unsafe.to_dict())
+                self.assertEqual(unsafe.data["readiness"], "blocked")
+                statuses = {check["status"] for check in unsafe.data["checks"]}
+                self.assertIn("fail", statuses)
+                self.assertIn("warn", statuses)
+                serialized = json.dumps(unsafe.to_dict()) + Path(unsafe.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertNotIn("supersecret", serialized)
+            finally:
+                unsafe_runtime.close()
+                if old_token is None:
+                    os.environ.pop("PHOBOS_PREFLIGHT_TOKEN", None)
+                else:
+                    os.environ["PHOBOS_PREFLIGHT_TOKEN"] = old_token
+
     def test_memory_assess_run_approval_jobs_and_subagents(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)

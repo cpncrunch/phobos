@@ -170,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     auth_status = sub.add_parser("auth-status", help="Check configured auth/token environment variables without revealing values")
     auth_status.add_argument("--engagement", required=True)
 
+    preflight = sub.add_parser("preflight", help="Run a read-only Phobos safety/runtime readiness preflight")
+    preflight.add_argument("--engagement", required=True)
+    preflight.add_argument("--out", help="Optional Markdown output path under the engagement agent/preflight artifacts directory")
+
     export_pack = sub.add_parser("export-pack", help="Create a redacted engagement pack ZIP")
     export_pack.add_argument("--engagement", required=True)
     export_pack.add_argument("--out")
@@ -392,6 +396,11 @@ def main(argv: list[str] | None = None) -> int:
             result = runtime.registry.run("auth_status", {})
             print(json.dumps(result.to_dict(), indent=2))
             return 0
+        if args.subcommand == "preflight":
+            tool_args = {"out": args.out} if args.out else {}
+            result = runtime.registry.run("safety_preflight", tool_args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
         if args.subcommand == "export-pack":
             tool_args = {"out": args.out} if args.out else {}
             result = runtime.registry.run("export_pack", tool_args)
