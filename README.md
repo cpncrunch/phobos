@@ -11,7 +11,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
-- **Finding Markdown exporter** — renders confirmed finding JSON into report-ready Markdown with risk metadata, evidence, affected assets, recommendations, evidence health, and candidate/non-reportable handling.
+- **Finding Markdown exporter + QA review** — renders confirmed finding JSON into report-ready Markdown and reviews stored finding records for blocking/advisory evidence gaps before operator/client delivery.
 - **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
@@ -253,6 +253,7 @@ burp/*.redacted.http                 # redacted Burp requests
 ad/bloodhound-analysis.md            # offline AD path review
 cve/*.md                             # CVE coverage notes
 reports/*.md                         # report-ready finding drafts
+agent/findings/*review*.md           # deterministic finding QA/readiness reviews
 agent/processes/*.log                # background process stdout/stderr artifacts
 agent/context-summary-*.md           # compacted session summaries
 agent/context-nodes/*.md             # LCM-style expandable context node summaries
@@ -276,7 +277,9 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-Current verification: 34 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter and lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+The unit suite and smoke include deterministic finding QA review coverage: `/finding-review` writes a redacted Markdown readiness review and distinguishes blocking evidence gaps from advisory improvements without executing target actions.
+
+Current verification: 35 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -294,7 +297,7 @@ This turns the harness into a standalone agent-style application with:
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, audit log, and redacted evidence timeline;
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
-- finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links and Markdown export;
+- finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links, deterministic QA/readiness reviews, and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
 - a configurable Phobos assistant persona (`operator_name`, `assistant_style`) so natural-language replies sound like a concise pentest copilot instead of a raw harness log;
 - non-destructive-by-default command execution;
@@ -375,6 +378,10 @@ phobos-agent --db data/phobos-agent.db once \
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/finding-create title="Exposed administrative interface" severity=Medium status=needs-evidence tool_run_ids=1'
+
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/finding-review id=1'
 
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
@@ -529,7 +536,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 34 tests
+Ran 35 tests
 OK
 ```
 
@@ -551,9 +558,11 @@ natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
+workspace_symlink_escape_block=True
 guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
+finding_review_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -582,7 +591,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=166
+artifact_count=174
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

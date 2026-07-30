@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
                 "create_finding",
                 "list_findings",
                 "finding_export",
+                "finding_review",
                 "evidence_timeline",
             ]
         )
@@ -281,12 +282,16 @@ def main(argv: list[str] | None = None) -> int:
         updated_finding = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Smoke UI screenshot evidence", "append_evidence": True})
         listed_findings = runtime.registry.run("list_findings", {"status": "all"})
         exported_finding = runtime.registry.run("finding_export", {"id": finding_id})
+        reviewed_finding = runtime.registry.run("finding_review", {"id": finding_id})
         write("finding-create.json", json.dumps(created_finding.to_dict(), indent=2))
         write("finding-update.json", json.dumps(updated_finding.to_dict(), indent=2))
         write("findings.json", json.dumps(listed_findings.to_dict(), indent=2))
         write("finding-export.json", json.dumps(exported_finding.to_dict(), indent=2))
+        write("finding-review.json", json.dumps(reviewed_finding.to_dict(), indent=2))
         finding_markdown = Path(exported_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if exported_finding.artifacts.get("markdown") else ""
+        finding_review_markdown = Path(reviewed_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if reviewed_finding.artifacts.get("markdown") else ""
         checks["finding_lifecycle_ok"] = created_finding.status == "ok" and updated_finding.data["finding"]["status"] == "confirmed" and "Exposed administrative interface" in json.dumps(listed_findings.to_dict()) and "Tool run" in finding_markdown
+        checks["finding_review_ok"] = reviewed_finding.status == "ok" and reviewed_finding.data["review"]["readiness"] in {"ready_with_advisories", "ready_for_operator_review"} and "Phobos Finding Review" in finding_review_markdown and "supersecret" not in json.dumps(reviewed_finding.to_dict()) and "supersecret" not in finding_review_markdown
 
         started = runtime.registry.run(
             "start_process",

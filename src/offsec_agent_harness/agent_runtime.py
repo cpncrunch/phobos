@@ -291,6 +291,8 @@ class OffSecAgentRuntime:
             "finding-update": "update_finding",
             "finding-get": "get_finding",
             "finding-export": "finding_export",
+            "finding-review": "finding_review",
+            "finding-qa": "finding_review",
             "remember": "remember",
             "recall": "recall",
             "search": "search_session",
@@ -549,7 +551,7 @@ def _render_tools_chat(runtime: OffSecAgentRuntime) -> str:
         "- `/status` — engagement, scope, approvals, tasks, findings.",
         "- `/nmap target=<host> ports=80,443 execute=false` — safe service-enum wrapper.",
         "- `/httpx url=<url> execute=false` / `/nuclei url=<url> template=<path> execute=false` — web evidence wrappers.",
-        "- `/finding-create ...` and `/findings status=all` — finding lifecycle.",
+        "- `/finding-create ...`, `/finding-review id=<id>`, and `/findings status=all` — finding lifecycle and QA.",
         "- `/timeline` — redacted evidence/action timeline for handoff and report reconstruction.",
         "- `/briefing` — operator handoff with tasks, approvals, evidence, and context.",
         "- `/approvals` — pending confirm-gated actions.",
@@ -818,6 +820,7 @@ HELP_TEXT = """Phobos Agent commands:
 /finding-update id=<finding-id> status=confirmed append_evidence=true
 /finding-get id=<finding-id>
 /finding-export id=<finding-id> out=<optional.md>
+/finding-review id=<finding-id> out=<optional.md>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20

@@ -10,7 +10,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`. `/timeline` assembles a redacted evidence/action timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable `tool_runs` records and redacted evidence artifacts. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
-- **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, and Markdown exports for report drafting.
+- **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, deterministic QA/readiness reviews, and Markdown exports for report drafting.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
@@ -90,6 +90,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /finding-update id=<finding-id> status=confirmed append_evidence=true
 /finding-get id=<finding-id>
 /finding-export id=<finding-id> out=<optional.md>
+/finding-review id=<finding-id> out=<optional.md>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20
@@ -343,10 +344,14 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
+  --message '/finding-review id=1'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
   --message '/finding-export id=1'
 ```
 
-Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact.
+Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact. `/finding-review` is a deterministic, local-only QA pass: it does not execute target actions, and it writes a Markdown review that separates blocking report-readiness gaps from advisory improvements such as missing negative controls, reproduction notes, or cleanup/side-effect statements.
 
 ## Workspace, process, and context examples
 
@@ -630,7 +635,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 34 tests
+Ran 35 tests
 OK
 ```
 
@@ -654,12 +659,15 @@ db_schema_counts_ok=True
 local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
+natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
+workspace_symlink_escape_block=True
 guardrails_execution_approvals_blocks=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
+finding_review_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -678,6 +686,7 @@ redacted_exports_not_db_encryption_ok=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
+chat_response_polish_ok=True
 bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
@@ -687,7 +696,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=166
+artifact_count=174
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -765,6 +774,7 @@ finding-create.json
 finding-update.json
 findings.json
 finding-export.json
+finding-review.json
 operator-briefing.json
 pack-export.json
 plugin-echo.txt

@@ -162,6 +162,7 @@ class OffSecToolRegistry:
         self.register_tool("list_findings", self.list_findings, _spec("list_findings", "List finding lifecycle records.", {"status": _string("draft/confirmed/resolved/all; default all."), "limit": {"type": "integer"}}, []))
         self.register_tool("get_finding", self.get_finding, _spec("get_finding", "Get one finding lifecycle record by id.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("finding_export", self.finding_export, _spec("finding_export", "Export a stored finding lifecycle record to report-ready Markdown.", {"id": {"type": "integer"}, "out": _string("Optional output path; relative paths go under agent/findings.")}, ["id"]))
+        self.register_tool("finding_review", self.finding_review, _spec("finding_review", "Deterministically review a stored finding for report-readiness gaps without executing target actions.", {"id": {"type": "integer"}, "out": _string("Optional Markdown output path; relative paths go under agent/findings.")}, ["id"]))
         self.register_tool("remember", self.remember, _spec("remember", "Store local agent memory in SQLite.", {"key": _string("Memory key."), "value": _string("Memory value."), "tags": _string("Optional comma tags.")}, ["key", "value"]))
         self.register_tool("recall", self.recall, _spec("recall", "Search local agent memory.", {"query": _string("Memory search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("search_session", self.search_session, _spec("search_session", "Search current-session messages.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
@@ -606,6 +607,110 @@ class OffSecToolRegistry:
             out = self.harness.store.root / "agent" / "findings" / f"finding-{finding['id']}-{safe_report_filename(finding['title'])}.md"
         path = FindingMarkdownExporter().write_finding(report, out)
         return ToolResult("ok", f"Finding #{finding['id']} exported: {path}", {"finding": _redacted_mapping(finding), "path": str(path)}, {"markdown": str(path)})
+
+    def finding_review(self, args: dict[str, Any]) -> ToolResult:
+        """Review a stored finding for operator/report-readiness without target activity."""
+
+        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        if not finding:
+            return ToolResult("error", "Finding not found.")
+        review = self._build_finding_review(finding)
+        out_arg = str(args.get("out") or "").strip()
+        if out_arg:
+            out = Path(out_arg)
+            if not out.is_absolute():
+                out = self.harness.store.root / "agent" / "findings" / out
+        else:
+            out = self.harness.store.root / "agent" / "findings" / f"finding-{finding['id']}-review-{safe_report_filename(finding['title'])}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        markdown = _finding_review_markdown(finding, review)
+        out.write_text(markdown, encoding="utf-8")
+        self.store.audit(self.session_id, "finding_reviewed", {"id": finding["id"], "readiness": review["readiness"], "blocking_gaps": len(review["blocking_gaps"]), "advisory_gaps": len(review["advisory_gaps"])})
+        return ToolResult("ok", f"Finding #{finding['id']} review: {review['readiness']}.", {"finding": _redacted_mapping(finding), "review": review}, {"markdown": str(out)})
+
+    def _build_finding_review(self, finding: dict[str, Any]) -> dict[str, Any]:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+        status = str(finding.get("status") or "draft")
+        linked_runs: list[dict[str, Any]] = []
+        artifact_refs: list[dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
+
+        def add_check(name: str, passed: bool, severity: str, detail: str) -> None:
+            checks.append({"name": name, "passed": bool(passed), "severity": severity, "detail": redact_secrets(detail)})
+
+        report_ready_status = status in {"confirmed", "resolved", "accepted-risk"}
+        add_check("Lifecycle status is operator-confirmed", report_ready_status, "blocking", f"Current status: {status}")
+        for field_name, label in (("description", "technical description"), ("impact", "impact statement"), ("recommendation", "remediation guidance")):
+            value = str(finding.get(field_name) or "").strip()
+            add_check(f"Finding has {label}", len(value) >= 20, "blocking", f"{field_name} length: {len(value)}")
+
+        add_check("At least one evidence reference is linked", bool(evidence), "blocking", f"Evidence references: {len(evidence)}")
+        evidence_text = redact_secrets(json.dumps(evidence, sort_keys=True, default=str)) or ""
+        target_refs: set[str] = set()
+        missing_artifacts = 0
+        existing_artifacts = 0
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            for key in ("target", "affected_asset", "url", "matched_at"):
+                if item.get(key):
+                    target_refs.add(str(item.get(key)))
+            if item.get("type") == "tool_run" and item.get("id"):
+                run = self.store.get_tool_run(int(item.get("id")))
+                if run:
+                    redacted_run = _redacted_mapping(run)
+                    linked_runs.append(redacted_run)
+                    if run.get("target"):
+                        target_refs.add(str(run.get("target")))
+                    artifact_path = str(run.get("artifact_path") or "")
+                    artifact_status = _artifact_status(artifact_path)
+                    if artifact_status["exists"]:
+                        existing_artifacts += 1
+                    elif artifact_path:
+                        missing_artifacts += 1
+                    artifact_refs.append({"source": f"tool_run:{run['id']}", "path": artifact_path, **artifact_status})
+                else:
+                    missing_artifacts += 1
+                    artifact_refs.append({"source": f"tool_run:{item.get('id')}", "path": "", "exists": False, "note": "linked tool run not found"})
+            for key in ("artifact_path", "path", "file"):
+                if item.get(key):
+                    artifact_path = str(item.get(key) or "")
+                    artifact_status = _artifact_status(artifact_path, root=self.harness.store.root)
+                    if artifact_status["exists"]:
+                        existing_artifacts += 1
+                    else:
+                        missing_artifacts += 1
+                    artifact_refs.append({"source": key, "path": artifact_path, **artifact_status})
+        add_check("Linked evidence artifacts are present", existing_artifacts > 0 or (bool(evidence) and not artifact_refs), "blocking" if missing_artifacts else "advisory", f"Existing artifacts: {existing_artifacts}; missing artifacts: {missing_artifacts}")
+        add_check("Affected asset/target is explicit", bool(target_refs), "blocking", f"Targets/assets: {', '.join(sorted(target_refs)) or 'none'}")
+
+        lower_blob = "\n".join([evidence_text, str(finding.get("description") or ""), str(finding.get("impact") or ""), str(finding.get("recommendation") or "")]).lower()
+        add_check("Negative control or baseline is referenced", any(token in lower_blob for token in ("negative control", "baseline", "control request", "control account", "known-good")), "advisory", "Look for a scoped negative control proving the issue is not expected behaviour.")
+        add_check("Reproduction material is referenced", any(token in lower_blob for token in ("repro", "step", "request", "response", "curl", "http")), "advisory", "Look for replayable request/response or step evidence.")
+        add_check("Side effects / cleanup are addressed", any(token in lower_blob for token in ("no state change", "read-only", "cleanup", "reversible", "no side effects", "side effect")), "advisory", "Document whether validation changed state and any cleanup performed.")
+
+        blocking_gaps = [check["detail"] for check in checks if check["severity"] == "blocking" and not check["passed"]]
+        advisory_gaps = [check["detail"] for check in checks if check["severity"] == "advisory" and not check["passed"]]
+        if blocking_gaps:
+            readiness = "needs_evidence"
+        elif advisory_gaps:
+            readiness = "ready_with_advisories"
+        else:
+            readiness = "ready_for_operator_review"
+        passed = len([check for check in checks if check["passed"]])
+        score = {"passed": passed, "total": len(checks), "percent": round((passed / len(checks)) * 100, 1) if checks else 0.0}
+        recommendations = _finding_review_recommendations(blocking_gaps, advisory_gaps, status)
+        return _redacted_mapping({
+            "readiness": readiness,
+            "score": score,
+            "checks": checks,
+            "blocking_gaps": blocking_gaps,
+            "advisory_gaps": advisory_gaps,
+            "linked_tool_runs": linked_runs,
+            "artifact_refs": artifact_refs,
+            "affected_assets": sorted(target_refs),
+            "recommendations": recommendations,
+        })
 
     def _finding_evidence_from_args(self, args: dict[str, Any]) -> list[dict[str, Any]]:
         evidence = _parse_evidence_arg(args.get("evidence"))
@@ -1774,6 +1879,88 @@ def _finding_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         else:
             lines.append(redact_secrets(json.dumps(item, sort_keys=True)))
     return lines
+
+
+def _artifact_status(path_value: str, root: Path | None = None) -> dict[str, Any]:
+    if not path_value:
+        return {"exists": False, "resolved": "", "note": "no artifact path recorded"}
+    try:
+        candidate = Path(path_value).expanduser()
+        if not candidate.is_absolute() and root is not None:
+            candidate = root / candidate
+        exists = candidate.exists()
+        resolved = str(candidate.resolve()) if exists else str(candidate)
+        return {"exists": bool(exists), "resolved": redact_secrets(resolved)}
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"exists": False, "resolved": redact_secrets(path_value), "note": f"artifact path check failed: {exc}"}
+
+
+def _finding_review_recommendations(blocking_gaps: list[str], advisory_gaps: list[str], status: str) -> list[str]:
+    recommendations: list[str] = []
+    if status not in {"confirmed", "resolved", "accepted-risk"}:
+        recommendations.append("Keep the finding internal/candidate until the operator confirms impact and evidence quality.")
+    for gap in blocking_gaps[:8]:
+        recommendations.append(f"Close blocking gap: {gap}")
+    for gap in advisory_gaps[:5]:
+        recommendations.append(f"Improve evidence package: {gap}")
+    if not recommendations:
+        recommendations.append("Finding looks ready for operator QA; run /finding-export after final severity and wording review.")
+    return [redact_secrets(item) or "" for item in recommendations if item]
+
+
+def _finding_review_markdown(finding: dict[str, Any], review: dict[str, Any]) -> str:
+    raw_score = review.get("score")
+    score: dict[str, Any] = raw_score if isinstance(raw_score, dict) else {}
+    lines = [
+        "# Phobos Finding Review",
+        "",
+        f"Generated: {utc_now()}",
+        f"Finding: #{finding.get('id')} {redact_secrets(str(finding.get('title') or ''))}",
+        f"Severity: {redact_secrets(str(finding.get('severity') or ''))}",
+        f"Lifecycle status: {redact_secrets(str(finding.get('status') or ''))}",
+        f"Readiness: `{redact_secrets(str(review.get('readiness') or 'unknown'))}`",
+        f"Checklist score: {score.get('passed', 0)}/{score.get('total', 0)} ({score.get('percent', 0)}%)",
+        "",
+        "## Blocking gaps",
+        "",
+    ]
+    blocking = review.get("blocking_gaps") if isinstance(review.get("blocking_gaps"), list) else []
+    if blocking:
+        lines.extend(f"- {redact_secrets(str(gap))}" for gap in blocking)
+    else:
+        lines.append("- None identified.")
+    lines += ["", "## Advisory improvements", ""]
+    advisories = review.get("advisory_gaps") if isinstance(review.get("advisory_gaps"), list) else []
+    if advisories:
+        lines.extend(f"- {redact_secrets(str(gap))}" for gap in advisories)
+    else:
+        lines.append("- None identified.")
+    lines += ["", "## Checklist", "", "| Check | Result | Severity | Detail |", "|---|---|---|---|"]
+    checks = review.get("checks") if isinstance(review.get("checks"), list) else []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        result = "PASS" if check.get("passed") else "GAP"
+        lines.append("| " + " | ".join(_md_cell(value) for value in [check.get("name"), result, check.get("severity"), check.get("detail")]) + " |")
+    lines += ["", "## Linked tool runs", "", "| ID | Tool | Target | Status | Artifact |", "|---|---|---|---|---|"]
+    linked = review.get("linked_tool_runs") if isinstance(review.get("linked_tool_runs"), list) else []
+    if linked:
+        for run in linked:
+            if not isinstance(run, dict):
+                continue
+            lines.append("| " + " | ".join(_md_cell(value) for value in [run.get("id"), run.get("tool_name"), run.get("target"), run.get("status"), run.get("artifact_path")]) + " |")
+    else:
+        lines.append("| | | | | No linked tool runs. |")
+    lines += ["", "## Evidence references", ""]
+    evidence_lines = _finding_evidence_lines(finding.get("evidence") if isinstance(finding.get("evidence"), list) else [])
+    if evidence_lines:
+        lines.extend(f"- {redact_secrets(line)}" for line in evidence_lines)
+    else:
+        lines.append("- No evidence references recorded.")
+    lines += ["", "## Recommendations", ""]
+    for item in review.get("recommendations", []) if isinstance(review.get("recommendations"), list) else []:
+        lines.append(f"- {redact_secrets(str(item))}")
+    return redact_secrets("\n".join(lines) + "\n") or ""
 
 
 def _request_from_args(args: dict[str, Any]) -> ActionRequest:
