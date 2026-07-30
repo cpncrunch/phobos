@@ -171,6 +171,58 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_job_controls_are_session_bound_redacted_and_disable_due_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                runtime.handle_message('/remember key=job-marker value="ACME scheduled job marker" tags=engagement')
+                scheduled = runtime.registry.run("schedule_job", {"name": "daily", "schedule": "manual", "prompt": "/recall query=job-marker"})
+                job_id = int(scheduled.data["job_id"])
+                due = runtime.run_due_jobs()
+                self.assertEqual(len(due), 1)
+                self.assertEqual(due[0]["job_id"], job_id)
+                self.assertIn("ACME scheduled job marker", due[0]["response"])
+
+                detail = runtime.registry.run("get_job", {"id": job_id})
+                self.assertEqual(detail.status, "ok", detail.to_dict())
+                self.assertIn("last_result", detail.data["job"])
+                updated = runtime.registry.run(
+                    "update_job",
+                    {"id": job_id, "name": "daily token=supersecret", "prompt": "/recall query=job-marker token=supersecret", "enabled": False},
+                )
+                disabled_due = runtime.run_due_jobs()
+                listed = runtime.registry.run("list_jobs", {})
+                serialized = json.dumps({"updated": updated.to_dict(), "listed": listed.to_dict()})
+                self.assertEqual(updated.status, "ok", updated.to_dict())
+                self.assertFalse(updated.data["job"]["enabled"])
+                self.assertEqual(disabled_due, [])
+                self.assertIn("token=<REDACTED>", serialized)
+                self.assertNotIn("supersecret", serialized)
+                self.assertTrue(listed.data["secret_values_redacted"])
+
+                reenabled = runtime.registry.run("enable_job", {"id": job_id})
+                disabled = runtime.registry.run("disable_job", {"id": job_id})
+                self.assertTrue(reenabled.data["job"]["enabled"])
+                self.assertFalse(disabled.data["job"]["enabled"])
+
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="job-other"))
+                try:
+                    other_job = other_runtime.registry.run("schedule_job", {"name": "other token=supersecret", "schedule": "manual", "prompt": "/status token=supersecret"})
+                    other_job_id = int(other_job.data["job_id"])
+                    cross_detail = runtime.registry.run("get_job", {"id": other_job_id})
+                    cross_disable = runtime.registry.run("disable_job", {"id": other_job_id})
+                    owner_detail = other_runtime.registry.run("get_job", {"id": other_job_id})
+                    cross_blob = json.dumps({"detail": cross_detail.to_dict(), "disable": cross_disable.to_dict()})
+                    self.assertEqual(cross_detail.status, "error")
+                    self.assertEqual(cross_disable.status, "error")
+                    self.assertIn("not found in this session", cross_blob)
+                    self.assertNotIn("supersecret", cross_blob)
+                    self.assertTrue(owner_detail.data["job"]["enabled"])
+                finally:
+                    other_runtime.close()
+            finally:
+                runtime.close()
+
     def test_natural_language_fallback_records_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
@@ -1556,7 +1608,8 @@ PORT    STATE SERVICE VERSION
                     gateway_status = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(gateway_status["status"], "ok")
 
-                runtime.registry.run("schedule_job", {"name": "gateway-job", "prompt": "/status", "schedule": "manual"})
+                gateway_job = runtime.registry.run("schedule_job", {"name": "gateway-job", "prompt": "/status", "schedule": "manual"})
+                gateway_job_id = gateway_job.data["job_id"]
                 media_src = tmp_path / "gateway-proof.txt"
                 media_src.write_text("gateway media marker", encoding="utf-8")
                 gateway_media = runtime.registry.run("media_import", {"path": str(media_src)})
@@ -1572,6 +1625,7 @@ PORT    STATE SERVICE VERSION
                     ("/routes", "/schemas"),
                     ("/schemas?name=start_process", "start_process"),
                     ("/jobs", "gateway-job"),
+                    (f"/job-detail?id={gateway_job_id}", "gateway-job"),
                     ("/processes", "gateway route process"),
                     ("/timeline?include_audit=false", "gateway route process"),
                     ("/manifest-verify?path=gateway-manifest.json&detect_new=false", "verification_status"),

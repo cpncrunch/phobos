@@ -107,8 +107,9 @@ class OffSecAgentRuntime:
         results = []
         for job in self.store.due_jobs(self.session_id):
             response = self.handle_message(job.prompt)
-            self.store.mark_job_run(job.id, response)
-            results.append({"job_id": job.id, "name": job.name, "response": response})
+            redacted_response = redact_secrets(response) or ""
+            self.store.mark_job_run(job.id, redacted_response, session_id=self.session_id)
+            results.append({"job_id": job.id, "name": redact_secrets(job.name), "response": redacted_response})
         return results
 
     def chat_loop(self) -> None:  # pragma: no cover - interactive convenience
@@ -328,6 +329,12 @@ class OffSecAgentRuntime:
             "workspace-patch": "workspace_patch",
             "job": "schedule_job",
             "jobs": "list_jobs",
+            "job-list": "list_jobs",
+            "job-detail": "get_job",
+            "job-get": "get_job",
+            "job-update": "update_job",
+            "job-enable": "enable_job",
+            "job-disable": "disable_job",
             "approvals": "list_approvals",
             "approval": "get_approval",
             "approval-get": "get_approval",
@@ -910,6 +917,11 @@ HELP_TEXT = """Phobos Agent commands:
 /sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
 /sealed-import path=<sealed.json> passphrase_env=<ENV_NAME>
 /job name=<name> schedule="every 1 h" prompt=<agent prompt>
+/jobs
+/job-detail id=<job-id>
+/job-update id=<job-id> enabled=false schedule=<optional> prompt=<optional>
+/job-enable id=<job-id>
+/job-disable id=<job-id>
 /run-due
 /status
 /briefing query=<optional> out=<optional.md>

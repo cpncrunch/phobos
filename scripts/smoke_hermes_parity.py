@@ -158,6 +158,9 @@ def main(argv: list[str] | None = None) -> int:
                 "lcm_compact",
                 "wait_process",
                 "add_task",
+                "get_job",
+                "update_job",
+                "disable_job",
                 "example_echo",
                 "nmap_scan",
                 "httpx_probe",
@@ -406,8 +409,52 @@ def main(argv: list[str] | None = None) -> int:
         job = handle("job", '/job name=memory-check schedule=manual prompt="/recall query=smoke-client"')
         due = runtime.run_due_jobs()
         write("run-due.json", json.dumps(due, indent=2))
+        job_id = int(due[0]["job_id"]) if due else 0
+        job_detail = runtime.registry.run("get_job", {"id": job_id})
+        job_update = runtime.registry.run("update_job", {"id": job_id, "name": "memory-check token=supersecret", "prompt": "/recall query=smoke-client token=supersecret", "enabled": False})
+        disabled_due = runtime.run_due_jobs()
+        job_enable = runtime.registry.run("enable_job", {"id": job_id})
+        job_disable = runtime.registry.run("disable_job", {"id": job_id})
+        job_list = runtime.registry.run("list_jobs", {})
+        other_job_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-job-smoke"))
+        try:
+            other_job = other_job_runtime.registry.run("schedule_job", {"name": "Other job token=supersecret", "prompt": "/status token=supersecret", "schedule": "manual"})
+            other_job_id = int(other_job.data.get("job_id", 0)) if other_job.data.get("job_id") else 0
+            cross_job_detail = runtime.registry.run("get_job", {"id": other_job_id})
+            cross_job_disable = runtime.registry.run("disable_job", {"id": other_job_id})
+            owner_job_detail = other_job_runtime.registry.run("get_job", {"id": other_job_id})
+        finally:
+            other_job_runtime.close()
+        job_control_results = {
+            "detail": job_detail.to_dict(),
+            "update": job_update.to_dict(),
+            "enable": job_enable.to_dict(),
+            "disable": job_disable.to_dict(),
+            "list": job_list.to_dict(),
+            "disabled_due": disabled_due,
+            "cross_detail": cross_job_detail.to_dict(),
+            "cross_disable": cross_job_disable.to_dict(),
+            "owner_detail": owner_job_detail.to_dict(),
+        }
+        write("job-controls.json", json.dumps(job_control_results, indent=2))
         review = handle("subagents", '/subagents prompt="Review controlled IDOR evidence" roles=scope,safety,report')
         checks["jobs_and_subagents"] = "Scheduled job" in job and due and "ACME parity" in due[0]["response"] and "Subagent review complete" in review
+        checks["job_controls_session_bound_redacted_ok"] = (
+            job_detail.status == "ok"
+            and job_update.status == "ok"
+            and job_update.data.get("job", {}).get("enabled") is False
+            and disabled_due == []
+            and job_enable.data.get("job", {}).get("enabled") is True
+            and job_disable.data.get("job", {}).get("enabled") is False
+            and job_list.data.get("secret_values_redacted") is True
+            and cross_job_detail.status == "error"
+            and cross_job_disable.status == "error"
+            and "not found in this session" in json.dumps(job_control_results)
+            and owner_job_detail.status == "ok"
+            and owner_job_detail.data.get("job", {}).get("enabled") is True
+            and "supersecret" not in json.dumps(job_control_results)
+            and "token=<REDACTED>" in json.dumps(job_control_results)
+        )
 
         add_task = handle("task-add", '/task-add content="Review parity smoke token=supersecret" status=pending')
         update_task = handle("task-update", "/task-update id=1 status=completed")
@@ -825,7 +872,8 @@ def main(argv: list[str] | None = None) -> int:
         tool_run_route = f"/tool-run?id={nmap_structured.data['run_id']}"
         delegation_route = f"/delegation?id={delegation_id}"
         media_detail_route = f"/media-detail?id={media_id}"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        job_route = f"/job?id={job_id}"
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -896,11 +944,12 @@ def main(argv: list[str] | None = None) -> int:
         approval_route = gateway_gets.get("/approval?id=1") or {}
         finding_route_payload = gateway_gets.get(finding_route) or {}
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
+        job_route_payload = gateway_gets.get(job_route) or {}
         delegation_route_payload = gateway_gets.get(delegation_route) or {}
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(job_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

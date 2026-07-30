@@ -20,7 +20,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts.
-- **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; run via `phobos-agent run-due` or external cron.
+- **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; redacted session-bound detail/update/enable/disable controls; run via `phobos-agent run-due` or external cron.
 - **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail views, per-task artifacts, and child session records by default.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
@@ -104,6 +104,11 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
 /sealed-import path=<sealed.json> passphrase_env=<ENV_NAME>
 /job name=<name> schedule="every 1 h" prompt=<agent prompt>
+/jobs
+/job-detail id=<job-id>
+/job-update id=<job-id> enabled=false schedule=<optional> prompt=<optional>
+/job-enable id=<job-id>
+/job-disable id=<job-id>
 /run-due
 /status
 /briefing query=<optional> out=<optional.md>
@@ -428,10 +433,23 @@ phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/job name=memory-check schedule=manual prompt="/recall query=client"'
 
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/job-detail id=1'
+
+# Pause automation without deleting job history or last-run metadata.
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/job-disable id=1'
+
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/job-enable id=1'
+
 phobos-agent --db data/phobos-agent.db run-due --engagement engagement.json
 ```
 
-For recurring use, run `phobos-agent run-due` from cron/systemd/Task Scheduler. The agent itself keeps job state in SQLite.
+For recurring use, run `phobos-agent run-due` from cron/systemd/Task Scheduler. The agent keeps job state in SQLite, lists/detail views are session-bound and redacted, and disabled jobs are skipped by `run-due` until re-enabled.
 
 ## Task board, skills, briefing, and handoff
 
@@ -611,6 +629,8 @@ GET  /tool-runs
 GET  /tool-run?id=<tool-run-id>
 GET  /tool-run-detail?run_id=<tool-run-id>
 GET  /jobs
+GET  /job?id=<job-id>
+GET  /job-detail?id=<job-id>
 GET  /processes
 GET  /approvals
 GET  /approval?id=<approval-id>

@@ -206,6 +206,14 @@ class AgentGateway:
                     if path == "/jobs":
                         _write_json(self, runtime.registry.run("list_jobs", {}).to_dict())
                         return
+                    if path in {"/job", "/job-detail"}:
+                        query = parse_qs(parsed.query)
+                        job_id = (query.get("id") or query.get("job_id") or [""])[0]
+                        if not job_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_job", {"id": job_id}).to_dict())
+                        return
                     if path == "/processes":
                         _write_json(self, runtime.registry.run("list_processes", {}).to_dict())
                         return
@@ -347,6 +355,8 @@ def _gateway_paths() -> list[str]:
         "/tool-run",
         "/tool-run-detail",
         "/jobs",
+        "/job",
+        "/job-detail",
         "/processes",
         "/approvals",
         "/approval",
@@ -764,6 +774,7 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     delegations = runtime.store.list_delegations(runtime.session_id, limit=8)
     findings = runtime.store.list_findings(runtime.session_id, status="all", limit=8)
     tool_runs = runtime.store.list_tool_runs(runtime.session_id, limit=8)
+    jobs = runtime.registry.run("list_jobs", {}).data.get("jobs", [])
     guardrails = _guardrail_policy(runtime)
     engagement_policy = guardrails["engagement"]
     runtime_policy = guardrails["runtime_policy"]
@@ -775,6 +786,7 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     delegation_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(str(item.get('prompt', ''))[:160])}</li>" for item in delegations) or "<li>No delegations yet.</li>"
     finding_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(item['severity'])} — {html.escape(item['title'])}</li>" for item in findings) or "<li>No findings yet.</li>"
     tool_run_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['tool_name'])}</code> {html.escape(item['status'])} — {html.escape(item['target'])}</li>" for item in tool_runs) or "<li>No structured tool runs yet.</li>"
+    job_items = "\n".join(f"<li>#{item.get('id')} <code>{'enabled' if item.get('enabled') else 'disabled'}</code> {html.escape(str(item.get('schedule', '')))} — {html.escape(str(item.get('name', ''))[:140])}</li>" for item in jobs[:8]) or "<li>No scheduled jobs yet.</li>"
     api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/tool", "/finding", "/guardrails", "/approve", "/deny", "/run-due"})
     safety_non_destructive_selected = "selected" if str(runtime.roe.safety_mode) == "non_destructive" else ""
     safety_standard_selected = "selected" if str(runtime.roe.safety_mode) == "standard" else ""
@@ -811,6 +823,7 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     <section><h2>Task Board</h2><ul>{task_items}</ul></section>
     <section><h2>Findings</h2><ul>{finding_items}</ul></section>
     <section><h2>Structured Tool Runs</h2><ul>{tool_run_items}</ul></section>
+    <section><h2>Scheduled Jobs</h2><ul>{job_items}</ul></section>
     <section><h2>Pending Approvals</h2><ul>{approval_items}</ul></section>
     <section><h2>Media / Voice Artifacts</h2><ul>{media_items}</ul></section>
     <section><h2>Local Delegations</h2><ul>{delegation_items}</ul></section>

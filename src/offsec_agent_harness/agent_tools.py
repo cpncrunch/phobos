@@ -187,8 +187,12 @@ class OffSecToolRegistry:
         self.register_tool("workspace_search", self.workspace_search, _spec("workspace_search", "Search text files inside the engagement workspace.", {"query": _string("Substring/regex query."), "glob": _string("Glob like **/*.md."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("workspace_patch", self.workspace_patch, _spec("workspace_patch", "Targeted text replacement inside a workspace file.", {"path": _string("Workspace-relative path."), "old": _string("Text to replace."), "new": _string("Replacement text."), "replace_all": {"type": "boolean"}}, ["path", "old", "new"]))
         self.register_tool("schedule_job", self.schedule_job, _spec("schedule_job", "Create a local scheduled job; run with run_due_jobs or external cron.", {"name": _string("Job name."), "schedule": _string("manual/every 15 m/every 1 h."), "prompt": _string("Agent prompt to run.")}))
-        self.register_tool("list_jobs", self.list_jobs, _spec("list_jobs", "List scheduled jobs.", {}))
-        self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due jobs from tool-only context; runtime executes them.", {}))
+        self.register_tool("list_jobs", self.list_jobs, _spec("list_jobs", "List scheduled jobs for the current session with redacted prompts/results.", {}))
+        self.register_tool("get_job", self.get_job, _spec("get_job", "Get one current-session scheduled job by id with redacted prompt/result detail.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("update_job", self.update_job, _spec("update_job", "Update a current-session scheduled job name, schedule, prompt, or enabled flag.", {"id": {"type": "integer"}, "name": _string("Optional replacement job name."), "schedule": _string("Optional schedule: manual/every 15 m/every 1 h."), "prompt": _string("Optional replacement agent prompt."), "enabled": {"type": "boolean"}}, ["id"]))
+        self.register_tool("enable_job", self.enable_job, _spec("enable_job", "Enable a current-session scheduled job without changing its prompt.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("disable_job", self.disable_job, _spec("disable_job", "Disable a current-session scheduled job without deleting audit history.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due current-session jobs from tool-only context; runtime executes them.", {}))
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
         self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted."), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
@@ -957,12 +961,64 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Scheduled job {job_id}.", {"job_id": job_id})
 
     def list_jobs(self, args: dict[str, Any]) -> ToolResult:
-        jobs = [asdict(job) for job in self.store.list_jobs(self.session_id)]
-        return ToolResult("ok", f"Found {len(jobs)} jobs.", {"jobs": jobs})
+        jobs = [_redacted_mapping(asdict(job)) for job in self.store.list_jobs(self.session_id)]
+        return ToolResult("ok", f"Found {len(jobs)} jobs.", {"jobs": jobs, "secret_values_redacted": True})
+
+    def get_job(self, args: dict[str, Any]) -> ToolResult:
+        job_raw = args.get("id") or args.get("job_id")
+        if job_raw is None:
+            return ToolResult("error", "Job id is required.")
+        job_id = int(job_raw)
+        job = self.store.get_job(job_id, session_id=self.session_id)
+        if not job:
+            return ToolResult("error", f"Job {job_id} not found in this session.")
+        return ToolResult("ok", f"Job {job_id} returned.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
+
+    def update_job(self, args: dict[str, Any]) -> ToolResult:
+        job_raw = args.get("id") or args.get("job_id")
+        if job_raw is None:
+            return ToolResult("error", "Job id is required.")
+        job_id = int(job_raw)
+        updates: dict[str, Any] = {}
+        if "name" in args:
+            updates["name"] = str(args.get("name") or "")
+        if "schedule" in args:
+            updates["schedule"] = str(args.get("schedule") or "manual")
+        if "prompt" in args:
+            updates["prompt"] = str(args.get("prompt") or "")
+        if "enabled" in args:
+            updates["enabled"] = _truthy_bool(args.get("enabled"), default=True)
+        job = self.store.update_job(job_id, session_id=self.session_id, **updates)
+        if not job:
+            return ToolResult("error", f"Job {job_id} not found in this session.")
+        self.store.audit(self.session_id, "job_updated", {"id": job_id, "updates": _safe_json(updates)})
+        return ToolResult("ok", f"Job {job_id} updated.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
+
+    def enable_job(self, args: dict[str, Any]) -> ToolResult:
+        job_raw = args.get("id") or args.get("job_id")
+        if job_raw is None:
+            return ToolResult("error", "Job id is required.")
+        job_id = int(job_raw)
+        job = self.store.update_job(job_id, session_id=self.session_id, enabled=True)
+        if not job:
+            return ToolResult("error", f"Job {job_id} not found in this session.")
+        self.store.audit(self.session_id, "job_enabled", {"id": job_id})
+        return ToolResult("ok", f"Job {job_id} enabled.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
+
+    def disable_job(self, args: dict[str, Any]) -> ToolResult:
+        job_raw = args.get("id") or args.get("job_id")
+        if job_raw is None:
+            return ToolResult("error", "Job id is required.")
+        job_id = int(job_raw)
+        job = self.store.update_job(job_id, session_id=self.session_id, enabled=False)
+        if not job:
+            return ToolResult("error", f"Job {job_id} not found in this session.")
+        self.store.audit(self.session_id, "job_disabled", {"id": job_id})
+        return ToolResult("ok", f"Job {job_id} disabled.", {"job": _redacted_mapping(asdict(job)), "secret_values_redacted": True})
 
     def run_due_jobs(self, args: dict[str, Any]) -> ToolResult:
-        jobs = [asdict(job) for job in self.store.due_jobs(self.session_id)]
-        return ToolResult("ok", f"{len(jobs)} jobs are due. Use OffSecAgentRuntime.run_due_jobs() to execute them.", {"due_jobs": jobs})
+        jobs = [_redacted_mapping(asdict(job)) for job in self.store.due_jobs(self.session_id)]
+        return ToolResult("ok", f"{len(jobs)} jobs are due. Use OffSecAgentRuntime.run_due_jobs() to execute them.", {"due_jobs": jobs, "secret_values_redacted": True})
 
     def subagent_review(self, args: dict[str, Any]) -> ToolResult:
         prompt = str(args.get("prompt") or args.get("finding") or "")
@@ -2053,7 +2109,7 @@ class OffSecToolRegistry:
             "engagement": self.roe.to_dict(),
             "memories": self.store.recall("", limit=200),
             "pending_approvals": self.store.list_approvals(self.session_id, status="pending"),
-            "jobs": [asdict(job) for job in self.store.list_jobs(self.session_id)],
+            "jobs": [_redacted_mapping(asdict(job)) for job in self.store.list_jobs(self.session_id)],
             "tasks": [_redacted_mapping(row) for row in self.store.list_tasks(self.session_id, status="all", limit=500)],
             "context_nodes": [_redacted_mapping(row) for row in self.store.list_context_nodes(self.session_id, limit=500)],
             "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=200)],
@@ -2106,7 +2162,7 @@ class OffSecToolRegistry:
         tasks = self.store.list_tasks(self.session_id, status="all", limit=100)
         findings = self.store.list_findings(self.session_id, status="all", limit=100)
         approvals = self.store.list_approvals(self.session_id, status="pending")
-        jobs = [asdict(job) for job in self.store.list_jobs(self.session_id)]
+        jobs = [_redacted_mapping(asdict(job)) for job in self.store.list_jobs(self.session_id)]
         processes = self.store.list_processes(self.session_id, limit=20)
         summary = self.store.latest_context_summary(self.session_id)
         recent = self.store.recent_messages(self.session_id, limit=8)
@@ -2208,7 +2264,7 @@ class OffSecToolRegistry:
             "memories": [_redacted_mapping(row) for row in self.store.recall("", limit=500)],
             "tasks": [_redacted_mapping(row) for row in self.store.list_tasks(self.session_id, status="all", limit=500)],
             "pending_approvals": [_redacted_mapping(row) for row in self.store.list_approvals(self.session_id, status="pending")],
-            "jobs": [asdict(job) for job in self.store.list_jobs(self.session_id)],
+            "jobs": [_redacted_mapping(asdict(job)) for job in self.store.list_jobs(self.session_id)],
             "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=500)],
             "media_artifacts": [_redacted_mapping(row) for row in self.store.list_media_artifacts(self.session_id, limit=500)],
             "tool_runs": [_redacted_mapping(row) for row in self.store.list_tool_runs(self.session_id, limit=500)],

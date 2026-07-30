@@ -20,12 +20,15 @@ def utc_now() -> str:
 @dataclass(slots=True)
 class StoredJob:
     id: int
+    session_id: str
     name: str
     schedule: str
     prompt: str
     next_run_at: str
     enabled: bool
+    created_at: str
     last_run_at: str | None = None
+    last_result: str | None = None
 
 
 @dataclass(slots=True)
@@ -881,7 +884,53 @@ class AgentStore:
 
     def list_jobs(self, session_id: str) -> list[StoredJob]:
         rows = self.conn.execute("SELECT * FROM jobs WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
-        return [StoredJob(int(r["id"]), r["name"], r["schedule"], r["prompt"], r["next_run_at"], bool(r["enabled"]), r["last_run_at"]) for r in rows]
+        return [_job_row(row) for row in rows]
+
+    def get_job(self, job_id: int, session_id: str | None = None) -> StoredJob | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM jobs WHERE id=? AND session_id=?", (job_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return _job_row(row) if row else None
+
+    def update_job(
+        self,
+        job_id: int,
+        *,
+        session_id: str | None = None,
+        name: str | None = None,
+        schedule: str | None = None,
+        prompt: str | None = None,
+        enabled: bool | None = None,
+    ) -> StoredJob | None:
+        fields: list[str] = []
+        values: list[Any] = []
+        if name is not None:
+            fields.append("name=?")
+            values.append(name)
+        if schedule is not None:
+            fields.append("schedule=?")
+            values.append(schedule)
+            fields.append("next_run_at=?")
+            values.append(next_run_for_schedule(schedule))
+        if prompt is not None:
+            fields.append("prompt=?")
+            values.append(prompt)
+        if enabled is not None:
+            fields.append("enabled=?")
+            values.append(1 if enabled else 0)
+        if not fields:
+            return self.get_job(job_id, session_id=session_id)
+        where = "id=?"
+        values.append(job_id)
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE {where}", values)
+        self.conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_job(job_id, session_id=session_id)
 
     def due_jobs(self, session_id: str, now: str | None = None) -> list[StoredJob]:
         now = now or utc_now()
@@ -889,16 +938,27 @@ class AgentStore:
             "SELECT * FROM jobs WHERE session_id=? AND enabled=1 AND next_run_at<=? ORDER BY next_run_at, id",
             (session_id, now),
         ).fetchall()
-        return [StoredJob(int(r["id"]), r["name"], r["schedule"], r["prompt"], r["next_run_at"], bool(r["enabled"]), r["last_run_at"]) for r in rows]
+        return [_job_row(row) for row in rows]
 
-    def mark_job_run(self, job_id: int, result: str) -> None:
-        row = self.conn.execute("SELECT schedule FROM jobs WHERE id=?", (job_id,)).fetchone()
-        schedule = row["schedule"] if row else "manual"
+    def mark_job_run(self, job_id: int, result: str, session_id: str | None = None) -> bool:
+        if session_id is not None:
+            row = self.conn.execute("SELECT schedule FROM jobs WHERE id=? AND session_id=?", (job_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT schedule FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return False
+        schedule = row["schedule"]
+        where = "id=?"
+        values: list[Any] = [utc_now(), next_run_for_schedule(schedule), result[-4000:], job_id]
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
         self.conn.execute(
-            "UPDATE jobs SET last_run_at=?, next_run_at=?, last_result=? WHERE id=?",
-            (utc_now(), next_run_for_schedule(schedule), result[-4000:], job_id),
+            f"UPDATE jobs SET last_run_at=?, next_run_at=?, last_result=? WHERE {where}",
+            values,
         )
         self.conn.commit()
+        return True
 
     def create_process(
         self,
@@ -1018,6 +1078,21 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
         "metadata": json.loads(row["metadata_json"] or "{}"),
         "created_at": row["created_at"],
     }
+
+
+def _job_row(row: sqlite3.Row) -> StoredJob:
+    return StoredJob(
+        id=int(row["id"]),
+        session_id=row["session_id"],
+        name=row["name"],
+        schedule=row["schedule"],
+        prompt=row["prompt"],
+        next_run_at=row["next_run_at"],
+        enabled=bool(row["enabled"]),
+        created_at=row["created_at"],
+        last_run_at=row["last_run_at"],
+        last_result=row["last_result"],
+    )
 
 
 def _task_row(row: sqlite3.Row) -> dict[str, Any]:
