@@ -215,8 +215,24 @@ class AgentGateway:
                     if path == "/delegations":
                         _write_json(self, runtime.registry.run("list_delegations", {}).to_dict())
                         return
+                    if path in {"/delegation", "/delegation-detail"}:
+                        query = parse_qs(parsed.query)
+                        delegation_id = (query.get("id") or query.get("delegation_id") or [""])[0]
+                        if not delegation_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_delegation", {"id": delegation_id}).to_dict())
+                        return
                     if path == "/media":
                         _write_json(self, runtime.registry.run("media_list", {}).to_dict())
+                        return
+                    if path in {"/media-detail", "/media-artifact"}:
+                        query = parse_qs(parsed.query)
+                        media_id = (query.get("id") or query.get("media_id") or [""])[0]
+                        if not media_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("media_get", {"id": media_id}).to_dict())
                         return
                     if path == "/auth":
                         _write_json(self, runtime.registry.run("auth_status", {}).to_dict() | {"gateway": _gateway_auth_status(self)})
@@ -336,7 +352,11 @@ def _gateway_paths() -> list[str]:
         "/approval",
         "/approval-detail",
         "/delegations",
+        "/delegation",
+        "/delegation-detail",
         "/media",
+        "/media-detail",
+        "/media-artifact",
         "/auth",
         "/bridges",
         "/guardrails",

@@ -494,11 +494,17 @@ def main(argv: list[str] | None = None) -> int:
 
         delegation = runtime.registry.run("delegate_tasks", {"prompt": "Review smoke parity evidence", "roles": "scope,safety"})
         delegation_list = runtime.registry.run("list_delegations", {})
+        delegation_id = int(delegation.data.get("delegation", {}).get("id", 0)) if delegation.data.get("delegation") else 0
+        delegation_detail = runtime.registry.run("get_delegation", {"id": delegation_id})
+        other_delegation_id = runtime.store.create_delegation("foreign-delegation-smoke", "foreign delegation token=supersecret", [{"role": "scope", "prompt": "foreign delegation token=supersecret"}])
+        runtime.store.complete_delegation(other_delegation_id, "ok", [{"role": "scope", "content": "foreign delegation token=supersecret"}], {})
+        cross_delegation_detail = runtime.registry.run("get_delegation", {"id": other_delegation_id})
         write("delegation.json", json.dumps(delegation.to_dict(), indent=2))
         write("delegations.json", json.dumps(delegation_list.to_dict(), indent=2))
         child_session_ids = [item.get("child_session_id") for item in delegation.data.get("delegation", {}).get("results", [])]
         checks["delegation_batches_ok"] = delegation.status == "ok" and delegation_list.data.get("delegations") and Path(delegation.artifacts.get("summary", "")).exists()
         checks["isolated_delegation_sessions_ok"] = len([sid for sid in child_session_ids if sid]) == 2 and all(sid != runtime.session_id for sid in child_session_ids)
+        checks["delegation_detail_session_bound_ok"] = delegation_detail.status == "ok" and cross_delegation_detail.status == "error" and "not found in this session" in cross_delegation_detail.message and "supersecret" not in json.dumps(cross_delegation_detail.to_dict())
 
         auth = runtime.registry.run("auth_status", {})
         write("auth-status.json", json.dumps(auth.to_dict(), indent=2))
@@ -523,9 +529,14 @@ def main(argv: list[str] | None = None) -> int:
         media_source.write_text("media proof token=supersecret", encoding="utf-8")
         media_import = runtime.registry.run("media_import", {"path": str(media_source)})
         media_list = runtime.registry.run("media_list", {})
+        media_id = int(media_import.data.get("media", {}).get("id", 0)) if media_import.data.get("media") else 0
+        media_detail = runtime.registry.run("media_get", {"id": media_id})
+        other_media_id = runtime.store.create_media_artifact("foreign-media-smoke", "file", "/tmp/foreign-media-token-supersecret.txt", "/tmp/foreign-media-token-supersecret.txt", "text/plain", "0" * 64, 1, {"note": "foreign media token=supersecret"})
+        cross_media_detail = runtime.registry.run("media_get", {"id": other_media_id})
         write("media-import.json", json.dumps(media_import.to_dict(), indent=2))
         write("media-list.json", json.dumps(media_list.to_dict(), indent=2))
         checks["media_artifacts_ok"] = media_import.status == "ok" and media_list.data.get("media") and Path(media_import.artifacts.get("file", "")).exists()
+        checks["media_detail_session_bound_ok"] = media_detail.status == "ok" and media_detail.data.get("media", {}).get("no_file_content_read") is True and cross_media_detail.status == "error" and "not found in this session" in cross_media_detail.message and "supersecret" not in json.dumps(cross_media_detail.to_dict())
 
         timeline = runtime.registry.run("evidence_timeline", {"limit": 300, "include_audit": True})
         write("evidence-timeline.json", json.dumps(timeline.to_dict(), indent=2))
@@ -812,7 +823,10 @@ def main(argv: list[str] | None = None) -> int:
         gateway_gets: dict[str, dict[str, object]] = {}
         finding_route = f"/finding?id={finding_id}"
         tool_run_route = f"/tool-run?id={nmap_structured.data['run_id']}"
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        delegation_route = f"/delegation?id={delegation_id}"
+        media_detail_route = f"/media-detail?id={media_id}"
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -882,9 +896,11 @@ def main(argv: list[str] | None = None) -> int:
         approval_route = gateway_gets.get("/approval?id=1") or {}
         finding_route_payload = gateway_gets.get(finding_route) or {}
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        delegation_route_payload = gateway_gets.get(delegation_route) or {}
+        media_route_payload = gateway_gets.get(media_detail_route) or {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

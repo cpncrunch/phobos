@@ -192,10 +192,12 @@ class OffSecToolRegistry:
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
         self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted."), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
+        self.register_tool("get_delegation", self.get_delegation, _spec("get_delegation", "Get one current-session delegation batch by id, including child-session metadata and artifact paths.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
         self.register_tool("safety_preflight", self.safety_preflight, _spec("safety_preflight", "Run a read-only engagement/runtime readiness preflight and write a redacted Markdown report.", {"out": _string("Optional Markdown output path; relative paths go under agent/preflight.")}, []))
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
+        self.register_tool("media_get", self.media_get, _spec("media_get", "Get one current-session media/artifact metadata record by id without reading file contents.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
         self.register_tool("sealed_import", self.sealed_import, _spec("sealed_import", "Decrypt a sealed session snapshot and import its handoff data; no commands are executed.", {"path": _string("Sealed snapshot path."), "passphrase_env": _string("Environment variable containing passphrase."), "merge_memories": {"type": "boolean"}}, ["path", "passphrase_env"]))
         self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List approvals for the current session with redacted arguments/decisions.", {"status": _string("Approval status; default pending; use all for resolved approvals too."), "limit": {"type": "integer"}}))
@@ -1041,7 +1043,16 @@ class OffSecToolRegistry:
 
     def list_delegations(self, args: dict[str, Any]) -> ToolResult:
         delegations = self.store.list_delegations(self.session_id, limit=int(args.get("limit", 20)))
-        return ToolResult("ok", f"Found {len(delegations)} delegation batch(es).", {"delegations": delegations})
+        return ToolResult("ok", f"Found {len(delegations)} delegation batch(es).", {"delegations": [_redacted_mapping(row) for row in delegations]})
+
+    def get_delegation(self, args: dict[str, Any]) -> ToolResult:
+        delegation_id = _first_int_arg(args, "id", "delegation_id")
+        if delegation_id is None:
+            return ToolResult("error", "id is required.")
+        delegation = self.store.get_delegation(delegation_id, session_id=self.session_id)
+        if not delegation:
+            return ToolResult("error", f"Delegation {delegation_id} not found in this session.")
+        return ToolResult("ok", f"Delegation {delegation_id} returned.", {"delegation": _redacted_mapping(delegation)})
 
     def auth_status(self, args: dict[str, Any]) -> ToolResult:
         env_names = {"model_key_env": "OPENAI_API_KEY"}
@@ -1107,11 +1118,23 @@ class OffSecToolRegistry:
         dest = media_dir / f"{digest[:12]}-{_safe_filename(src.name)}"
         shutil.copyfile(src, dest)
         media_id = self.store.create_media_artifact(self.session_id, kind, str(src), str(dest), mime_type, digest, len(data), {"original_name": src.name})
-        return ToolResult("ok", f"Imported media/artifact {media_id}: {dest}", {"media": self.store.list_media_artifacts(self.session_id, limit=1)[0]}, {"file": str(dest)})
+        media = self.store.get_media_artifact(media_id, session_id=self.session_id) or {}
+        return ToolResult("ok", f"Imported media/artifact {media_id}: {dest}", {"media": _redacted_mapping(media)}, {"file": str(dest)})
 
     def media_list(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_media_artifacts(self.session_id, limit=int(args.get("limit", 50)))
-        return ToolResult("ok", f"Found {len(rows)} media/artifact file(s).", {"media": rows})
+        return ToolResult("ok", f"Found {len(rows)} media/artifact file(s).", {"media": [_redacted_mapping(row) for row in rows]})
+
+    def media_get(self, args: dict[str, Any]) -> ToolResult:
+        media_id = _first_int_arg(args, "id", "media_id")
+        if media_id is None:
+            return ToolResult("error", "id is required.")
+        media = self.store.get_media_artifact(media_id, session_id=self.session_id)
+        if not media:
+            return ToolResult("error", f"Media/artifact {media_id} not found in this session.")
+        data = _redacted_mapping(media)
+        data["no_file_content_read"] = True
+        return ToolResult("ok", f"Media/artifact {media_id} returned.", {"media": data})
 
     def sealed_export(self, args: dict[str, Any]) -> ToolResult:
         passphrase_env = str(args.get("passphrase_env") or "").strip()

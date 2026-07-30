@@ -335,6 +335,9 @@ class OffSecAgentRuntime:
             "subagents": "subagent_review",
             "delegate": "delegate_tasks",
             "delegations": "list_delegations",
+            "delegation": "get_delegation",
+            "delegation-get": "get_delegation",
+            "delegation-detail": "get_delegation",
             "auth-status": "auth_status",
             "auth": "auth_status",
             "preflight": "safety_preflight",
@@ -342,6 +345,9 @@ class OffSecAgentRuntime:
             "readiness": "safety_preflight",
             "media-import": "media_import",
             "media-list": "media_list",
+            "media-get": "media_get",
+            "media-detail": "media_get",
+            "media-artifact": "media_get",
             "sealed-export": "sealed_export",
             "sealed-import": "sealed_import",
             "audit": "audit_log",
@@ -895,10 +901,12 @@ HELP_TEXT = """Phobos Agent commands:
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20
+/delegation id=<delegation-id>
 /auth-status
 /preflight out=<optional.md>
 /media-import path=<local-file> kind=<optional>
 /media-list
+/media-get id=<media-id>
 /sealed-export passphrase_env=<ENV_NAME> out=<optional.sealed.json>
 /sealed-import path=<sealed.json> passphrase_env=<ENV_NAME>
 /job name=<name> schedule="every 1 h" prompt=<agent prompt>

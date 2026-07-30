@@ -736,6 +736,12 @@ class AgentRuntimeTests(unittest.TestCase):
                         parent_id=1,
                         depth=1,
                     )
+                    other_delegation_id = other_context.store.create_delegation(
+                        other_context.session_id,
+                        "foreign delegation detail secret token=supersecret",
+                        [{"role": "scope", "prompt": "foreign delegation detail secret token=supersecret"}],
+                    )
+                    other_context.store.complete_delegation(other_delegation_id, "ok", [{"role": "scope", "content": "foreign delegation detail secret token=supersecret"}], {})
                 finally:
                     other_context.close()
                 cross_describe = runtime.registry.run("context_describe", {"id": other_node_id})
@@ -763,13 +769,22 @@ class AgentRuntimeTests(unittest.TestCase):
 
                 delegated_result = runtime.registry.run("delegate_tasks", {"prompt": "review lcm parity evidence", "roles": "scope,safety"})
                 self.assertEqual(delegated_result.status, "ok", delegated_result.to_dict())
+                delegation_id = delegated_result.data["delegation"]["id"]
                 results = delegated_result.data["delegation"]["results"]
                 self.assertEqual(len(results), 2)
                 child_ids = {item["child_session_id"] for item in results}
                 self.assertEqual(len(child_ids), 2)
                 self.assertNotIn(runtime.session_id, child_ids)
+                delegation_detail = runtime.registry.run("get_delegation", {"id": delegation_id})
+                cross_delegation_detail = runtime.registry.run("get_delegation", {"id": other_delegation_id})
+                self.assertEqual(delegation_detail.status, "ok", delegation_detail.to_dict())
+                self.assertEqual(cross_delegation_detail.status, "error", cross_delegation_detail.to_dict())
+                self.assertIn("not found in this session", cross_delegation_detail.message)
+                self.assertNotIn("supersecret", json.dumps(cross_delegation_detail.to_dict()))
                 delegations = runtime.handle_message('/delegations')
+                delegation_slash = runtime.handle_message(f'/delegation id={delegation_id}')
                 self.assertIn("review lcm parity evidence", delegations)
+                self.assertIn("Delegation", delegation_slash)
                 sessions = runtime.store.list_sessions(limit=20)
                 self.assertTrue(any(str(row["name"]).startswith("delegation-") for row in sessions))
                 child_search = runtime.store.search_all_messages("review lcm parity evidence", limit=10)
@@ -827,6 +842,30 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(Path(media.artifacts["file"]).exists())
                 media_list = runtime.registry.run("media_list", {})
                 self.assertEqual(len(media_list.data["media"]), 1)
+                media_id = media.data["media"]["id"]
+                media_detail = runtime.registry.run("media_get", {"id": media_id})
+                self.assertEqual(media_detail.status, "ok", media_detail.to_dict())
+                self.assertTrue(media_detail.data["media"]["no_file_content_read"])
+                self.assertIn("media_get", runtime.handle_message('/schemas name=media_get'))
+                self.assertIn("Media/artifact", runtime.handle_message(f'/media-get id={media_id}'))
+                other_media_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement), db_path=str(Path(tmp) / "agent.db"), session_name="other-media"))
+                try:
+                    other_media_id = other_media_runtime.store.create_media_artifact(
+                        other_media_runtime.session_id,
+                        "file",
+                        "/tmp/foreign-media-secret-token-supersecret.txt",
+                        "/tmp/foreign-media-secret-token-supersecret.txt",
+                        "text/plain",
+                        "0" * 64,
+                        1,
+                        {"note": "foreign media token=supersecret"},
+                    )
+                finally:
+                    other_media_runtime.close()
+                cross_media = runtime.registry.run("media_get", {"id": other_media_id})
+                self.assertEqual(cross_media.status, "error", cross_media.to_dict())
+                self.assertIn("not found in this session", cross_media.message)
+                self.assertNotIn("supersecret", json.dumps(cross_media.to_dict()))
 
                 missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_TEST_MISSING_PASSPHRASE"})
                 self.assertEqual(missing.status, "error")
@@ -1520,12 +1559,14 @@ PORT    STATE SERVICE VERSION
                 runtime.registry.run("schedule_job", {"name": "gateway-job", "prompt": "/status", "schedule": "manual"})
                 media_src = tmp_path / "gateway-proof.txt"
                 media_src.write_text("gateway media marker", encoding="utf-8")
-                runtime.registry.run("media_import", {"path": str(media_src)})
-                runtime.registry.run("delegate_tasks", {"prompt": "gateway delegation marker", "roles": "scope"})
+                gateway_media = runtime.registry.run("media_import", {"path": str(media_src)})
+                gateway_delegation = runtime.registry.run("delegate_tasks", {"prompt": "gateway delegation marker", "roles": "scope"})
                 process = runtime.registry.run("start_process", {"target": "app.example.test", "type": "host", "purpose": "gateway route process", "command": "printf gateway-process", "execute": True})
                 runtime.registry.run("wait_process", {"id": process.data["process_id"], "timeout": 5})
                 gateway_manifest = runtime.registry.run("evidence_manifest", {"out": "gateway-manifest.json"})
                 self.assertEqual(gateway_manifest.status, "ok", gateway_manifest.to_dict())
+                gateway_media_id = gateway_media.data["media"]["id"]
+                gateway_delegation_id = gateway_delegation.data["delegation"]["id"]
 
                 for route, marker in [
                     ("/routes", "/schemas"),
@@ -1535,7 +1576,9 @@ PORT    STATE SERVICE VERSION
                     ("/timeline?include_audit=false", "gateway route process"),
                     ("/manifest-verify?path=gateway-manifest.json&detect_new=false", "verification_status"),
                     ("/delegations", "gateway delegation marker"),
+                    (f"/delegation-detail?id={gateway_delegation_id}", "gateway delegation marker"),
                     ("/media", "gateway-proof"),
+                    (f"/media-detail?id={gateway_media_id}", "no_file_content_read"),
                     ("/auth", "secret_values_redacted"),
                     ("/bridges", "discord"),
                     ("/guardrails", "standard"),

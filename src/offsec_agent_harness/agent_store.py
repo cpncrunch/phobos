@@ -650,8 +650,11 @@ class AgentStore:
         self.conn.commit()
         return self.get_delegation(delegation_id)
 
-    def get_delegation(self, delegation_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM delegations WHERE id=?", (delegation_id,)).fetchone()
+    def get_delegation(self, delegation_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM delegations WHERE id=? AND session_id=?", (delegation_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM delegations WHERE id=?", (delegation_id,)).fetchone()
         return _delegation_row(row) if row else None
 
     def list_delegations(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -682,6 +685,13 @@ class AgentStore:
     def list_media_artifacts(self, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM media_artifacts WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
         return [_media_artifact_row(row) for row in rows]
+
+    def get_media_artifact(self, media_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM media_artifacts WHERE id=? AND session_id=?", (media_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM media_artifacts WHERE id=?", (media_id,)).fetchone()
+        return _media_artifact_row(row) if row else None
 
     def create_tool_run(
         self,

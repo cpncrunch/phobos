@@ -308,14 +308,14 @@ This turns the harness into a standalone agent-style application with:
 - approval queue for confirm-level actions;
 - runtime policy that can block or approval-gate arbitrary tools;
 - durable scheduled jobs runnable with `phobos-agent run-due`;
-- role-based subagent reviews and durable local delegation batches with per-task child sessions/artifacts;
+- role-based subagent reviews and durable local delegation batches with session-bound detail views for per-task child sessions/artifacts;
 - model adapter fallback chains;
 - engagement workspace file tools that resolve candidate paths before reading/searching so symlink escapes stay blocked;
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
-- local media/artifact import and listing with SHA-256 metadata;
+- local media/artifact import, listing, and session-bound metadata drill-down with SHA-256 hashes and no file-content reads;
 - redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories plus manifest verification reports, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, session-bound finding/tool-run detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/finding-detail/tool-runs/tool-run-detail/jobs/processes/approvals/redacted approval detail/delegations/media/auth/bridges/guardrails/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, session-bound finding/tool-run/delegation/media detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/finding-detail/tool-runs/tool-run-detail/jobs/processes/approvals/redacted approval detail/delegations/delegation-detail/media/media-detail/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -598,9 +598,11 @@ session_bound_context_nodes_ok=True
 hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
+delegation_detail_session_bound_ok=True
 auth_status_redacted_ok=True
 safety_preflight_ok=True
 media_artifacts_ok=True
+media_detail_session_bound_ok=True
 evidence_timeline_ok=True
 evidence_manifest_ok=True
 evidence_manifest_verify_ok=True
