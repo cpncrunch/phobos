@@ -244,6 +244,25 @@ def main(argv: list[str] | None = None) -> int:
         state_change = handle("state-change-confirm", '/run target=app.example.test type=web purpose="controlled update token=supersecret" command="printf curl -X POST https://app.example.test/profile token=supersecret" execute=true')
         approvals = handle("approvals", "/approvals")
         approval_detail = handle("approval-detail", "/approval id=1")
+        approval_store_owned = runtime.store.get_approval(1, session_id=runtime.session_id)
+        approval_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="approval-scope-foreign"))
+        try:
+            approval_store_foreign = runtime.store.get_approval(1, session_id=approval_scope_runtime.session_id)
+            approval_foreign_detail = approval_scope_runtime.registry.run("get_approval", {"id": 1})
+            approval_foreign_approve = approval_scope_runtime.registry.run("approve", {"id": 1})
+            approval_foreign_resolve = runtime.store.resolve_approval(1, "denied", "foreign-smoke", {"reason": "foreign"}, session_id=approval_scope_runtime.session_id)
+        finally:
+            approval_scope_runtime.close()
+        approval_after_foreign_resolve = runtime.store.get_approval(1, session_id=runtime.session_id)
+        approval_scope_results = {
+            "owned_lookup_ok": bool(approval_store_owned),
+            "foreign_lookup": approval_store_foreign,
+            "foreign_detail": approval_foreign_detail.to_dict(),
+            "foreign_approve": approval_foreign_approve.to_dict(),
+            "foreign_resolve": approval_foreign_resolve,
+            "owner_status_after_foreign_resolve": (approval_after_foreign_resolve or {}).get("status"),
+        }
+        write("session-bound-approval-store.json", json.dumps(approval_scope_results, indent=2, sort_keys=True))
         destructive = handle("destructive-block", '/run target=app.example.test type=host purpose=blocked command="printf rm -rf /" execute=true')
         dos = handle("dos-block", '/run target=app.example.test type=web purpose=blocked command="printf hping3 --flood app.example.test" execute=true')
         checks["guardrails_execution_approvals_blocks"] = (
@@ -257,6 +276,16 @@ def main(argv: list[str] | None = None) -> int:
             and "supersecret" not in approvals + approval_detail
             and "blocked" in destructive.lower()
             and "blocked" in dos.lower()
+        )
+        checks["session_bound_approval_store_ok"] = (
+            bool(approval_store_owned)
+            and approval_store_foreign is None
+            and approval_foreign_detail.status == "error"
+            and approval_foreign_approve.status == "error"
+            and approval_foreign_resolve is False
+            and (approval_after_foreign_resolve or {}).get("status") == "pending"
+            and "not found in this session" in json.dumps(approval_scope_results)
+            and "supersecret" not in json.dumps(approval_scope_results)
         )
         runtime.store.audit(
             runtime.session_id,

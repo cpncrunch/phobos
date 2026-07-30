@@ -332,8 +332,8 @@ class OffSecToolRegistry:
 
     def approve(self, args: dict[str, Any]) -> ToolResult:
         approval_id = int(args.get("id") or args.get("approval_id"))
-        approval = self.store.get_approval(approval_id)
-        if not approval or approval.get("session_id") != self.session_id:
+        approval = self.store.get_approval(approval_id, session_id=self.session_id)
+        if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
         if approval["status"] != "pending":
             return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", {"approval": _redacted_mapping(approval)})
@@ -344,10 +344,10 @@ class OffSecToolRegistry:
             request = _request_from_args(approved_args)
             decision = self.harness.guardrails.evaluate(self.roe, request)
             if decision.status is DecisionStatus.BLOCK:
-                self.store.resolve_approval(approval_id, "blocked_on_recheck", args.get("by", "operator"), {"decision": decision.to_dict()})
+                self.store.resolve_approval(approval_id, "blocked_on_recheck", args.get("by", "operator"), {"decision": decision.to_dict()}, session_id=self.session_id)
                 return ToolResult("blocked", "Approval was blocked on re-check; command was not executed.", {"decision": decision.to_dict()})
             result = self.run_command(approved_args)
-            self.store.resolve_approval(approval_id, "approved_executed", args.get("by", "operator"), result.to_dict())
+            self.store.resolve_approval(approval_id, "approved_executed", args.get("by", "operator"), result.to_dict(), session_id=self.session_id)
             return result
         if approval["tool_name"] == "start_process":
             approved_args = dict(approval["args"])
@@ -355,28 +355,28 @@ class OffSecToolRegistry:
             approved_args["_approval_id"] = approval_id
             decision = self.harness.guardrails.evaluate(self.roe, _request_from_args(approved_args))
             if decision.status is DecisionStatus.BLOCK:
-                self.store.resolve_approval(approval_id, "blocked_on_recheck", args.get("by", "operator"), {"decision": decision.to_dict()})
+                self.store.resolve_approval(approval_id, "blocked_on_recheck", args.get("by", "operator"), {"decision": decision.to_dict()}, session_id=self.session_id)
                 return ToolResult("blocked", "Approval was blocked on re-check; process was not started.", {"decision": decision.to_dict()})
             result = self.start_process(approved_args, approval_id=approval_id)
-            self.store.resolve_approval(approval_id, "approved_started", args.get("by", "operator"), result.to_dict())
+            self.store.resolve_approval(approval_id, "approved_started", args.get("by", "operator"), result.to_dict(), session_id=self.session_id)
             return result
         if approval["tool_name"] in self.tools:
             approved_args = dict(approval["args"])
             approved_args["_policy_approved"] = True
             result = self.run(approval["tool_name"], approved_args)
-            self.store.resolve_approval(approval_id, "approved_executed", args.get("by", "operator"), result.to_dict())
+            self.store.resolve_approval(approval_id, "approved_executed", args.get("by", "operator"), result.to_dict(), session_id=self.session_id)
             return result
-        self.store.resolve_approval(approval_id, "approved", args.get("by", "operator"), {"note": "Approved non-command tool."})
+        self.store.resolve_approval(approval_id, "approved", args.get("by", "operator"), {"note": "Approved non-command tool."}, session_id=self.session_id)
         return ToolResult("approved", f"Approval {approval_id} approved.")
 
     def deny(self, args: dict[str, Any]) -> ToolResult:
         approval_id = int(args.get("id") or args.get("approval_id"))
-        approval = self.store.get_approval(approval_id)
-        if not approval or approval.get("session_id") != self.session_id:
+        approval = self.store.get_approval(approval_id, session_id=self.session_id)
+        if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
         if approval["status"] != "pending":
             return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", {"approval": _redacted_mapping(approval)})
-        self.store.resolve_approval(approval_id, "denied", args.get("by", "operator"), {"reason": args.get("reason", "")})
+        self.store.resolve_approval(approval_id, "denied", args.get("by", "operator"), {"reason": args.get("reason", "")}, session_id=self.session_id)
         return ToolResult("denied", f"Approval {approval_id} denied.")
 
     def impact_plan(self, args: dict[str, Any]) -> ToolResult:
@@ -1254,8 +1254,8 @@ class OffSecToolRegistry:
         if approval_raw is None:
             return ToolResult("error", "Approval id is required.")
         approval_id = int(approval_raw)
-        approval = self.store.get_approval(approval_id)
-        if not approval or approval.get("session_id") != self.session_id:
+        approval = self.store.get_approval(approval_id, session_id=self.session_id)
+        if not approval:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
         return ToolResult(
             "ok",

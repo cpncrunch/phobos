@@ -837,8 +837,11 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def get_approval(self, approval_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+    def get_approval(self, approval_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM approvals WHERE id=? AND session_id=?", (approval_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -869,12 +872,18 @@ class AgentStore:
             out.append(data)
         return out
 
-    def resolve_approval(self, approval_id: int, status: str, resolved_by: str, result: dict[str, Any] | None = None) -> None:
-        self.conn.execute(
-            "UPDATE approvals SET status=?, resolved_at=?, resolved_by=?, result_json=? WHERE id=?",
-            (status, utc_now(), resolved_by, json.dumps(result or {}, sort_keys=True), approval_id),
+    def resolve_approval(self, approval_id: int, status: str, resolved_by: str, result: dict[str, Any] | None = None, session_id: str | None = None) -> bool:
+        values: list[Any] = [status, utc_now(), resolved_by, json.dumps(result or {}, sort_keys=True), approval_id]
+        where = "id=?"
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(
+            f"UPDATE approvals SET status=?, resolved_at=?, resolved_by=?, result_json=? WHERE {where}",
+            values,
         )
         self.conn.commit()
+        return cur.rowcount > 0
 
     def create_job(self, session_id: str, name: str, schedule: str, prompt: str) -> int:
         next_run = next_run_for_schedule(schedule)
