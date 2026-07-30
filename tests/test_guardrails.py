@@ -111,6 +111,28 @@ class GuardrailTests(unittest.TestCase):
         self.assertNotIn("abc.def.ghi", redacted)
         self.assertNotIn("abcd", redacted)
 
+    def test_redacts_authorization_cookie_and_quoted_values(self):
+        sample = (
+            "curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==' "
+            "-H 'Cookie: sessionid=cookievalue; csrftoken=csrfvalue' "
+            "https://app.example.test authorization=Bearer cli.secret "
+            "api_key='quoted-key' password=\"quoted-pass\""
+        )
+        redacted = redact_secrets(sample) or ""
+        for leaked in [
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "cookievalue",
+            "csrfvalue",
+            "cli.secret",
+            "quoted-key",
+            "quoted-pass",
+        ]:
+            self.assertNotIn(leaked, redacted)
+        self.assertIn("Cookie: <REDACTED>", redacted)
+        self.assertIn("authorization=Bearer <REDACTED>", redacted)
+        self.assertIn("api_key='<REDACTED>'", redacted)
+        self.assertIn('password="<REDACTED>"', redacted)
+
     def test_harness_records_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
             roe = self.make_roe(tmp)

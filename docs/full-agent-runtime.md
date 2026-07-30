@@ -29,7 +29,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, preflight readiness, findings, tool runs, timelines, evidence manifests/verification, closeout reviews, LCM nodes, tasks/task details, jobs, processes/process details, delegations, delegation details, media metadata, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, checking actual local bridge-test attachment size before dispatch, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default with `--no-response-polish` available for raw diagnostics.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
-- **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args and audit event payloads before storage/display.
+- **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args and audit event payloads before storage/display; redaction covers common Authorization bearer/basic headers, authorization assignments, cookie headers, quoted password/token/API-key values, and key-aware JSON fields.
 
 ## Agent commands
 
@@ -715,7 +715,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 45 tests
+Ran 46 tests
 OK
 ```
 
@@ -747,6 +747,8 @@ workspace_symlink_escape_block=True
 guardrails_execution_approvals_blocks=True
 session_bound_approval_store_ok=True
 approval_storage_redaction_ok=True
+audit_redaction_ok=True
+auth_header_cookie_redaction_ok=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
@@ -755,9 +757,12 @@ finding_tool_run_storage_redaction_ok=True
 artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
+process_detail_storage_redaction_ok=True
 jobs_and_subagents=True
+job_controls_session_bound_redacted_ok=True
 task_board_roundtrip=True
 session_bound_task_process_ok=True
+task_detail_storage_redaction_ok=True
 context_compacted=True
 lcm_context_nodes_ok=True
 session_bound_context_nodes_ok=True
@@ -794,7 +799,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=238
+artifact_count=241
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

@@ -298,7 +298,7 @@ This turns the harness into a standalone agent-style application with:
 - local persistent memory and FTS-backed current/cross-session search;
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context; node describe/expand operations are scoped to the active session;
-- tool registry, JSON-style schemas, plugin loading, local skill loading, redacted audit log, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
+- tool registry, JSON-style schemas, plugin loading, local skill loading, redacted audit log with common Authorization/Cookie/quoted-secret scrubbing, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable, session-bound evidence artifacts; structured tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with session-bound evidence/tool-run links, deterministic QA/readiness reviews, Markdown export, and field/evidence redaction before SQLite storage;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
@@ -559,7 +559,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 45 tests
+Ran 46 tests
 OK
 ```
 
@@ -586,6 +586,7 @@ guardrails_execution_approvals_blocks=True
 session_bound_approval_store_ok=True
 approval_storage_redaction_ok=True
 audit_redaction_ok=True
+auth_header_cookie_redaction_ok=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
@@ -594,10 +595,12 @@ finding_tool_run_storage_redaction_ok=True
 artifact_output_containment_ok=True
 background_process_completed=True
 wait_process_ok=True
+process_detail_storage_redaction_ok=True
 jobs_and_subagents=True
 job_controls_session_bound_redacted_ok=True
 task_board_roundtrip=True
 session_bound_task_process_ok=True
+task_detail_storage_redaction_ok=True
 context_compacted=True
 lcm_context_nodes_ok=True
 session_bound_context_nodes_ok=True
@@ -634,7 +637,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=238
+artifact_count=241
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

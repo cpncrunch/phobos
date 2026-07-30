@@ -20,6 +20,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
+from offsec_agent_harness.models import redact_secrets
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -334,6 +335,30 @@ def main(argv: list[str] | None = None) -> int:
             and "smoke-audit-key-only" not in audit_redaction + raw_audit
             and "smoke-audit-bearer" not in audit_redaction + raw_audit
             and "smoke-audit-password" not in audit_redaction + raw_audit
+        )
+        auth_redaction_sample = (
+            "curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==' "
+            "-H 'Cookie: sessionid=smoke-cookie-value; csrftoken=smoke-csrf-value' "
+            "https://app.example.test authorization=Bearer smoke-cli-bearer "
+            "api_key='smoke-quoted-key' password=\"smoke-quoted-pass\""
+        )
+        auth_redacted = redact_secrets(auth_redaction_sample) or ""
+        auth_leak_markers = [
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+            "smoke-cookie-value",
+            "smoke-csrf-value",
+            "smoke-cli-bearer",
+            "smoke-quoted-key",
+            "smoke-quoted-pass",
+        ]
+        auth_redaction_preview = auth_redacted if all(marker not in auth_redacted for marker in auth_leak_markers) else "<redaction failed; preview suppressed>"
+        write("auth-header-cookie-redaction.json", json.dumps({"preview": auth_redaction_preview, "leak_free": auth_redaction_preview == auth_redacted}, indent=2, sort_keys=True))
+        checks["auth_header_cookie_redaction_ok"] = (
+            auth_redaction_preview == auth_redacted
+            and "Cookie: <REDACTED>" in auth_redacted
+            and "authorization=Bearer <REDACTED>" in auth_redacted
+            and "api_key='<REDACTED>'" in auth_redacted
+            and 'password="<REDACTED>"' in auth_redacted
         )
 
         nmap_output = "Starting Nmap\nNmap scan report for 10.10.0.5\nPORT    STATE SERVICE VERSION\n80/tcp  open  http    nginx 1.24\n443/tcp open  https   nginx 1.24\n"

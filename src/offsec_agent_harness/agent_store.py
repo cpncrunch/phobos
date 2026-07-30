@@ -13,7 +13,7 @@ from .models import redact_secrets
 
 
 SCHEMA_VERSION = 5
-_SECRET_AUDIT_KEYS = {"password", "passwd", "pwd", "token", "auth_token", "access_token", "refresh_token", "api_key", "apikey", "api-key", "secret", "authorization", "bearer"}
+_SECRET_AUDIT_KEYS = {"password", "passwd", "pwd", "token", "auth_token", "access_token", "refresh_token", "api_key", "apikey", "api-key", "secret", "authorization", "bearer", "cookie", "cookies", "set_cookie"}
 
 
 def utc_now() -> str:

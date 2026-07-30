@@ -91,10 +91,11 @@ class SafetyDecision:
 
 
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*([^\s'\"]+)"), r"\1=<REDACTED>"),
-    (re.compile(r"(?i)(token|api[_-]?key|secret)\s*[:=]\s*([^\s'\"]+)"), r"\1=<REDACTED>"),
-    (re.compile(r"(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/-]+=*"), r"\1<REDACTED>"),
-    (re.compile(r"(?i)(-H\s+['\"]Authorization:\s*Bearer\s+)[^'\"]+(['\"])?"), r"\1<REDACTED>\2"),
+    # Header/assignment formats first so values after auth schemes are not leaked.
+    (re.compile(r"(?i)\b(authorization\s*[:=]\s*(?:bearer|basic|digest|token)\s+)[^\s'\";,]+"), r"\1<REDACTED>"),
+    (re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?!(?:bearer|basic|digest|token)\s+)[^\s'\";,]+"), r"\1<REDACTED>"),
+    (re.compile(r"(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n'\"]+"), r"\1<REDACTED>"),
+    (re.compile(r"(?i)\b((?:password|passwd|pwd|token|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*)(['\"]?)[^\s'\";,]+\2"), r"\1\2<REDACTED>\2"),
 ]
 
 
