@@ -160,7 +160,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "preload_skills": [],
   "skill_bundles": {},
   "bridges": {
-    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000},
+    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000, "discord_thread_mode": "off", "discord_thread_name_prefix": "Phobos", "discord_thread_auto_archive_duration": 1440, "discord_thread_continue_without_trigger": true},
     "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000},
     "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000}
   },
@@ -195,7 +195,14 @@ Runtime policy, local skills, and chat bridge allowlists are configured in the s
   "preload_skills": ["finding-reporting"],
   "skill_bundles": {"reporting": ["finding-reporting"]},
   "bridges": {
-    "discord": {"allowed_channel_ids": ["123456789012345678"], "allowed_user_ids": ["234567890123456789"], "command_prefix": "!phobos"},
+    "discord": {
+      "allowed_channel_ids": ["123456789012345678"],
+      "allowed_user_ids": ["234567890123456789"],
+      "command_prefix": "!phobos",
+      "discord_thread_mode": "per-message",
+      "discord_thread_name_prefix": "Phobos",
+      "discord_thread_auto_archive_duration": 1440
+    },
     "telegram": {"allowed_channel_ids": ["-1001234567890"], "allowed_user_ids": ["123456789"]}
   }
 }
@@ -487,11 +494,14 @@ Run live bridges:
 
 ```bash
 # Discord Gateway bridge. The bot needs the Message Content intent if you want normal text commands in guild channels.
+# Add --discord-thread-mode per-message for Hermes-like top-level request threads;
+# the bot then also needs Create Public Threads and Send Messages in Threads.
 phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
   --engagement engagement.json \
   --allow-channel <channel-or-thread-id> \
   --allow-user <operator-user-id> \
-  --prefix '!phobos'
+  --prefix '!phobos' \
+  --discord-thread-mode per-message
 
 # Slack Socket Mode bridge. Enable Socket Mode on the Slack app and provide both xapp and xoxb tokens.
 phobos-agent --db data/phobos-agent.db --config agent.config.json slack \

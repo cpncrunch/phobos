@@ -38,6 +38,10 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "max_message_chars": 4000,
         "poll_interval": 2.0,
         "mention_aliases": ["phobos", "phobos-agent", "phobos_agent"],
+        "discord_thread_mode": "off",
+        "discord_thread_name_prefix": "Phobos",
+        "discord_thread_auto_archive_duration": 1440,
+        "discord_thread_continue_without_trigger": True,
     },
     "slack": {
         "enabled": False,
@@ -215,7 +219,8 @@ def handle_bridge_message(
     allowed, reason = _allow_message(message, config)
     if not allowed:
         return BridgeDispatchResult("ignored", reason=reason)
-    normalized, trigger_reason = normalize_bridge_text(message.text, config, bot_user_id=bot_user_id, is_private=message.is_private)
+    continuation = _bridge_thread_continuation(message, config)
+    normalized, trigger_reason = normalize_bridge_text(message.text, config, bot_user_id=bot_user_id, is_private=message.is_private or continuation)
     if not normalized:
         if message.attachments and config.import_attachments:
             imported = _import_bridge_attachments(runtime, message, config)
@@ -496,6 +501,59 @@ def run_bridge(platform: str, runtime: "OffSecAgentRuntime", config: BridgeConfi
     raise ValueError(f"Unsupported bridge platform: {platform}")
 
 
+DISCORD_THREAD_CHANNEL_TYPES = {10, 11, 12}
+DISCORD_THREADABLE_CHANNEL_TYPES = {0, 5}
+
+
+def _discord_thread_mode(config: BridgeConfig) -> str:
+    if config.platform != "discord":
+        return "off"
+    raw = str(config.extra.get("discord_thread_mode") or "off").strip().lower().replace("-", "_")
+    if raw in {"per_message", "top_level", "hermes", "auto"}:
+        return "per_message"
+    return "off"
+
+
+def _discord_channel_type(message: BridgeMessage) -> int:
+    return _int_value(message.raw.get("channel_type"), -1)
+
+
+def _discord_parent_id(message: BridgeMessage) -> str:
+    return str(message.raw.get("parent_id") or "")
+
+
+def _bridge_thread_continuation(message: BridgeMessage, config: BridgeConfig) -> bool:
+    if config.platform != "discord" or _discord_thread_mode(config) == "off":
+        return False
+    if not bool(config.extra.get("discord_thread_continue_without_trigger", True)):
+        return False
+    if _discord_channel_type(message) not in DISCORD_THREAD_CHANNEL_TYPES:
+        return False
+    allowed_channels = set(config.allowed_channel_ids)
+    parent_id = _discord_parent_id(message)
+    return bool(parent_id and parent_id in allowed_channels)
+
+
+def _discord_thread_auto_archive_duration(config: BridgeConfig) -> int:
+    value = _int_value(config.extra.get("discord_thread_auto_archive_duration"), 1440)
+    # Discord accepts 60, 1440, 4320, or 10080 depending on guild features. Use a
+    # safe fallback rather than failing bridge startup on an invalid config value.
+    return value if value in {60, 1440, 4320, 10080} else 1440
+
+
+def _discord_thread_name(text: str, config: BridgeConfig) -> str:
+    prefix = str(config.extra.get("discord_thread_name_prefix") or "Phobos").strip() or "Phobos"
+    cleaned = redact_secrets(text or "session") or "session"
+    cleaned = _neutralize_mass_mentions(cleaned)
+    cleaned = re.sub(r"[`*_~>|#:\r\n]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"^[!/@]+", "", cleaned).strip() or "session"
+    if len(cleaned) > 64:
+        cleaned = cleaned[:61].rstrip() + "..."
+    name = f"{prefix} - {cleaned}"
+    return name[:100].strip() or "Phobos"
+
+
 class DiscordGatewayBridge:
     api_base = "https://discord.com/api/v10"
 
@@ -505,6 +563,7 @@ class DiscordGatewayBridge:
         self.token = _require_env(config.token_env or "PHOBOS_DISCORD_TOKEN")
         self.bot_user_id = ""
         self.sequence: int | None = None
+        self._channel_cache: dict[str, dict[str, Any]] = {}
 
     def run_forever(self) -> None:  # pragma: no cover - requires live Discord token/network
         backoff = 1.0
@@ -566,22 +625,70 @@ class DiscordGatewayBridge:
 
     def _handle_message_create(self, data: dict[str, Any]) -> None:
         author = data.get("author") or {}
+        channel_id = str(data.get("channel_id", ""))
+        channel = self.channel_info(channel_id) if channel_id and data.get("guild_id") else {}
         message = BridgeMessage(
             platform="discord",
             text=str(data.get("content", "")),
-            channel_id=str(data.get("channel_id", "")),
+            channel_id=channel_id,
             user_id=str(author.get("id", "")),
             message_id=str(data.get("id", "")),
             user_name=str(author.get("username", "")),
             is_bot=bool(author.get("bot", False)),
             is_private=not bool(data.get("guild_id")),
             attachments=_discord_attachments(data),
-            raw={"guild_id": data.get("guild_id")},
+            raw={
+                "guild_id": data.get("guild_id"),
+                "channel_type": channel.get("type", data.get("channel_type")),
+                "parent_id": str(channel.get("parent_id") or ""),
+                "channel_name": str(channel.get("name") or ""),
+            },
         )
         result = handle_bridge_message(self.runtime, message, self.config, bot_user_id=self.bot_user_id)
         if result.status == "handled":
+            response_channel_id = self.response_channel_id(message, result)
+            reply_to = message.message_id if response_channel_id == message.channel_id else ""
             for chunk in result.chunks:
-                self.send_message(message.channel_id, chunk, reply_to=message.message_id)
+                self.send_message(response_channel_id, chunk, reply_to=reply_to)
+
+    def channel_info(self, channel_id: str) -> dict[str, Any]:
+        if not channel_id:
+            return {}
+        if channel_id not in self._channel_cache:
+            try:
+                self._channel_cache[channel_id] = _http_json("GET", f"{self.api_base}/channels/{channel_id}", headers={"Authorization": f"Bot {self.token}"})
+            except Exception as exc:  # pragma: no cover - live API boundary
+                self.runtime.store.audit(self.runtime.session_id, "bridge_channel_lookup_error", {"platform": "discord", "channel_id": channel_id, "error": redact_secrets(str(exc))})
+                self._channel_cache[channel_id] = {}
+        return self._channel_cache[channel_id]
+
+    def response_channel_id(self, message: BridgeMessage, result: BridgeDispatchResult) -> str:
+        if _discord_thread_mode(self.config) != "per_message":
+            return message.channel_id
+        if message.is_private or _discord_channel_type(message) in DISCORD_THREAD_CHANNEL_TYPES:
+            return message.channel_id
+        if _discord_channel_type(message) not in DISCORD_THREADABLE_CHANNEL_TYPES:
+            return message.channel_id
+        try:
+            thread_name = _discord_thread_name(result.normalized_text or message.text, self.config)
+            thread_id = self.create_thread_from_message(message.channel_id, message.message_id, thread_name)
+            self.runtime.store.audit(
+                self.runtime.session_id,
+                "bridge_thread_created",
+                message.audit_metadata() | {"thread_id": thread_id, "thread_name": thread_name, "mode": "per_message"},
+            )
+            return thread_id
+        except Exception as exc:  # pragma: no cover - live API boundary
+            self.runtime.store.audit(self.runtime.session_id, "bridge_thread_create_error", message.audit_metadata() | {"error": redact_secrets(str(exc))})
+            return message.channel_id
+
+    def create_thread_from_message(self, channel_id: str, message_id: str, name: str) -> str:
+        payload: dict[str, Any] = {
+            "name": name[:100] or "Phobos",
+            "auto_archive_duration": _discord_thread_auto_archive_duration(self.config),
+        }
+        result = _http_json("POST", f"{self.api_base}/channels/{channel_id}/messages/{message_id}/threads", payload=payload, headers={"Authorization": f"Bot {self.token}"})
+        return str(result.get("id") or channel_id)
 
     def send_message(self, channel_id: str, content: str, *, reply_to: str = "") -> dict[str, Any]:
         payload: dict[str, Any] = {"content": content[:2000], "allowed_mentions": {"parse": []}}
@@ -911,7 +1018,8 @@ def _allow_message(message: BridgeMessage, config: BridgeConfig) -> tuple[bool, 
         if allowed_users:
             return False, "channel-allowlist-required"
         return False, "allowlist-required"
-    if message.channel_id not in allowed_channels:
+    parent_id = _discord_parent_id(message) if config.platform == "discord" else ""
+    if message.channel_id not in allowed_channels and parent_id not in allowed_channels:
         return False, "channel-not-allowed"
     if allowed_users and message.user_id not in allowed_users:
         return False, "user-not-allowed"

@@ -12,7 +12,8 @@ from unittest import mock
 import zipfile
 from pathlib import Path
 
-from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, OffSecAgentRuntime, bridge_doctor, chunk_text, discover_skills, handle_bridge_message, load_skill
+from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeDispatchResult, BridgeMessage, EngagementROE, OffSecAgentRuntime, bridge_doctor, chunk_text, discover_skills, handle_bridge_message, load_skill
+from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
 
@@ -705,6 +706,41 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(trailing_mention.status, "handled")
                 self.assertEqual(trailing_mention.normalized_text, "/tools")
                 self.assertIn("Available tools", trailing_mention.response)
+
+                thread_config = BridgeConfig.from_dict(
+                    "discord",
+                    {"allowed_channel_ids": ["C1"], "command_prefix": "!phobos", "discord_thread_mode": "per-message"},
+                )
+                parent_message = BridgeMessage(platform="discord", text="@phobos /status", channel_id="C1", user_id="U1", message_id="M1", raw={"channel_type": 0})
+                parent_result = handle_bridge_message(runtime, parent_message, thread_config, bot_user_id="BOT1")
+                self.assertEqual(parent_result.status, "handled")
+                bridge = DiscordGatewayBridge.__new__(DiscordGatewayBridge)
+                bridge.runtime = runtime
+                bridge.config = thread_config
+                created_threads = []
+
+                def fake_create_thread(channel_id, message_id, name):
+                    created_threads.append((channel_id, message_id, name))
+                    return "T1"
+
+                bridge.create_thread_from_message = fake_create_thread
+                self.assertEqual(bridge.response_channel_id(parent_message, parent_result), "T1")
+                self.assertEqual(created_threads[0][0], "C1")
+                self.assertEqual(created_threads[0][1], "M1")
+                self.assertTrue(created_threads[0][2].startswith("Phobos - status"))
+
+                thread_message = BridgeMessage(
+                    platform="discord",
+                    text="/status",
+                    channel_id="T1",
+                    user_id="U1",
+                    message_id="M2",
+                    raw={"channel_type": 11, "parent_id": "C1"},
+                )
+                thread_result = handle_bridge_message(runtime, thread_message, thread_config, bot_user_id="BOT1")
+                self.assertEqual(thread_result.status, "handled")
+                self.assertEqual(thread_result.normalized_text, "/status")
+                self.assertEqual(bridge.response_channel_id(thread_message, BridgeDispatchResult("handled", normalized_text="/status")), "T1")
 
                 private_message = handle_bridge_message(
                     runtime,

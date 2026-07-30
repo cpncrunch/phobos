@@ -492,12 +492,16 @@ phobos-agent --db data/phobos-agent.db unseal-db \
 phobos-agent bridge-doctor --platform discord --platform slack --platform telegram
 
 # Run a live Discord bridge. Tokens stay in environment variables, not config/Git.
+# --discord-thread-mode per-message makes top-level requests behave like Hermes:
+# Phobos creates a new Discord thread for each top-level request and continues
+# replies there. The bot also needs Discord's Create Public Threads permission.
 export PHOBOS_DISCORD_TOKEN='...'
 phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
   --engagement engagement.json \
   --allow-channel <channel-or-thread-id> \
   --allow-user <operator-user-id> \
-  --prefix '!phobos'
+  --prefix '!phobos' \
+  --discord-thread-mode per-message
 
 # Optional live-but-safe local integration smoke. It scans only a local test HTTP
 # server, uses a generated one-request Nuclei template, and never sends bridge

@@ -136,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     discord = sub.add_parser("discord", help="Run a Discord bot bridge for an allowlisted channel/thread or DM")
     discord.add_argument("--engagement", required=True)
-    _add_bridge_args(discord, token=True)
+    _add_bridge_args(discord, token=True, discord=True)
 
     slack = sub.add_parser("slack", help="Run a Slack Socket Mode bridge for an allowlisted channel or DM")
     slack.add_argument("--engagement", required=True)
@@ -160,12 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     bridge_test.add_argument("--attachment-url", action="append", default=[], help="Offline bridge-test remote attachment URL metadata to record; repeatable")
     bridge_test.add_argument("--attachment-mime", default="application/octet-stream", help="MIME type for offline bridge-test attachments")
     bridge_test.add_argument("--attachment-kind", default="", help="Optional kind for offline bridge-test attachments: image/audio/video/file")
-    _add_bridge_args(bridge_test, token=True, slack=True)
+    _add_bridge_args(bridge_test, token=True, slack=True, discord=True)
 
     return parser
 
 
-def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, slack: bool = False) -> None:
+def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, slack: bool = False, discord: bool = False) -> None:
     parser.add_argument("--allow-channel", action="append", default=[], help="Allow a platform channel/thread/chat ID; repeatable")
     parser.add_argument("--allow-user", action="append", default=[], help="Allow a platform user ID; repeatable")
     parser.add_argument("--allow-all", action="store_true", help="Accept messages from any channel/user; unsafe outside a private deployment")
@@ -174,6 +174,11 @@ def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, sl
     parser.add_argument("--mention-required", action="store_true", help="Require a bot mention outside private messages")
     parser.add_argument("--max-response-chars", type=int, help="Per-message response chunk size")
     parser.add_argument("--max-message-chars", type=int, help="Maximum incoming message length to process")
+    if discord:
+        parser.add_argument("--discord-thread-mode", choices=["off", "per-message", "hermes"], help="Discord-only: create a response thread for each top-level allowlisted message")
+        parser.add_argument("--discord-thread-name-prefix", help="Discord-only: prefix for auto-created thread names")
+        parser.add_argument("--discord-thread-auto-archive-duration", type=int, choices=[60, 1440, 4320, 10080], help="Discord-only: auto-archive duration for created threads")
+        parser.add_argument("--no-discord-thread-continuation", action="store_true", help="Discord-only: require prefix/mention even inside bridge-created/parent-allowlisted threads")
     if token:
         parser.add_argument("--token-env", help="Environment variable containing the platform bot token")
     if slack:
@@ -453,6 +458,14 @@ def _bridge_config(args: argparse.Namespace, runtime_config: AgentRuntimeConfig,
         data["max_response_chars"] = args.max_response_chars
     if getattr(args, "max_message_chars", None):
         data["max_message_chars"] = args.max_message_chars
+    if getattr(args, "discord_thread_mode", None):
+        data["discord_thread_mode"] = args.discord_thread_mode
+    if getattr(args, "discord_thread_name_prefix", None):
+        data["discord_thread_name_prefix"] = args.discord_thread_name_prefix
+    if getattr(args, "discord_thread_auto_archive_duration", None):
+        data["discord_thread_auto_archive_duration"] = args.discord_thread_auto_archive_duration
+    if getattr(args, "no_discord_thread_continuation", False):
+        data["discord_thread_continue_without_trigger"] = False
     return BridgeConfig.from_dict(platform, data)
 
 

@@ -407,6 +407,15 @@ def main(argv: list[str] | None = None) -> int:
             BridgeMessage(platform="discord", text="!phobos /status", channel_id="C-smoke", user_id="U-smoke", message_id="M-smoke"),
             BridgeConfig(platform="discord", allowed_channel_ids=("C-smoke",), allowed_user_ids=("U-smoke",), command_prefix="!phobos", max_response_chars=300),
         )
+        thread_bridge_config = BridgeConfig.from_dict(
+            "discord",
+            {"allowed_channel_ids": ["C-smoke"], "allowed_user_ids": ["U-smoke"], "command_prefix": "!phobos", "max_response_chars": 300, "discord_thread_mode": "per-message"},
+        )
+        discord_thread_bridge = handle_bridge_message(
+            runtime,
+            BridgeMessage(platform="discord", text="/status", channel_id="T-smoke", user_id="U-smoke", message_id="M-thread", raw={"channel_type": 11, "parent_id": "C-smoke"}),
+            thread_bridge_config,
+        )
         slack_bridge = handle_bridge_message(
             runtime,
             BridgeMessage(platform="slack", text="<@B-smoke> /tasks status=all", channel_id="C-smoke", user_id="U-smoke", message_id="1660000000.000100"),
@@ -451,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
             BridgeConfig(platform="discord", allowed_channel_ids=("C-smoke",), allowed_user_ids=("U-smoke",), command_prefix="!phobos", max_response_chars=300),
         )
         write("bridge-discord.json", json.dumps(discord_bridge.to_dict(), indent=2))
+        write("bridge-discord-thread.json", json.dumps(discord_thread_bridge.to_dict(), indent=2))
         write("bridge-slack.json", json.dumps(slack_bridge.to_dict(), indent=2))
         write("bridge-telegram.json", json.dumps(telegram_bridge.to_dict(), indent=2))
         write("bridge-media.json", json.dumps(bridge_media.to_dict(), indent=2))
@@ -459,6 +469,8 @@ def main(argv: list[str] | None = None) -> int:
         checks["bridges_offline_ok"] = (
             discord_bridge.status == "handled"
             and discord_bridge.normalized_text == "/status"
+            and discord_thread_bridge.status == "handled"
+            and discord_thread_bridge.normalized_text == "/status"
             and slack_bridge.status == "handled"
             and slack_bridge.normalized_text == "/tasks status=all"
             and telegram_bridge.status == "handled"
