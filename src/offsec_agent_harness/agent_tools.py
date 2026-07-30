@@ -130,17 +130,19 @@ class OffSecToolRegistry:
     def _validated_tool_args(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
         """Validate schema-declared scalar arguments before dispatch/approval.
 
-        Tool handlers are still defensive, but malformed operator-controlled
-        scalar fields should not fall through to Python ``ValueError`` strings,
-        Python truthiness surprises, or queued approval replay.  The registry
-        owns the generic ``/tool`` and gateway dispatch boundary, so normalize
-        safe integer/boolean strings and reject ambiguous values with clean
-        operator errors before policy confirm queues are created.
+        Tool handlers are still defensive, but malformed or incomplete
+        operator-controlled schema fields should not fall through to Python
+        ``ValueError`` strings, Python truthiness surprises, handler-specific
+        missing-key errors, or queued approval replay.  The registry owns the
+        generic ``/tool`` and gateway dispatch boundary, so normalize safe
+        integer/boolean strings and reject ambiguous or missing required values
+        with clean operator errors before policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
         schema = spec.schema if spec else {}
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = schema.get("required", []) if isinstance(schema, dict) else []
         if not isinstance(properties, dict):
             return dict(args), None
         validated = dict(args)
@@ -164,6 +166,12 @@ class OffSecToolRegistry:
                 if not ok:
                     return validated, ToolResult("error", f"{arg_name} must be a boolean.")
                 validated[arg_name] = parsed
+        if isinstance(required, list):
+            for arg_name in required:
+                if not isinstance(arg_name, str):
+                    continue
+                if arg_name not in validated or validated.get(arg_name) is None:
+                    return validated, ToolResult("error", f"{arg_name} is required.")
         return validated, None
 
     def _register_builtins(self) -> None:

@@ -143,6 +143,17 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(bool_tool_payload["result"]["status"], "error")
                 self.assertEqual(bool_tool_payload["result"]["message"], "execute must be a boolean.")
                 self.assertNotIn("Traceback", json.dumps(bool_tool_payload))
+                required_tool_req = urllib.request.Request(
+                    f"http://{host}:{port}/tool",
+                    data=json.dumps({"name": "workspace_write", "args": {"path": "notes/missing.md"}}, separators=(",", ":")).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(required_tool_req, timeout=5) as response:
+                    required_tool_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(required_tool_payload["result"]["status"], "error")
+                self.assertEqual(required_tool_payload["result"]["message"], "content is required.")
+                self.assertNotIn("Traceback", json.dumps(required_tool_payload))
                 oversized_req = urllib.request.Request(
                     f"http://{host}:{port}/message",
                     data=json.dumps({"message": "x" * 128}).encode("utf-8"),
@@ -198,6 +209,11 @@ class AgentRuntimeTests(unittest.TestCase):
                         self.assertNotIn("invalid literal", serialized)
                         self.assertNotIn("Traceback", serialized)
 
+                missing_required = runtime.registry.run("workspace_write", {"path": "notes/missing-required.md"})
+                self.assertEqual(missing_required.status, "error")
+                self.assertEqual(missing_required.message, "content is required.")
+                self.assertFalse((runtime.registry.workspace_root / "notes" / "missing-required.md").exists())
+
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
                 dry_run = runtime.registry.run("run_command", {"target": "app.example.test", "type": "local", "purpose": "boolean dry-run regression", "command": "printf bool-validation-ok", "execute": "false"})
@@ -222,11 +238,14 @@ class AgentRuntimeTests(unittest.TestCase):
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
+                    rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     self.assertEqual(rejected.status, "error")
                     self.assertEqual(rejected.message, "limit must be an integer.")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
+                    self.assertEqual(rejected_required.status, "error")
+                    self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(before, after)
                 finally:
                     confirm_runtime.close()

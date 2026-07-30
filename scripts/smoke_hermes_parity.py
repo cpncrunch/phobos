@@ -236,6 +236,30 @@ def main(argv: list[str] | None = None) -> int:
             and boolean_workspace_text == "new-tail"
             and "Traceback" not in json.dumps(boolean_validation_payload)
         )
+        missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
+        approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("workspace_write")
+        try:
+            missing_required_confirm_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required-confirm.md"})
+        finally:
+            runtime.registry.confirm_tools.discard("workspace_write")
+        approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        required_validation_payload = {
+            "missing_required": missing_required_tool.to_dict(),
+            "missing_required_confirm": missing_required_confirm_tool.to_dict(),
+            "approvals_before": approval_count_before,
+            "approvals_after": approval_count_after,
+        }
+        write("tool-schema-required-validation.json", json.dumps(required_validation_payload, indent=2))
+        checks["tool_schema_required_validation_ok"] = (
+            missing_required_tool.status == "error"
+            and missing_required_tool.message == "content is required."
+            and missing_required_confirm_tool.status == "error"
+            and missing_required_confirm_tool.message == "content is required."
+            and approval_count_before == approval_count_after
+            and not (runtime.registry.workspace_root / "notes" / "schema-required.md").exists()
+            and "Traceback" not in json.dumps(required_validation_payload)
+        )
 
         scope_summary = handle("scope-summary", "/scope")
         scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
