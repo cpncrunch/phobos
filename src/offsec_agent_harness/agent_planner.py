@@ -67,6 +67,11 @@ def plan_agent_actions(prompt: str, *, allow_command_execution: bool = False) ->
         if not allow_command_execution and (wants_run or wants_start):
             warnings.append("Command execution was requested, but this plan leaves execute=false unless /auto execute=true is supplied.")
 
+    if _wants_guardrail_selftest(lower):
+        keyed = _parse_key_values(text)
+        args = {key: keyed[key] for key in ("target", "host", "url") if key in keyed and str(keyed[key]).strip()}
+        calls.append(PlannedToolCall("guardrail_selftest", args, "Operator asked for a read-only guardrail decision self-test."))
+
     scope_target = _extract_scope_target(text)
     if scope_target is not None:
         calls.append(PlannedToolCall("scope_check", {"target": scope_target} if scope_target else {}, "Operator asked for a read-only ROE/scope check."))
@@ -136,6 +141,20 @@ def _extract_command_args(text: str) -> dict[str, Any] | None:
     args.setdefault("type", args.get("action_type", "host"))
     args.setdefault("purpose", "auto-planned operator request")
     return args
+
+
+def _wants_guardrail_selftest(lower: str) -> bool:
+    needles = (
+        "guardrail self-test",
+        "guardrail selftest",
+        "guardrails self-test",
+        "test guardrails",
+        "guardrail test",
+        "safety self-test",
+        "safety selftest",
+        "policy self-test",
+    )
+    return any(needle in lower for needle in needles)
 
 
 def _extract_scope_target(text: str) -> str | None:

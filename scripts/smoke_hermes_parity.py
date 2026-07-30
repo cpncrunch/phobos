@@ -154,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                 "delegate_tasks",
                 "auth_status",
                 "safety_preflight",
+                "guardrail_selftest",
                 "media_import",
                 "sealed_export",
                 "hindsight_retain",
@@ -231,6 +232,28 @@ def main(argv: list[str] | None = None) -> int:
             and '"decision": "allow"' in scope_ipv6_allowed
             and '"decision": "allow"' in scope_ipv6_port_allowed
             and "supersecret" not in scope_url_port_allowed + scope_url_port_blocked + scope_wildcard_port_allowed + scope_ipv6_allowed + scope_ipv6_port_allowed
+        )
+
+        guardrail_selftest = handle("guardrail-selftest", '/guardrail-test target="https://app.example.test/login?token=supersecret"')
+        guardrail_selftest_schema = handle("schema-guardrail-selftest", "/schemas name=guardrail_selftest")
+        guardrail_selftest_auto = handle("auto-guardrail-selftest", '/auto apply=true prompt="run guardrail self-test target=app.example.test"')
+        guardrail_selftest_cli = run_cmd(
+            "guardrail-test-cli",
+            [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "guardrail-test", "--engagement", str(engagement_path), "--target", "app.example.test", "--out", "smoke-cli-guardrail-selftest.md"],
+        )
+        guardrail_selftest_json = json.loads(guardrail_selftest_cli)
+        checks["guardrail_selftest_ok"] = (
+            "Guardrail self-test ready" in guardrail_selftest
+            and '"no_target_activity": true' in guardrail_selftest
+            and '"executed": false' in guardrail_selftest
+            and '"actual": "allow"' in guardrail_selftest
+            and '"actual": "confirm"' in guardrail_selftest
+            and '"actual": "block"' in guardrail_selftest
+            and "guardrail_selftest" in guardrail_selftest_schema
+            and '"tool": "guardrail_selftest"' in guardrail_selftest_auto
+            and guardrail_selftest_json.get("status") == "ok"
+            and guardrail_selftest_json.get("data", {}).get("readiness") == "ready"
+            and "supersecret" not in guardrail_selftest + guardrail_selftest_schema + guardrail_selftest_auto + guardrail_selftest_cli
         )
 
         natural_polish = handle("natural-polish", "What is the safest next step for a controlled IDOR?")
@@ -1346,7 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
         ref_route = "/ref?ref=task:1"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/finding-bundle?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/guardrail-test?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/finding-bundle?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1402,6 +1425,10 @@ def main(argv: list[str] | None = None) -> int:
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
         preflight_data_obj = preflight_route.get("data")
         preflight_route_data: dict[str, object] = preflight_data_obj if isinstance(preflight_data_obj, dict) else {}
+        guardrail_route_obj = gateway_gets.get("/guardrail-test?target=app.example.test")
+        guardrail_route: dict[str, object] = guardrail_route_obj if isinstance(guardrail_route_obj, dict) else {}
+        guardrail_data_obj = guardrail_route.get("data")
+        guardrail_route_data: dict[str, object] = guardrail_data_obj if isinstance(guardrail_data_obj, dict) else {}
         manifest_route_obj = gateway_gets.get("/manifest?limit=50&include_agent=false")
         manifest_route: dict[str, object] = manifest_route_obj if isinstance(manifest_route_obj, dict) else {}
         manifest_data_obj = manifest_route.get("data")
@@ -1433,7 +1460,7 @@ def main(argv: list[str] | None = None) -> int:
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and guardrail_route_data.get("no_target_activity") is True and guardrail_route_data.get("readiness") == "ready" and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(guardrail_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

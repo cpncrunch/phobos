@@ -166,6 +166,61 @@ class AgentRuntimeTests(unittest.TestCase):
                 else:
                     os.environ["PHOBOS_PREFLIGHT_TOKEN"] = old_token
 
+    def test_guardrail_selftest_is_read_only_redacted_and_gateway_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                selftest = runtime.registry.run("guardrail_selftest", {"target": "https://app.example.test/login?token=supersecret", "out": "unit-selftest"})
+                self.assertEqual(selftest.status, "ok", selftest.to_dict())
+                self.assertEqual(selftest.data["readiness"], "ready", selftest.to_dict())
+                self.assertTrue(selftest.data["no_target_activity"])
+                self.assertFalse(selftest.data["executed"])
+                cases = {case["name"]: case for case in selftest.data["cases"]}
+                self.assertEqual(cases["read_only_headers"]["actual"], "allow")
+                self.assertEqual(cases["routine_active_enumeration"]["actual"], "allow")
+                self.assertEqual(cases["state_changing_http"]["actual"], "confirm")
+                self.assertEqual(cases["lockout_sensitive_auth"]["actual"], "confirm")
+                self.assertEqual(cases["availability_impacting_pattern"]["actual"], "block")
+                self.assertEqual(cases["out_of_scope_target"]["actual"], "block")
+                markdown = Path(selftest.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Phobos Guardrail Self-Test", markdown)
+                self.assertIn("No target activity was performed", markdown)
+                self.assertNotIn("supersecret", json.dumps(selftest.to_dict()) + markdown)
+
+                runtime.roe.safety_mode = "standard"
+                standard = runtime.registry.run("guardrail_selftest", {})
+                standard_cases = {case["name"]: case for case in standard.data["cases"]}
+                self.assertEqual(standard.data["readiness"], "ready", standard.to_dict())
+                self.assertEqual(standard_cases["routine_active_enumeration"]["actual"], "confirm")
+                runtime.roe.safety_mode = "non_destructive"
+
+                slash = runtime.handle_message('/guardrail-test target="https://app.example.test/login?token=supersecret"')
+                schema = runtime.handle_message("/schemas name=guardrail_selftest")
+                auto = runtime.handle_message('/auto apply=true prompt="run guardrail self-test target=app.example.test"')
+                self.assertIn("Guardrail self-test ready", slash)
+                self.assertIn("guardrail_selftest", schema)
+                self.assertIn('"tool": "guardrail_selftest"', auto)
+                self.assertNotIn("supersecret", slash + schema + auto)
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                encoded = urllib.parse.urlencode({"target": "app.example.test"})
+                with urllib.request.urlopen(f"http://{host}:{port}/guardrail-test?{encoded}", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertTrue(payload["data"]["no_target_activity"])
+                self.assertEqual(payload["data"]["readiness"], "ready")
+
+                raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event IN ('tool_call', 'tool_result', 'guardrail_selftest')").fetchall())
+                self.assertNotIn("supersecret", raw_audit)
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
     def test_memory_assess_run_approval_jobs_and_subagents(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
@@ -626,6 +681,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("evidence_manifest_verify", {"path": "containment-manifest.json", "out": str(Path(tmp) / "outside-manifest-verify.json")}, Path(tmp) / "outside-manifest-verify.json"),
                     ("evidence_secret_scan", {"out": str(Path(tmp) / "outside-secret-scan.json")}, Path(tmp) / "outside-secret-scan.json"),
                     ("closeout_review", {"out": str(Path(tmp) / "outside-closeout.md")}, Path(tmp) / "outside-closeout.md"),
+                    ("guardrail_selftest", {"out": str(Path(tmp) / "outside-guardrail-selftest.md")}, Path(tmp) / "outside-guardrail-selftest.md"),
                 ]
                 for tool, args, outside_path in escape_cases:
                     blocked = runtime.registry.run(tool, args)

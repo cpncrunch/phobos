@@ -17,6 +17,7 @@ import time
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit
 
 from .bloodhound import analyze_bloodhound
 from .burp_mcp import BurpMCPClient, HTTPRequestArtifact, write_burp_artifacts
@@ -78,7 +79,7 @@ class OffSecToolRegistry:
         self.blocked_tools = {name.strip() for name in blocked_tools if name.strip()}
         self.confirm_tools = {name.strip() for name in confirm_tools if name.strip()}
         self.runtime_metadata = runtime_metadata or {}
-        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "get_approval", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight"}
+        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "get_approval", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight", "guardrail_selftest"}
         self.workspace_root = Path(workspace_dir) if workspace_dir else self.harness.store.root / "agent" / "workspace"
         if not self.workspace_root.is_absolute():
             self.workspace_root = (self.harness.store.root / self.workspace_root).resolve()
@@ -210,6 +211,7 @@ class OffSecToolRegistry:
         self.register_tool("get_delegation", self.get_delegation, _spec("get_delegation", "Get one current-session delegation batch by id, including child-session metadata and artifact paths.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
         self.register_tool("safety_preflight", self.safety_preflight, _spec("safety_preflight", "Run a read-only engagement/runtime readiness preflight and write a redacted Markdown report.", {"out": _string("Optional Markdown output path; relative paths go under agent/preflight.")}, []))
+        self.register_tool("guardrail_selftest", self.guardrail_selftest, _spec("guardrail_selftest", "Run a read-only guardrail simulator over representative allow/confirm/block cases; writes a redacted Markdown report and performs no target activity.", {"target": _string("Optional in-scope host/IP/URL to use for synthetic allow/confirm cases."), "host": _string("Alias for target."), "url": _string("Alias for target."), "out": _string("Optional Markdown output path; relative paths go under agent/guardrails.")}, []))
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
         self.register_tool("media_get", self.media_get, _spec("media_get", "Get one current-session media/artifact metadata record by id without reading file contents.", {"id": {"type": "integer"}}, ["id"]))
@@ -1350,6 +1352,137 @@ class OffSecToolRegistry:
         return ToolResult(
             "ok",
             f"Safety preflight {readiness}: {counts.get('fail', 0)} fail, {counts.get('warn', 0)} warn, {counts.get('pass', 0)} pass.",
+            data,
+            {"markdown": str(out)},
+        )
+
+    def guardrail_selftest(self, args: dict[str, Any]) -> ToolResult:
+        """Simulate representative guardrail outcomes without executing or touching targets."""
+
+        raw_target = str(args.get("target") or args.get("host") or args.get("url") or "").strip()
+        selected_target = raw_target or _first_selftest_scope_target(self.roe.in_scope_targets)
+        command_target = _selftest_command_target(selected_target)
+        out_of_scope_target = _selftest_out_of_scope_target(self.roe.in_scope_targets)
+        safety_mode = (self.roe.safety_mode or "non_destructive").strip().lower().replace("-", "_")
+        active_expected = "allow" if safety_mode == "non_destructive" else "confirm"
+        case_specs = [
+            {
+                "name": "read_only_headers",
+                "category": "allow",
+                "target": selected_target,
+                "action_type": "web",
+                "purpose": "guardrail self-test read-only header capture",
+                "command": f"curl -I https://{command_target}",
+                "expected": "allow",
+                "why": "In-scope read-only capture should be allowed while still requiring explicit operator execution outside this self-test.",
+            },
+            {
+                "name": "routine_active_enumeration",
+                "category": active_expected,
+                "target": selected_target,
+                "action_type": "service-enumeration",
+                "purpose": "guardrail self-test routine version enumeration",
+                "command": f"nmap -sV --version-light {command_target}",
+                "expected": active_expected,
+                "why": "Routine active enumeration is allowed in non_destructive mode and confirmation-gated in standard mode.",
+            },
+            {
+                "name": "state_changing_http",
+                "category": "confirm",
+                "target": selected_target,
+                "action_type": "web",
+                "purpose": "guardrail self-test controlled state change",
+                "command": f"curl -X POST https://{command_target}/phobos-controlled-test",
+                "expected": "confirm",
+                "why": "State-changing HTTP methods should queue for human/ROE confirmation.",
+            },
+            {
+                "name": "lockout_sensitive_auth",
+                "category": "confirm",
+                "target": selected_target,
+                "action_type": "auth",
+                "purpose": "guardrail self-test password spray against controlled test user",
+                "command": f"kerbrute passwordspray --dc {command_target} users.txt '<REDACTED_TEST_PASSWORD>'",
+                "expected": "confirm",
+                "why": "Lockout-sensitive authentication testing should queue for confirmation.",
+            },
+            {
+                "name": "availability_impacting_pattern",
+                "category": "block",
+                "target": selected_target,
+                "action_type": "web",
+                "purpose": "guardrail self-test high-rate availability-impacting pattern",
+                "command": f"hping3 --flood {command_target}",
+                "expected": "block",
+                "why": "High-rate availability-impacting patterns should hard-block.",
+            },
+            {
+                "name": "out_of_scope_target",
+                "category": "block",
+                "target": out_of_scope_target,
+                "action_type": "web",
+                "purpose": "guardrail self-test out-of-scope target",
+                "command": f"curl -I https://{_selftest_command_target(out_of_scope_target)}",
+                "expected": "block",
+                "why": "Targets not listed in the ROE must fail closed.",
+            },
+        ]
+        cases: list[dict[str, Any]] = []
+        for spec in case_specs:
+            request = ActionRequest(
+                target=str(spec["target"]),
+                action_type=str(spec["action_type"]),
+                purpose=str(spec["purpose"]),
+                command=str(spec["command"]),
+                actor="phobos-guardrail-selftest",
+                metadata={"selftest_case": spec["name"], "no_target_activity": True},
+            )
+            decision = self.harness.guardrails.evaluate(self.roe, request)
+            actual = decision.status.value
+            expected = str(spec["expected"])
+            passed = actual == expected
+            cases.append(_redacted_mapping({
+                "name": spec["name"],
+                "category": spec["category"],
+                "expected": expected,
+                "actual": actual,
+                "status": "pass" if passed else "fail",
+                "target": request.target,
+                "action_type": request.action_type,
+                "purpose": request.purpose,
+                "redacted_command": decision.redacted_command,
+                "reasons": decision.reasons,
+                "required_confirmations": decision.required_confirmations,
+                "safer_alternatives": decision.safer_alternatives,
+                "why": spec["why"],
+            }))
+        counts = _preflight_counts(cases)
+        readiness = "ready" if counts.get("fail", 0) == 0 else "blocked" if not self.roe.authorized or not self.roe.in_scope_targets else "review"
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "guardrails",
+            str(args.get("out") or "").strip(),
+            f"guardrail-selftest-{stamp}.md",
+            suffix=".md",
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_guardrail_selftest_markdown(self.roe.name, readiness, cases, counts, selected_target), encoding="utf-8")
+        data = _redacted_mapping({
+            "readiness": readiness,
+            "counts": counts,
+            "safety_mode": self.roe.safety_mode,
+            "target": selected_target,
+            "cases": cases,
+            "path": str(out),
+            "no_target_activity": True,
+            "executed": False,
+            "secret_values_redacted": True,
+        })
+        self.store.audit(self.session_id, "guardrail_selftest", {"readiness": readiness, "counts": counts, "path": str(out)})
+        return ToolResult(
+            "ok",
+            f"Guardrail self-test {readiness}: {counts.get('fail', 0)} fail, {counts.get('pass', 0)} pass.",
             data,
             {"markdown": str(out)},
         )
@@ -3740,6 +3873,120 @@ def _preflight_check(category: str, name: str, status: str, detail: str, recomme
     })
 
 
+def _guardrail_selftest_markdown(
+    engagement_name: str,
+    readiness: str,
+    cases: list[dict[str, Any]],
+    counts: dict[str, int],
+    selected_target: str,
+) -> str:
+    lines = [
+        "# Phobos Guardrail Self-Test",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Readiness: `{_md_cell(readiness)}`",
+        f"Synthetic in-scope target: `{_md_cell(selected_target)}`",
+        "No target activity was performed. This report simulates representative guardrail decisions only; no command was executed and no network request was sent.",
+        "",
+        "## Summary",
+        "",
+        f"- Pass: {counts.get('pass', 0)}",
+        f"- Fail: {counts.get('fail', 0)}",
+        "",
+        "## Simulated cases",
+        "",
+        "| Case | Expected | Actual | Status | Target | Redacted command | Reasons |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for case in cases:
+        reasons = "; ".join(str(item) for item in case.get("reasons", []) if str(item))
+        lines.append(
+            "| "
+            + " | ".join(
+                _md_cell(value)
+                for value in [
+                    case.get("name"),
+                    case.get("expected"),
+                    case.get("actual"),
+                    case.get("status"),
+                    case.get("target"),
+                    case.get("redacted_command"),
+                    reasons,
+                ]
+            )
+            + " |"
+        )
+    lines += ["", "## Safety notes", ""]
+    for case in cases:
+        raw_alternatives = case.get("safer_alternatives")
+        raw_required = case.get("required_confirmations")
+        alternatives = raw_alternatives if isinstance(raw_alternatives, list) else []
+        required = raw_required if isinstance(raw_required, list) else []
+        notes = "; ".join(str(item) for item in [*required, *alternatives] if str(item))
+        if notes:
+            lines.append(f"- **{_md_cell(case.get('name'))}:** {_md_cell(notes)}")
+    if all(not case.get("safer_alternatives") and not case.get("required_confirmations") for case in cases):
+        lines.append("- No confirmation requirements or safer alternatives were emitted by the simulated decisions.")
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
+def _first_selftest_scope_target(scope_rules: list[str]) -> str:
+    for rule in scope_rules:
+        value = str(rule).strip()
+        if value and not _looks_broad_scope_target(value):
+            return value
+    for rule in scope_rules:
+        value = str(rule).strip()
+        if value:
+            return value
+    return "phobos-selftest.invalid"
+
+
+def _selftest_out_of_scope_target(scope_rules: list[str]) -> str:
+    candidates = [
+        "phobos-selftest-outside.invalid",
+        "outside.phobos-selftest.invalid",
+        "203.0.113.254",
+        "198.51.100.254",
+        "[2001:db8:ffff::1]",
+    ]
+    for candidate in candidates:
+        if not target_in_scope(candidate, scope_rules).in_scope:
+            return candidate
+    return candidates[0]
+
+
+def _selftest_command_target(target: str) -> str:
+    text = str(target or "").strip()
+    if not text:
+        return "phobos-selftest.invalid"
+    parsed_host = ""
+    parsed_port: int | None = None
+    try:
+        if "://" in text or text.startswith("//"):
+            parsed = urlsplit(text)
+            parsed_host = parsed.hostname or ""
+            parsed_port = parsed.port
+    except ValueError:
+        parsed_host = ""
+    if parsed_host:
+        host = parsed_host.strip("[]").lower()
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{host}:{parsed_port}" if parsed_port else host
+    stripped = text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in stripped:
+        stripped = stripped.rsplit("@", 1)[1]
+    stripped = stripped.strip().strip("[]")
+    if stripped.startswith("*."):
+        stripped = "wildcard." + stripped[2:]
+    stripped = stripped.replace("*", "wildcard")
+    safe = re.sub(r"[^A-Za-z0-9_.:\[\]-]", "-", stripped).strip(".-")
+    return safe or "phobos-selftest.invalid"
+
+
+
 def _preflight_counts(checks: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"pass": 0, "warn": 0, "fail": 0, "info": 0}
     for check in checks:
@@ -4308,6 +4555,7 @@ def _artifact_category(relative_path: str) -> str:
         ("agent/context-nodes/", "context"),
         ("agent/delegations/", "delegation"),
         ("agent/preflight/", "preflight"),
+        ("agent/guardrails/", "guardrail"),
         ("agent/media/", "media"),
         ("agent/timelines/", "timeline"),
         ("agent/briefings/", "briefing"),

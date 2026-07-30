@@ -364,6 +364,10 @@ class OffSecAgentRuntime:
             "preflight": "safety_preflight",
             "safety-preflight": "safety_preflight",
             "readiness": "safety_preflight",
+            "guardrail-test": "guardrail_selftest",
+            "guardrail-selftest": "guardrail_selftest",
+            "guardrails-test": "guardrail_selftest",
+            "safety-selftest": "guardrail_selftest",
             "media-import": "media_import",
             "media-list": "media_list",
             "media-get": "media_get",
@@ -905,6 +909,7 @@ HELP_TEXT = """Phobos Agent commands:
 /workspace-search query=<regex> glob="**/*.md"
 /patch-file path=<file> old=<text> new=<text> replace_all=false
 /scope target=<optional-host-or-url>
+/guardrail-test target=<optional-host-or-url> out=<optional.md>
 /assess target=<host> type=<web|api|host> purpose=<why> command=<cmd>
 /run target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true
 /start target=<host> type=<host|web|api> purpose=<why> command=<cmd> execute=true

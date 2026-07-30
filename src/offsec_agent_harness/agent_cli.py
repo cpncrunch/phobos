@@ -174,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--engagement", required=True)
     preflight.add_argument("--out", help="Optional Markdown output path under the engagement agent/preflight artifacts directory")
 
+    for guardrail_test_cmd in ("guardrail-test", "guardrail-selftest"):
+        guardrail_test = sub.add_parser(guardrail_test_cmd, help="Run a read-only guardrail decision self-test without executing commands or touching targets")
+        guardrail_test.add_argument("--engagement", required=True)
+        guardrail_test.add_argument("--target", help="Optional in-scope host/IP/URL for the synthetic allow/confirm cases")
+        guardrail_test.add_argument("--out", help="Optional Markdown output path under the engagement agent/guardrails artifact directory")
+
     evidence_manifest = sub.add_parser("evidence-manifest", help="Write a read-only SHA-256 evidence artifact inventory")
     evidence_manifest.add_argument("--engagement", required=True)
     evidence_manifest.add_argument("--out", help="Optional JSON output path under the engagement agent/manifests artifacts directory")
@@ -439,6 +445,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.subcommand == "preflight":
             tool_args = {"out": args.out} if args.out else {}
             result = runtime.registry.run("safety_preflight", tool_args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand in {"guardrail-test", "guardrail-selftest"}:
+            tool_args = {"out": args.out or ""}
+            if args.target:
+                tool_args["target"] = args.target
+            result = runtime.registry.run("guardrail_selftest", tool_args)
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2
         if args.subcommand == "evidence-manifest":

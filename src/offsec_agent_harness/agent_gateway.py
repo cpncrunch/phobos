@@ -111,6 +111,16 @@ class AgentGateway:
                     if path == "/preflight":
                         _write_json(self, runtime.registry.run("safety_preflight", {}).to_dict())
                         return
+                    if path in {"/guardrail-test", "/guardrail-selftest", "/guardrails-test", "/safety-selftest"}:
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {}
+                        target = (query.get("target") or query.get("host") or query.get("url") or [""])[0]
+                        if target:
+                            args["target"] = target
+                        if (query.get("out") or [""])[0]:
+                            args["out"] = (query.get("out") or [""])[0]
+                        _write_json(self, runtime.registry.run("guardrail_selftest", args).to_dict())
+                        return
                     if path in {"/scope", "/scope-check", "/roe-check"}:
                         query = parse_qs(parsed.query)
                         args: dict[str, Any] = {}
@@ -431,6 +441,8 @@ def _gateway_paths() -> list[str]:
         "/routes",
         "/status",
         "/preflight",
+        "/guardrail-test",
+        "/guardrail-selftest",
         "/scope",
         "/scope-check",
         "/roe-check",
@@ -522,6 +534,7 @@ def remote_client_html(default_base_url: str = "") -> str:
   </section>
   <div class="grid">
     <section><h2>Status</h2><pre id="status"></pre></section>
+    <section><h2>Guardrail Self-Test</h2><pre id="guardrailtest"></pre></section>
     <section><h2>Timeline</h2><pre id="timeline"></pre></section>
     <section><h2>Evidence Manifest</h2><pre id="manifest"></pre></section>
     <section><h2>Closeout Review</h2><pre id="closeout"></pre></section>
@@ -581,7 +594,7 @@ function show(id, data) {{ document.getElementById(id).textContent = JSON.string
 function err(e) {{ document.getElementById('errors').textContent = String(e); }}
 async function health() {{ try {{ show('errors', await api('/health')); }} catch(e) {{ err(e); }} }}
 async function loadAll() {{ try {{ document.getElementById('errors').textContent=''; await Promise.all([
-  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/timeline?limit=25&include_audit=false').then(d=>show('timeline',d)), api('/manifest?limit=50').then(d=>show('manifest',d)), api('/closeout').then(d=>show('closeout',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
+  api('/status').then(d=>show('status',d)), api('/guardrail-test').then(d=>show('guardrailtest',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/timeline?limit=25&include_audit=false').then(d=>show('timeline',d)), api('/manifest?limit=50').then(d=>show('manifest',d)), api('/closeout').then(d=>show('closeout',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
 ]); }} catch(e) {{ err(e); }} }}
 function setLines(id, values) {{ document.getElementById(id).value = (values || []).join('\\n'); }}
 function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}
