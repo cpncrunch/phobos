@@ -558,7 +558,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 42 tests
+Ran 43 tests
 OK
 ```
 
@@ -591,6 +591,7 @@ background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
 task_board_roundtrip=True
+session_bound_task_process_ok=True
 context_compacted=True
 lcm_context_nodes_ok=True
 hindsight_lcm_aliases_ok=True
@@ -622,7 +623,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=225
+artifact_count=229
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

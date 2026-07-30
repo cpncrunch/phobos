@@ -379,6 +379,30 @@ def main(argv: list[str] | None = None) -> int:
         checks["background_process_completed"] = polled.status == "completed" and waited.status == "completed" and "bg-parity-ok" in log.data.get("stdout", "")
         checks["wait_process_ok"] = waited.status == "completed" and "bg-parity-ok" in waited.data.get("stdout", "")
 
+        process_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-process-smoke"))
+        try:
+            other_process = process_scope_runtime.registry.run("start_process", {"target": "app.example.test", "type": "host", "purpose": "other session process scope", "command": "sleep 5", "execute": True})
+            other_process_id = int(other_process.data.get("process_id", 0)) if other_process.data.get("process_id") else 0
+            cross_process_results = {
+                "start": other_process.to_dict(),
+                "poll": runtime.registry.run("poll_process", {"id": other_process_id}).to_dict(),
+                "log": runtime.registry.run("process_log", {"id": other_process_id}).to_dict(),
+                "wait": runtime.registry.run("wait_process", {"id": other_process_id, "timeout": 0}).to_dict(),
+                "kill": runtime.registry.run("kill_process", {"id": other_process_id}).to_dict(),
+                "owner_poll_after_cross_kill": process_scope_runtime.registry.run("poll_process", {"id": other_process_id}).to_dict(),
+            }
+        finally:
+            for process in process_scope_runtime.store.list_processes(process_scope_runtime.session_id, limit=10):
+                process_scope_runtime.registry.run("kill_process", {"id": process["id"]})
+            process_scope_runtime.close()
+        write("session-bound-process.json", json.dumps(cross_process_results, indent=2))
+        process_scope_ok = (
+            other_process_id > 0
+            and all(cross_process_results[name]["status"] == "error" for name in ["poll", "log", "wait", "kill"])
+            and "not found in this session" in json.dumps(cross_process_results)
+            and cross_process_results["owner_poll_after_cross_kill"]["status"] != "error"
+        )
+
         job = handle("job", '/job name=memory-check schedule=manual prompt="/recall query=smoke-client"')
         due = runtime.run_due_jobs()
         write("run-due.json", json.dumps(due, indent=2))
@@ -390,6 +414,18 @@ def main(argv: list[str] | None = None) -> int:
         task_list = handle("tasks", "/tasks status=all")
         auto_task = handle("auto-task", '/auto apply=true prompt="task: verify handoff import"')
         checks["task_board_roundtrip"] = "Task 1 added" in add_task and '"status": "completed"' in update_task and "Review parity smoke" in task_list and '"tool": "add_task"' in auto_task
+        task_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-task-smoke"))
+        try:
+            other_task = task_scope_runtime.registry.run("add_task", {"content": "Other session task scope sentinel", "status": "pending"})
+            other_task_id = int(other_task.data.get("task", {}).get("id", 0))
+            cross_task_update = runtime.registry.run("update_task", {"id": other_task_id, "status": "completed"})
+            unchanged_task = task_scope_runtime.store.get_task(other_task_id, session_id=task_scope_runtime.session_id) or {}
+            cross_task_results = {"other_task": other_task.to_dict(), "cross_update": cross_task_update.to_dict(), "owner_task_after_cross_update": unchanged_task}
+        finally:
+            task_scope_runtime.close()
+        write("session-bound-task.json", json.dumps(cross_task_results, indent=2))
+        task_scope_ok = other_task_id > 0 and cross_task_update.status == "error" and "not found in this session" in cross_task_update.message and unchanged_task.get("status") == "pending"
+        checks["session_bound_task_process_ok"] = bool(process_scope_ok and task_scope_ok)
 
         compact = handle("compact", "/compact limit=80")
         context = handle("context", "/context query=smoke-client limit=8")

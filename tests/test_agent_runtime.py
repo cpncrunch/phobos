@@ -227,6 +227,68 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_task_and_process_ids_are_session_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            other_runtime = None
+            try:
+                own_task = runtime.registry.run("add_task", {"content": "own task"})
+                self.assertEqual(own_task.status, "ok", own_task.to_dict())
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(
+                    engagement_path=runtime.config.engagement_path,
+                    db_path=runtime.config.db_path,
+                    session_name="other-session-scope",
+                ))
+                other_task = other_runtime.registry.run("add_task", {"content": "other task", "status": "pending"})
+                self.assertEqual(other_task.status, "ok", other_task.to_dict())
+                other_task_id = int(other_task.data["task"]["id"])
+                cross_task = runtime.registry.run("update_task", {"id": other_task_id, "status": "completed"})
+                self.assertEqual(cross_task.status, "error", cross_task.to_dict())
+                self.assertIn("not found in this session", cross_task.message)
+                unchanged_task = other_runtime.store.get_task(other_task_id, session_id=other_runtime.session_id)
+                self.assertIsNotNone(unchanged_task)
+                assert unchanged_task is not None
+                self.assertEqual(unchanged_task["status"], "pending")
+
+                own_process = runtime.registry.run("start_process", {
+                    "target": "app.example.test",
+                    "type": "host",
+                    "purpose": "own process scope proof",
+                    "command": "printf own-process-ok",
+                    "execute": True,
+                })
+                self.assertEqual(own_process.status, "started", own_process.to_dict())
+                other_process = other_runtime.registry.run("start_process", {
+                    "target": "app.example.test",
+                    "type": "host",
+                    "purpose": "other process scope proof",
+                    "command": "sleep 10",
+                    "execute": True,
+                })
+                self.assertEqual(other_process.status, "started", other_process.to_dict())
+                other_process_id = int(other_process.data["process_id"])
+                for tool_name, args in (
+                    ("poll_process", {"id": other_process_id}),
+                    ("process_log", {"id": other_process_id}),
+                    ("wait_process", {"id": other_process_id, "timeout": 0}),
+                    ("kill_process", {"id": other_process_id}),
+                ):
+                    cross_process = runtime.registry.run(tool_name, args)
+                    self.assertEqual(cross_process.status, "error", cross_process.to_dict())
+                    self.assertIn("not found in this session", cross_process.message)
+                other_after_cross_kill = other_runtime.registry.run("poll_process", {"id": other_process_id})
+                self.assertIn(other_after_cross_kill.status, {"running", "started", "completed", "unknown"}, other_after_cross_kill.to_dict())
+
+                own_wait = runtime.registry.run("wait_process", {"id": own_process.data["process_id"], "timeout": 5})
+                self.assertEqual(own_wait.status, "completed", own_wait.to_dict())
+                self.assertIn("own-process-ok", own_wait.data["stdout"])
+            finally:
+                if other_runtime is not None:
+                    for process in other_runtime.store.list_processes(other_runtime.session_id, limit=10):
+                        other_runtime.registry.run("kill_process", {"id": process["id"]})
+                    other_runtime.close()
+                runtime.close()
+
     def test_workspace_search_does_not_follow_symlink_escape(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)

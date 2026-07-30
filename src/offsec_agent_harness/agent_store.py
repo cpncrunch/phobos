@@ -563,7 +563,15 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def update_task(self, task_id: int, *, content: str | None = None, status: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def update_task(
+        self,
+        task_id: int,
+        *,
+        session_id: str | None = None,
+        content: str | None = None,
+        status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         fields: list[str] = []
         values: list[Any] = []
         if content is not None:
@@ -576,16 +584,25 @@ class AgentStore:
             fields.append("metadata_json=?")
             values.append(json.dumps(metadata, sort_keys=True))
         if not fields:
-            return self.get_task(task_id)
+            return self.get_task(task_id, session_id=session_id)
         fields.append("updated_at=?")
         values.append(utc_now())
+        where = "id=?"
         values.append(task_id)
-        self.conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", values)
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE {where}", values)
         self.conn.commit()
-        return self.get_task(task_id)
+        if cur.rowcount == 0:
+            return None
+        return self.get_task(task_id, session_id=session_id)
 
-    def get_task(self, task_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    def get_task(self, task_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM tasks WHERE id=? AND session_id=?", (task_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return _task_row(row) if row else None
 
     def list_tasks(self, session_id: str, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -884,7 +901,7 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def update_process(self, process_id: int, **fields: Any) -> None:
+    def update_process(self, process_id: int, *, session_id: str | None = None, **fields: Any) -> bool:
         allowed = {"pid", "status", "ended_at", "exit_code", "stdout_path", "stderr_path", "rc_path"}
         assignments = []
         values = []
@@ -893,13 +910,21 @@ class AgentStore:
                 assignments.append(f"{key}=?")
                 values.append(value)
         if not assignments:
-            return
+            return False
+        where = "id=?"
         values.append(process_id)
-        self.conn.execute(f"UPDATE processes SET {', '.join(assignments)} WHERE id=?", values)
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        cur = self.conn.execute(f"UPDATE processes SET {', '.join(assignments)} WHERE {where}", values)
         self.conn.commit()
+        return cur.rowcount > 0
 
-    def get_process(self, process_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM processes WHERE id=?", (process_id,)).fetchone()
+    def get_process(self, process_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is not None:
+            row = self.conn.execute("SELECT * FROM processes WHERE id=? AND session_id=?", (process_id, session_id)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM processes WHERE id=?", (process_id,)).fetchone()
         if not row:
             return None
         data = dict(row)

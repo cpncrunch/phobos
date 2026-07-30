@@ -274,14 +274,14 @@ class OffSecToolRegistry:
         finally:
             stdout_handle.close()
             stderr_handle.close()
-        self.store.update_process(process_id, pid=proc.pid, status="running")
+        self.store.update_process(process_id, session_id=self.session_id, pid=proc.pid, status="running")
         _LIVE_PROCESSES[process_id] = proc
         return ToolResult("started", f"Background process {process_id} started with pid {proc.pid}.", {"process_id": process_id, "pid": proc.pid, "decision": decision.to_dict()}, {"stdout": str(stdout_path), "stderr": str(stderr_path), "return_code": str(rc_path), "decision_log": str(evidence_path)})
 
     def poll_process(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
         if not process:
-            return ToolResult("error", "Process not found.")
+            return ToolResult("error", "Process not found in this session.")
         return ToolResult(process["status"], f"Process {process['id']} is {process['status']}.", {"process": process})
 
     def wait_process(self, args: dict[str, Any]) -> ToolResult:
@@ -292,14 +292,14 @@ class OffSecToolRegistry:
             time.sleep(0.05)
             process = self._refresh_process(process_id)
         if not process:
-            return ToolResult("error", "Process not found.")
+            return ToolResult("error", "Process not found in this session.")
         log = self.process_log({"id": process_id, "limit": int(args.get("limit", 4000))})
         return ToolResult(process["status"], f"Process {process_id} wait ended with status {process['status']}.", {"process": process, "stdout": log.data.get("stdout", ""), "stderr": log.data.get("stderr", "")})
 
     def process_log(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
         if not process:
-            return ToolResult("error", "Process not found.")
+            return ToolResult("error", "Process not found in this session.")
         limit = int(args.get("limit", 4000))
         stdout = redact_secrets(_tail(Path(process["stdout_path"]), limit))
         stderr = redact_secrets(_tail(Path(process["stderr_path"]), limit))
@@ -308,7 +308,7 @@ class OffSecToolRegistry:
     def kill_process(self, args: dict[str, Any]) -> ToolResult:
         process = self._refresh_process(int(args.get("id") or args.get("process_id")))
         if not process:
-            return ToolResult("error", "Process not found.")
+            return ToolResult("error", "Process not found in this session.")
         pid = process.get("pid")
         if process.get("status") not in {"running", "starting"} or not pid:
             return ToolResult("ok", f"Process {process['id']} is already {process.get('status')}.", {"process": process})
@@ -316,8 +316,8 @@ class OffSecToolRegistry:
             os.killpg(int(pid), signal.SIGTERM)
         except ProcessLookupError:
             pass
-        self.store.update_process(int(process["id"]), status="killed", ended_at=utc_now())
-        process = self.store.get_process(int(process["id"])) or process
+        self.store.update_process(int(process["id"]), session_id=self.session_id, status="killed", ended_at=utc_now())
+        process = self.store.get_process(int(process["id"]), session_id=self.session_id) or process
         return ToolResult("killed", f"Process {process['id']} terminated.", {"process": process})
 
     def list_processes(self, args: dict[str, Any]) -> ToolResult:
@@ -2263,16 +2263,16 @@ class OffSecToolRegistry:
             return ToolResult("error", "content is required.")
         status = _normalize_task_status(str(args.get("status", "pending")))
         task_id = self.store.create_task(self.session_id, content, status=status)
-        return ToolResult("ok", f"Task {task_id} added.", {"task": self.store.get_task(task_id)})
+        return ToolResult("ok", f"Task {task_id} added.", {"task": self.store.get_task(task_id, session_id=self.session_id)})
 
     def update_task(self, args: dict[str, Any]) -> ToolResult:
         task_id = int(args.get("id") or args.get("task_id"))
         content = args.get("content")
         status = args.get("status")
         normalized = _normalize_task_status(str(status)) if status is not None else None
-        task = self.store.update_task(task_id, content=str(content) if content is not None else None, status=normalized)
+        task = self.store.update_task(task_id, session_id=self.session_id, content=str(content) if content is not None else None, status=normalized)
         if not task:
-            return ToolResult("error", f"Task {task_id} not found.")
+            return ToolResult("error", f"Task {task_id} not found in this session.")
         return ToolResult("ok", f"Task {task_id} updated.", {"task": task})
 
     def _execute_allowed_command(self, request: ActionRequest, timeout: int, approval_id: int | None) -> ToolResult:
@@ -2319,7 +2319,7 @@ class OffSecToolRegistry:
             return None
 
     def _refresh_process(self, process_id: int) -> dict[str, Any] | None:
-        process = self.store.get_process(process_id)
+        process = self.store.get_process(process_id, session_id=self.session_id)
         if not process:
             return None
         rc_path = Path(process["rc_path"])
@@ -2337,15 +2337,15 @@ class OffSecToolRegistry:
                     _LIVE_PROCESSES[process_id] = live
             status = "completed" if exit_code == 0 else "failed"
             if process.get("status") != status or process.get("exit_code") != exit_code:
-                self.store.update_process(process_id, status=status, exit_code=exit_code, ended_at=process.get("ended_at") or utc_now())
+                self.store.update_process(process_id, session_id=self.session_id, status=status, exit_code=exit_code, ended_at=process.get("ended_at") or utc_now())
         elif process.get("pid") and _pid_running(int(process["pid"])):
             status = "running"
             if process.get("status") != "running":
-                self.store.update_process(process_id, status="running")
+                self.store.update_process(process_id, session_id=self.session_id, status="running")
         elif process.get("status") in {"running", "starting"}:
             status = "unknown"
-            self.store.update_process(process_id, status="unknown", ended_at=process.get("ended_at") or utc_now())
-        return self.store.get_process(process_id)
+            self.store.update_process(process_id, session_id=self.session_id, status="unknown", ended_at=process.get("ended_at") or utc_now())
+        return self.store.get_process(process_id, session_id=self.session_id)
 
 
 def _build_nmap_command(target: str, ports: str, profile: str) -> str:
