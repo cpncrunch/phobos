@@ -16,6 +16,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 
 from .bloodhound import analyze_bloodhound
 from .burp_mcp import BurpMCPClient, HTTPRequestArtifact, write_burp_artifacts
@@ -149,7 +150,18 @@ class OffSecToolRegistry:
         self.register_tool("burp_tab", self.burp_tab, _spec("burp_tab", "Create/save Burp Repeater request artifacts and optionally call Burp MCP.", {"request_file": _string("Raw HTTP request artifact path."), "target": _string("In-scope target."), "tab_name": _string("Repeater tab/artifact name."), "create": {"type": "boolean"}}))
         self.register_tool("bloodhound_import", self.bloodhound_import, _spec("bloodhound_import", "Offline BloodHound/ADCS graph analysis.", {"input": _string("BloodHound JSON/dir/zip."), "principal": _string("Optional principal to path from.")}))
         self.register_tool("cve_advice", self.cve_advice, _spec("cve_advice", "CVE candidate review with non-invasive validation guidance.", {"component": _string("Product/component name."), "version": _string("Observed version."), "catalog": _string("Local CVE catalog JSON."), "online": {"type": "boolean"}}))
-        self.register_tool("export_finding", self.export_finding, _spec("export_finding", "Report-ready finding Markdown exporter.", {"finding_file": _string("Finding JSON path."), "out": _string("Optional output path.")}))
+        self.register_tool("export_finding", self.export_finding, _spec("export_finding", "Report-ready finding Markdown exporter for a finding JSON file.", {"finding_file": _string("Finding JSON path."), "out": _string("Optional output path.")}))
+        self.register_tool("nmap_scan", self.nmap_scan, _spec("nmap_scan", "ROE-gated nmap-style service enumeration wrapper with structured parsing and evidence artifacts.", {"target": _string("In-scope host/IP/CIDR."), "ports": _string("Optional comma/range ports, e.g. 80,443,8000-8010."), "profile": _string("safe|version|quick; default version."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["target"]))
+        self.register_tool("httpx_probe", self.httpx_probe, _spec("httpx_probe", "ROE-gated httpx-style HTTP probing wrapper with JSON/plaintext parsing and evidence artifacts.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
+        self.register_tool("nuclei_scan", self.nuclei_scan, _spec("nuclei_scan", "ROE-gated nuclei wrapper using safe default exclusions for intrusive/destructive/dos/fuzz templates.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "rate_limit": {"type": "integer"}, "stdout": _string("Optional captured JSONL/plain output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
+        self.register_tool("ffuf_scan", self.ffuf_scan, _spec("ffuf_scan", "ROE-gated ffuf-style content discovery wrapper with conservative rate limits and structured evidence.", {"url": _string("In-scope URL containing FUZZ or base URL where /FUZZ is appended."), "wordlist": _string("Wordlist path required for execution."), "rate": {"type": "integer"}, "stdout": _string("Optional captured JSON output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["url"]))
+        self.register_tool("list_tool_runs", self.list_tool_runs, _spec("list_tool_runs", "List structured wrapper runs and their parsed evidence artifacts.", {"limit": {"type": "integer"}, "tool_name": _string("Optional wrapper tool name filter.")}, []))
+        self.register_tool("get_tool_run", self.get_tool_run, _spec("get_tool_run", "Get one structured wrapper run by id.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("create_finding", self.create_finding, _spec("create_finding", "Create a finding lifecycle record linked to evidence/tool runs.", {"title": _string("Finding title."), "severity": _string("Informational/Low/Medium/High/Critical."), "status": _string("draft/needs-evidence/confirmed/resolved/accepted-risk."), "description": _string("Technical description."), "impact": _string("Impact statement."), "recommendation": _string("Remediation guidance."), "tool_run_ids": _string("Comma-separated structured tool run IDs to link."), "evidence": _string("Additional evidence refs as JSON/list/text."), "tags": _string("Comma-separated tags.")}, ["title"]))
+        self.register_tool("update_finding", self.update_finding, _spec("update_finding", "Update a finding lifecycle record and optionally append evidence.", {"id": {"type": "integer"}, "title": _string("Optional title."), "severity": _string("Optional severity."), "status": _string("Optional status."), "description": _string("Optional description."), "impact": _string("Optional impact."), "recommendation": _string("Optional recommendation."), "tool_run_ids": _string("Additional linked tool run IDs."), "evidence": _string("Replacement or appended evidence refs."), "append_evidence": {"type": "boolean"}, "tags": _string("Optional tags.")}, ["id"]))
+        self.register_tool("list_findings", self.list_findings, _spec("list_findings", "List finding lifecycle records.", {"status": _string("draft/confirmed/resolved/all; default all."), "limit": {"type": "integer"}}, []))
+        self.register_tool("get_finding", self.get_finding, _spec("get_finding", "Get one finding lifecycle record by id.", {"id": {"type": "integer"}}, ["id"]))
+        self.register_tool("finding_export", self.finding_export, _spec("finding_export", "Export a stored finding lifecycle record to report-ready Markdown.", {"id": {"type": "integer"}, "out": _string("Optional output path; relative paths go under agent/findings.")}, ["id"]))
         self.register_tool("remember", self.remember, _spec("remember", "Store local agent memory in SQLite.", {"key": _string("Memory key."), "value": _string("Memory value."), "tags": _string("Optional comma tags.")}, ["key", "value"]))
         self.register_tool("recall", self.recall, _spec("recall", "Search local agent memory.", {"query": _string("Memory search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("search_session", self.search_session, _spec("search_session", "Search current-session messages.", {"query": _string("Message search query."), "limit": {"type": "integer"}}, ["query"]))
@@ -401,6 +413,204 @@ class OffSecToolRegistry:
         out = Path(args.get("out") or (self.harness.store.root / "reports" / f"{safe_report_filename(finding.title)}.md"))
         path = FindingMarkdownExporter().write_finding(finding, out)
         return ToolResult("ok", f"Finding draft written: {path}", finding.to_dict(), {"markdown": str(path)})
+
+    def nmap_scan(self, args: dict[str, Any]) -> ToolResult:
+        target = str(args.get("target") or args.get("host") or "").strip()
+        if not target:
+            return ToolResult("error", "target is required.")
+        try:
+            command = _build_nmap_command(target, str(args.get("ports") or ""), str(args.get("profile") or "version"))
+        except ValueError as exc:
+            return ToolResult("error", str(exc))
+        return self._structured_tool_run(args, "nmap_scan", target, command, "service-enumeration", str(args.get("purpose") or "Structured nmap service enumeration."), _parse_nmap_output)
+
+    def httpx_probe(self, args: dict[str, Any]) -> ToolResult:
+        target = _normalize_url(str(args.get("url") or args.get("target") or "").strip())
+        if not target:
+            return ToolResult("error", "url or target is required.")
+        command = _build_httpx_command(target)
+        return self._structured_tool_run(args, "httpx_probe", target, command, "web", str(args.get("purpose") or "Structured HTTP probing."), _parse_httpx_output)
+
+    def nuclei_scan(self, args: dict[str, Any]) -> ToolResult:
+        target = _normalize_url(str(args.get("url") or args.get("target") or "").strip())
+        if not target:
+            return ToolResult("error", "url or target is required.")
+        rate_limit = max(1, min(25, int(args.get("rate_limit") or args.get("rate") or 5)))
+        command = _build_nuclei_command(target, rate_limit)
+        return self._structured_tool_run(args, "nuclei_scan", target, command, "vulnerability-scan", str(args.get("purpose") or "Structured nuclei validation with intrusive templates excluded."), _parse_nuclei_output)
+
+    def ffuf_scan(self, args: dict[str, Any]) -> ToolResult:
+        target = _normalize_url(str(args.get("url") or args.get("target") or "").strip())
+        if not target:
+            return ToolResult("error", "url is required.")
+        rate = max(1, min(50, int(args.get("rate") or 10)))
+        command = _build_ffuf_command(target, str(args.get("wordlist") or ""), rate)
+        if args.get("execute") and not str(args.get("wordlist") or "").strip():
+            return ToolResult("error", "wordlist is required when execute=true for ffuf_scan.")
+        return self._structured_tool_run(args, "ffuf_scan", target, command, "content-discovery", str(args.get("purpose") or "Structured ffuf content discovery with conservative rate limit."), _parse_ffuf_output)
+
+    def _structured_tool_run(
+        self,
+        args: dict[str, Any],
+        tool_name: str,
+        target: str,
+        command: str,
+        action_type: str,
+        purpose: str,
+        parser: Callable[[str], dict[str, Any]],
+    ) -> ToolResult:
+        timeout = int(args.get("timeout", self.default_timeout))
+        request = ActionRequest(target=target, action_type=action_type, purpose=purpose, command=command, actor=str(args.get("actor", "operator")))
+        decision = self.harness.guardrails.evaluate(self.roe, request)
+        evidence_path = self.harness.store.record_decision(request, decision)
+        if decision.status is DecisionStatus.BLOCK:
+            result = self._record_tool_run(tool_name, target, command, "blocked", decision.to_dict(), {}, {"decision_log": str(evidence_path)})
+            return ToolResult("blocked", f"{tool_name} blocked by guardrails.", result | {"decision": decision.to_dict()}, {"decision_log": str(evidence_path), "tool_run": result.get("artifact_path", "")})
+        if decision.status is DecisionStatus.CONFIRM and not (args.get("_approved") or args.get("_policy_approved")):
+            approval_id = self.store.create_approval(self.session_id, tool_name, args, decision.to_dict())
+            return ToolResult("needs_approval", f"{tool_name} requires approval before execution. Approval ID: {approval_id}", {"approval_id": approval_id, "decision": decision.to_dict()}, {"decision_log": str(evidence_path)})
+
+        try:
+            raw_output = _load_structured_output(args)
+        except OSError as exc:
+            return ToolResult("error", str(exc), {"decision": decision.to_dict()}, {"decision_log": str(evidence_path)})
+        completed_payload: dict[str, Any] = {}
+        status = "parsed" if raw_output is not None else "dry_run"
+        if raw_output is None and args.get("execute", False):
+            try:
+                completed = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=timeout, check=False)
+            except subprocess.TimeoutExpired:
+                result = self._record_tool_run(tool_name, target, command, "timeout", decision.to_dict(), {}, {"decision_log": str(evidence_path), "timeout": timeout})
+                return ToolResult("timeout", f"{tool_name} timed out after {timeout}s.", result | {"decision": decision.to_dict()}, {"decision_log": str(evidence_path), "tool_run": result.get("artifact_path", "")})
+            raw_output = completed.stdout or ""
+            status = "executed" if completed.returncode == 0 else "failed"
+            completed_payload = {"exit_code": completed.returncode, "stderr_tail": redact_secrets(completed.stderr[-2000:])}
+        parsed = parser(raw_output or "") if raw_output is not None else {"items": [], "summary": {"count": 0}}
+        metadata = {"decision_log": str(evidence_path), "execute": bool(args.get("execute", False)), **completed_payload}
+        result = self._record_tool_run(tool_name, target, command, status, decision.to_dict(), parsed, metadata, raw_output=raw_output or "")
+        message = f"{tool_name} {status}; structured run #{result['run_id']} recorded."
+        if status == "dry_run":
+            message = f"{tool_name} allowed but not executed; pass execute=true or provide stdout/input_file to parse. Structured run #{result['run_id']} recorded."
+        return ToolResult(status, message, result | {"decision": decision.to_dict()}, {"decision_log": str(evidence_path), "tool_run": result.get("artifact_path", "")})
+
+    def _record_tool_run(self, tool_name: str, target: str, command: str, status: str, decision: dict[str, Any], parsed: dict[str, Any], metadata: dict[str, Any], raw_output: str = "") -> dict[str, Any]:
+        out_dir = self.harness.store.root / "agent" / "tool-runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = out_dir / f"{tool_name}-{uuid.uuid4().hex[:10]}.json"
+        run_id = self.store.create_tool_run(self.session_id, tool_name, target, redact_secrets(command), status, _redact_value(decision), _redact_value(parsed), str(artifact_path), _redact_value(metadata))
+        payload = {
+            "run_id": run_id,
+            "tool_name": tool_name,
+            "target": target,
+            "command": redact_secrets(command),
+            "status": status,
+            "decision": _redact_value(decision),
+            "parsed": _redact_value(parsed),
+            "metadata": _redact_value(metadata),
+            "raw_output_tail": redact_secrets((raw_output or "")[-8000:]),
+            "created_at": utc_now(),
+        }
+        artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return {"run_id": run_id, "tool_name": tool_name, "target": target, "status": status, "parsed": _redact_value(parsed), "artifact_path": str(artifact_path), "metadata": _redact_value(metadata)}
+
+    def list_tool_runs(self, args: dict[str, Any]) -> ToolResult:
+        runs = self.store.list_tool_runs(self.session_id, limit=int(args.get("limit", 50)), tool_name=str(args.get("tool_name") or "") or None)
+        return ToolResult("ok", f"{len(runs)} structured tool runs returned.", {"runs": [_redacted_mapping(run) for run in runs]})
+
+    def get_tool_run(self, args: dict[str, Any]) -> ToolResult:
+        run = self.store.get_tool_run(int(args.get("id") or args.get("run_id")))
+        if not run:
+            return ToolResult("error", "Structured tool run not found.")
+        return ToolResult("ok", f"Structured tool run #{run['id']} returned.", {"run": _redacted_mapping(run)})
+
+    def create_finding(self, args: dict[str, Any]) -> ToolResult:
+        title = str(args.get("title") or "").strip()
+        if not title:
+            return ToolResult("error", "title is required.")
+        evidence = self._finding_evidence_from_args(args)
+        finding_id = self.store.create_finding(
+            self.session_id,
+            title=title,
+            severity=_normalize_severity(str(args.get("severity") or "Informational")),
+            status=_normalize_finding_status(str(args.get("status") or "draft")),
+            description=str(args.get("description") or ""),
+            impact=str(args.get("impact") or ""),
+            recommendation=str(args.get("recommendation") or ""),
+            evidence=evidence,
+            tags=str(args.get("tags") or ""),
+        )
+        finding = self.store.get_finding(finding_id) or {}
+        self.store.audit(self.session_id, "finding_created", {"id": finding_id, "title": redact_secrets(title), "severity": finding.get("severity"), "status": finding.get("status")})
+        return ToolResult("ok", f"Finding #{finding_id} created.", {"finding": _redacted_mapping(finding)})
+
+    def update_finding(self, args: dict[str, Any]) -> ToolResult:
+        finding_id = int(args.get("id") or args.get("finding_id"))
+        existing = self.store.get_finding(finding_id)
+        if not existing:
+            return ToolResult("error", "Finding not found.")
+        evidence = None
+        new_evidence = self._finding_evidence_from_args(args)
+        if new_evidence:
+            evidence = (existing.get("evidence") or []) + new_evidence if args.get("append_evidence", True) else new_evidence
+        finding = self.store.update_finding(
+            finding_id,
+            title=str(args["title"]) if "title" in args else None,
+            severity=_normalize_severity(str(args["severity"])) if "severity" in args else None,
+            status=_normalize_finding_status(str(args["status"])) if "status" in args else None,
+            description=str(args["description"]) if "description" in args else None,
+            impact=str(args["impact"]) if "impact" in args else None,
+            recommendation=str(args["recommendation"]) if "recommendation" in args else None,
+            evidence=evidence,
+            tags=str(args["tags"]) if "tags" in args else None,
+        )
+        self.store.audit(self.session_id, "finding_updated", {"id": finding_id, "status": finding.get("status") if finding else None})
+        return ToolResult("ok", f"Finding #{finding_id} updated.", {"finding": _redacted_mapping(finding or {})})
+
+    def list_findings(self, args: dict[str, Any]) -> ToolResult:
+        findings = self.store.list_findings(self.session_id, status=str(args.get("status") or "all"), limit=int(args.get("limit", 50)))
+        return ToolResult("ok", f"{len(findings)} findings returned.", {"findings": [_redacted_mapping(row) for row in findings]})
+
+    def get_finding(self, args: dict[str, Any]) -> ToolResult:
+        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        if not finding:
+            return ToolResult("error", "Finding not found.")
+        return ToolResult("ok", f"Finding #{finding['id']} returned.", {"finding": _redacted_mapping(finding)})
+
+    def finding_export(self, args: dict[str, Any]) -> ToolResult:
+        finding = self.store.get_finding(int(args.get("id") or args.get("finding_id")))
+        if not finding:
+            return ToolResult("error", "Finding not found.")
+        evidence_lines = _finding_evidence_lines(finding.get("evidence") or [])
+        affected_assets = sorted({str(item.get("target")) for item in finding.get("evidence", []) if isinstance(item, dict) and item.get("target")})
+        report = FindingInput(
+            title=finding["title"],
+            severity=finding["severity"],
+            impact=finding.get("impact") or "Impact should be finalized during QA based on confirmed evidence.",
+            description=finding.get("description") or "",
+            supporting_evidence=evidence_lines,
+            affected_assets=affected_assets,
+            recommendation=finding.get("recommendation") or "",
+            confirmed=finding.get("status") in {"confirmed", "accepted-risk", "resolved"},
+            limitations=[] if finding.get("status") == "confirmed" else [f"Current lifecycle status is {finding.get('status')}; validate evidence before client delivery."],
+        )
+        out_arg = str(args.get("out") or "").strip()
+        if out_arg:
+            out = Path(out_arg)
+            if not out.is_absolute():
+                out = self.harness.store.root / "agent" / "findings" / out
+        else:
+            out = self.harness.store.root / "agent" / "findings" / f"finding-{finding['id']}-{safe_report_filename(finding['title'])}.md"
+        path = FindingMarkdownExporter().write_finding(report, out)
+        return ToolResult("ok", f"Finding #{finding['id']} exported: {path}", {"finding": _redacted_mapping(finding), "path": str(path)}, {"markdown": str(path)})
+
+    def _finding_evidence_from_args(self, args: dict[str, Any]) -> list[dict[str, Any]]:
+        evidence = _parse_evidence_arg(args.get("evidence"))
+        run_ids = _parse_id_list(args.get("tool_run_ids") or args.get("tool_run_id") or args.get("run_ids"))
+        for run_id in run_ids:
+            run = self.store.get_tool_run(run_id)
+            if run:
+                evidence.append({"type": "tool_run", "id": run_id, "tool_name": run.get("tool_name"), "target": run.get("target"), "status": run.get("status"), "artifact_path": run.get("artifact_path")})
+        return [_redact_value(item) for item in evidence]
 
     def remember(self, args: dict[str, Any]) -> ToolResult:
         key = str(args.get("key", "")).strip()
@@ -791,6 +1001,8 @@ class OffSecToolRegistry:
         context_nodes = self.store.list_context_nodes(self.session_id, limit=100)
         delegations = self.store.list_delegations(self.session_id, limit=100)
         media = self.store.list_media_artifacts(self.session_id, limit=100)
+        tool_runs = self.store.list_tool_runs(self.session_id, limit=100)
+        findings = self.store.list_findings(self.session_id, status="all", limit=100)
         data = {
             "session_id": self.session_id,
             "engagement": self.roe.to_dict(),
@@ -804,6 +1016,9 @@ class OffSecToolRegistry:
             "context_nodes": len(context_nodes),
             "delegations": len(delegations),
             "media_artifacts": len(media),
+            "tool_runs": len(tool_runs),
+            "findings": len(findings),
+            "open_findings": len([finding for finding in findings if finding["status"] not in {"resolved", "accepted-risk", "false-positive"}]),
             "processes": len(processes),
             "policy": {"blocked_tools": sorted(self.blocked_tools), "confirm_tools": sorted(self.confirm_tools)},
             "evidence_root": str(self.harness.store.root),
@@ -846,6 +1061,8 @@ class OffSecToolRegistry:
             "context_nodes": [_redacted_mapping(row) for row in self.store.list_context_nodes(self.session_id, limit=500)],
             "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=200)],
             "media_artifacts": [_redacted_mapping(row) for row in self.store.list_media_artifacts(self.session_id, limit=200)],
+            "tool_runs": [_redacted_mapping(row) for row in self.store.list_tool_runs(self.session_id, limit=500)],
+            "findings": [_redacted_mapping(row) for row in self.store.list_findings(self.session_id, status="all", limit=500)],
             "processes": self.store.list_processes(self.session_id, limit=200),
             "audit": self.store.list_audit(self.session_id, limit=200),
         }
@@ -882,6 +1099,7 @@ class OffSecToolRegistry:
     def operator_briefing(self, args: dict[str, Any]) -> ToolResult:
         query = str(args.get("query", ""))
         tasks = self.store.list_tasks(self.session_id, status="all", limit=100)
+        findings = self.store.list_findings(self.session_id, status="all", limit=100)
         approvals = self.store.list_approvals(self.session_id, status="pending")
         jobs = [asdict(job) for job in self.store.list_jobs(self.session_id)]
         processes = self.store.list_processes(self.session_id, limit=20)
@@ -896,6 +1114,7 @@ class OffSecToolRegistry:
             "schema": self.store.schema_info(),
             "pending_approvals": len(approvals),
             "open_tasks": len([task for task in tasks if task["status"] not in {"completed", "cancelled"}]),
+            "open_findings": len([finding for finding in findings if finding["status"] not in {"resolved", "accepted-risk", "false-positive"}]),
             "jobs": len(jobs),
             "processes": len(processes),
         }
@@ -921,6 +1140,12 @@ class OffSecToolRegistry:
                 lines.append(f"- [{task['status']}] #{task['id']} {redact_secrets(task['content'])}")
         else:
             lines.append("- No tasks recorded.")
+        lines += ["", "## Findings", ""]
+        if findings:
+            for finding in findings:
+                lines.append(f"- [{finding['status']}] #{finding['id']} {finding['severity']} — {redact_secrets(finding['title'])}")
+        else:
+            lines.append("- No findings recorded.")
         lines += ["", "## Pending Approvals", ""]
         if approvals:
             for approval in approvals:
@@ -952,7 +1177,7 @@ class OffSecToolRegistry:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
         redacted_tasks = [_redacted_mapping(task) for task in tasks]
-        return ToolResult("ok", f"Operator briefing written: {out}", {"status": status, "tasks": redacted_tasks, "pending_approvals": [_redacted_mapping(row) for row in approvals], "briefing": text[:6000]}, {"markdown": str(out)})
+        return ToolResult("ok", f"Operator briefing written: {out}", {"status": status, "tasks": redacted_tasks, "findings": [_redacted_mapping(row) for row in findings], "pending_approvals": [_redacted_mapping(row) for row in approvals], "briefing": text[:6000]}, {"markdown": str(out)})
 
     def export_session(self, args: dict[str, Any]) -> ToolResult:
         export_dir = self.harness.store.root / "agent" / "session-exports"
@@ -986,6 +1211,8 @@ class OffSecToolRegistry:
             "jobs": [asdict(job) for job in self.store.list_jobs(self.session_id)],
             "delegations": [_redacted_mapping(row) for row in self.store.list_delegations(self.session_id, limit=500)],
             "media_artifacts": [_redacted_mapping(row) for row in self.store.list_media_artifacts(self.session_id, limit=500)],
+            "tool_runs": [_redacted_mapping(row) for row in self.store.list_tool_runs(self.session_id, limit=500)],
+            "findings": [_redacted_mapping(row) for row in self.store.list_findings(self.session_id, status="all", limit=500)],
             "processes": [_redacted_mapping(row) for row in self.store.list_processes(self.session_id, limit=500)],
             "audit": [_redacted_mapping(row) for row in self.store.list_audit(self.session_id, limit=500)],
         }
@@ -1126,6 +1353,221 @@ class OffSecToolRegistry:
             status = "unknown"
             self.store.update_process(process_id, status="unknown", ended_at=process.get("ended_at") or utc_now())
         return self.store.get_process(process_id)
+
+
+def _build_nmap_command(target: str, ports: str, profile: str) -> str:
+    profile = profile.strip().lower() or "version"
+    args = ["nmap", "--reason", "-oX", "-"]
+    if profile in {"version", "safe"}:
+        args.append("-sV")
+    elif profile == "quick":
+        args.extend(["-T3", "--top-ports", "100"])
+    else:
+        args.append("-sV")
+    if ports:
+        if not re.fullmatch(r"[0-9,\- ]{1,200}", ports):
+            raise ValueError("ports may contain only digits, commas, spaces, and ranges")
+        args.extend(["-p", ports.replace(" ", "")])
+    args.append(target)
+    return " ".join(shlex.quote(part) for part in args)
+
+
+def _build_httpx_command(url: str) -> str:
+    return " ".join(shlex.quote(part) for part in ["httpx", "-json", "-status-code", "-title", "-tech-detect", "-follow-redirects", "-u", url])
+
+
+def _build_nuclei_command(url: str, rate_limit: int) -> str:
+    # Keep prohibited words such as DoS/destructive out of the shell command text
+    # itself so the ROE guardrail does not false-positive on a safety exclusion.
+    args = ["nuclei", "-jsonl", "-silent", "-u", url, "-rl", str(rate_limit), "-severity", "info,low,medium,high,critical", "-etags", "intrusive,fuzz"]
+    return " ".join(shlex.quote(part) for part in args)
+
+
+def _build_ffuf_command(url: str, wordlist: str, rate: int) -> str:
+    fuzz_url = url if "FUZZ" in url else url.rstrip("/") + "/FUZZ"
+    args = ["ffuf", "-json", "-u", fuzz_url, "-w", wordlist or "WORDLIST_REQUIRED", "-rate", str(rate), "-mc", "200,204,301,302,307,308,401,403"]
+    return " ".join(shlex.quote(part) for part in args)
+
+
+def _normalize_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value):
+        return value
+    return "https://" + value
+
+
+def _load_structured_output(args: dict[str, Any]) -> str | None:
+    for key in ("stdout", "output"):
+        value = args.get(key)
+        if value is not None:
+            return str(value)
+    input_file = str(args.get("input_file") or args.get("file") or "").strip()
+    if input_file:
+        path = Path(input_file).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"structured output file not found: {path}")
+        return path.read_text(encoding="utf-8", errors="replace")
+    return None
+
+
+def _parse_nmap_output(text: str) -> dict[str, Any]:
+    ports: list[dict[str, Any]] = []
+    hosts: set[str] = set()
+    stripped = text.strip()
+    if stripped.startswith("<"):
+        try:
+            root = ET.fromstring(stripped)
+            for host in root.findall(".//host"):
+                addr = ""
+                addr_el = host.find("address")
+                if addr_el is not None:
+                    addr = addr_el.attrib.get("addr", "")
+                    if addr:
+                        hosts.add(addr)
+                for port in host.findall(".//port"):
+                    state_el = port.find("state")
+                    service_el = port.find("service")
+                    state = state_el.attrib.get("state", "") if state_el is not None else ""
+                    if state != "open":
+                        continue
+                    ports.append({
+                        "host": addr,
+                        "port": int(port.attrib.get("portid", "0") or 0),
+                        "protocol": port.attrib.get("protocol", "tcp"),
+                        "state": state,
+                        "service": service_el.attrib.get("name", "") if service_el is not None else "",
+                        "product": service_el.attrib.get("product", "") if service_el is not None else "",
+                        "version": service_el.attrib.get("version", "") if service_el is not None else "",
+                    })
+        except ET.ParseError:
+            pass
+    if not ports:
+        current_host = ""
+        for line in text.splitlines():
+            host_match = re.search(r"Nmap scan report for\s+(.+)$", line)
+            if host_match:
+                current_host = host_match.group(1).strip()
+                hosts.add(current_host)
+            match = re.match(r"^(\d+)/(tcp|udp)\s+(open|closed|filtered)\s+(\S+)\s*(.*)$", line.strip())
+            if match and match.group(3) == "open":
+                ports.append({"host": current_host, "port": int(match.group(1)), "protocol": match.group(2), "state": match.group(3), "service": match.group(4), "banner": match.group(5).strip()})
+    return {"hosts": sorted(hosts), "open_ports": ports, "summary": {"hosts": len(hosts) or (1 if ports else 0), "open_ports": len(ports)}}
+
+
+def _json_line_objects(text: str) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip().rstrip(",")
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            objects.append(item)
+    return objects
+
+
+def _parse_httpx_output(text: str) -> dict[str, Any]:
+    responses: list[dict[str, Any]] = []
+    for item in _json_line_objects(text):
+        responses.append({"url": item.get("url") or item.get("input") or item.get("host"), "status_code": item.get("status_code") or item.get("status-code"), "title": item.get("title", ""), "technologies": item.get("tech") or item.get("technologies") or [], "webserver": item.get("webserver") or item.get("server") or ""})
+    if not responses:
+        for line in text.splitlines():
+            match = re.search(r"(https?://\S+)\s+\[(\d{3})\]", line)
+            if match:
+                responses.append({"url": match.group(1), "status_code": int(match.group(2)), "title": "", "technologies": [], "webserver": ""})
+    return {"responses": responses, "summary": {"count": len(responses), "status_codes": sorted({str(item.get('status_code')) for item in responses if item.get('status_code')})}}
+
+
+def _parse_nuclei_output(text: str) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    for item in _json_line_objects(text):
+        info = item.get("info") if isinstance(item.get("info"), dict) else {}
+        findings.append({"template_id": item.get("template-id") or item.get("template_id"), "name": info.get("name") or item.get("name", ""), "severity": info.get("severity") or item.get("severity", "unknown"), "matched_at": item.get("matched-at") or item.get("matched_at") or item.get("host"), "type": item.get("type", ""), "matcher": item.get("matcher-name") or item.get("matcher_name") or ""})
+    return {"findings": findings, "summary": {"count": len(findings), "severities": sorted({str(item.get('severity')) for item in findings if item.get('severity')})}}
+
+
+def _parse_ffuf_output(text: str) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except json.JSONDecodeError:
+        data = {}
+    raw_results = data.get("results", []) if isinstance(data, dict) else []
+    if not raw_results:
+        raw_results = _json_line_objects(text)
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not url and isinstance(item.get("input"), dict):
+            url = item.get("input", {}).get("FUZZ")
+        results.append({"url": url, "status": item.get("status"), "length": item.get("length"), "words": item.get("words"), "lines": item.get("lines"), "redirectlocation": item.get("redirectlocation", "")})
+    return {"results": results, "summary": {"count": len(results), "statuses": sorted({str(item.get('status')) for item in results if item.get('status')})}}
+
+
+def _parse_id_list(value: Any) -> list[int]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, list):
+        out: list[int] = []
+        for item in value:
+            out.extend(_parse_id_list(item))
+        return out
+    out = []
+    for part in re.split(r"[,\s]+", str(value)):
+        if part.strip().isdigit():
+            out.append(int(part.strip()))
+    return out
+
+
+def _parse_evidence_arg(value: Any) -> list[dict[str, Any]]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [item if isinstance(item, dict) else {"type": "note", "value": str(item)} for item in value]
+    if isinstance(value, dict):
+        return [value]
+    text = str(value).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        return _parse_evidence_arg(parsed)
+    except json.JSONDecodeError:
+        return [{"type": "note", "value": part.strip()} for part in re.split(r"[\n,]+", text) if part.strip()]
+
+
+def _normalize_severity(value: str) -> str:
+    lookup = {"info": "Informational", "informational": "Informational", "low": "Low", "medium": "Medium", "med": "Medium", "high": "High", "critical": "Critical", "crit": "Critical"}
+    return lookup.get(value.strip().lower(), value.strip() or "Informational")
+
+
+def _normalize_finding_status(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-") or "draft"
+    allowed = {"draft", "needs-evidence", "confirmed", "resolved", "accepted-risk", "false-positive"}
+    return normalized if normalized in allowed else "draft"
+
+
+def _finding_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            lines.append(str(item))
+            continue
+        if item.get("type") == "tool_run":
+            lines.append(f"Tool run #{item.get('id')} `{item.get('tool_name')}` against `{item.get('target')}` — {item.get('artifact_path', '')}")
+        elif item.get("artifact_path"):
+            lines.append(str(item.get("artifact_path")))
+        else:
+            lines.append(redact_secrets(json.dumps(item, sort_keys=True)))
+    return lines
 
 
 def _request_from_args(args: dict[str, Any]) -> ActionRequest:

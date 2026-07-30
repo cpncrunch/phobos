@@ -12,7 +12,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
 - **Finding Markdown exporter** — renders confirmed finding JSON into report-ready Markdown with risk metadata, evidence, affected assets, recommendations, evidence health, and candidate/non-reportable handling.
-- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, localhost web/gateway, Discord/Slack/Telegram bridges with safe media/voice attachment handling, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
+- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
 
@@ -276,7 +276,7 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-Current verification: 31 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, and the standalone Hermes-like agent runtime.
+Current verification: 32 tests pass, covering guardrails, CLI/profile/auth-status, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter and lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -290,9 +290,11 @@ This turns the harness into a standalone agent-style application with:
 
 - SQLite-backed sessions and task boards;
 - local persistent memory and FTS-backed current/cross-session search;
-- schema-versioned SQLite state with `/status` health output; current runtime schema is v4;
+- schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context;
 - tool registry, JSON-style schemas, plugin loading, local skill loading, and audit log;
+- ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts;
+- finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
 - non-destructive-by-default command execution;
 - foreground and background process management, including `/wait`;
@@ -306,7 +308,8 @@ This turns the harness into a standalone agent-style application with:
 - auth/token environment status checks that never reveal secret values;
 - local media/artifact import and listing with SHA-256 metadata;
 - operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, and routes for status/tools/schemas/sessions/context/LCM/tasks/jobs/processes/approvals/delegations/media/auth/bridges/audit;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, finding/tool-run views, and routes for status/tools/schemas/sessions/context/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/audit;
+- VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export;
 - interactive chat and single-message modes.
@@ -350,6 +353,20 @@ phobos-agent --db data/phobos-agent.db once \
 phobos-agent --db data/phobos-agent.db once \
   --engagement engagement.json \
   --message '/assess target=10.10.0.5 type=service-enumeration purpose="version scan" command="nmap -sV 10.10.0.5"'
+
+# Structured wrapper evidence can parse captured output without requiring the
+# scanner binary during tests/demos, or execute only with explicit execute=true.
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/nmap target=10.10.0.5 ports=80,443 stdout="80/tcp open http nginx"'
+
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/finding-create title="Exposed administrative interface" severity=Medium status=needs-evidence tool_run_ids=1'
+
+phobos-agent --db data/phobos-agent.db once \
+  --engagement engagement.json \
+  --message '/finding-export id=1'
 
 # State-changing or lockout-sensitive actions are queued, not blindly run.
 phobos-agent --db data/phobos-agent.db once \
@@ -399,6 +416,20 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
   --engagement engagement.json \
   --host 127.0.0.1 \
   --port 8765
+
+# Generate a standalone browser UI that can connect to a VPS-hosted agent.
+phobos-agent ui-client \
+  --out phobos-remote-ui.html \
+  --agent-url https://phobos-vps.example
+
+# VPS mode: bind publicly only with a bearer token env var and CORS policy.
+export PHOBOS_GATEWAY_TOKEN='use-a-long-random-secret-from-your-password-manager'
+phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
+  --engagement engagement.json \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --token-env PHOBOS_GATEWAY_TOKEN \
+  --allow-origin https://your-ui-origin.example
 
 # Offline-test Discord bridge filtering without network credentials.
 phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
@@ -455,7 +486,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 31 tests
+Ran 32 tests
 OK
 ```
 
@@ -477,6 +508,8 @@ auto_memory_recall=True
 auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
 guardrails_execution_approvals_blocks=True
+structured_tool_wrappers_ok=True
+finding_lifecycle_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -498,10 +531,11 @@ bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
+remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=140
+artifact_count=159
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

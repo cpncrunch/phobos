@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -61,8 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     env["HOME"] = str(root / "home")
     env["PHOBOS_SMOKE_SEAL"] = "smoke-passphrase-for-sealed-export"
     env["PHOBOS_SMOKE_DB_SEAL"] = "smoke-passphrase-for-db-seal"
+    env["PHOBOS_SMOKE_GATEWAY_TOKEN"] = "smoke-gateway-token"
     os.environ["PHOBOS_SMOKE_SEAL"] = env["PHOBOS_SMOKE_SEAL"]
     os.environ["PHOBOS_SMOKE_DB_SEAL"] = env["PHOBOS_SMOKE_DB_SEAL"]
+    os.environ["PHOBOS_SMOKE_GATEWAY_TOKEN"] = env["PHOBOS_SMOKE_GATEWAY_TOKEN"]
 
     checks: dict[str, object] = {}
 
@@ -153,12 +156,19 @@ def main(argv: list[str] | None = None) -> int:
                 "wait_process",
                 "add_task",
                 "example_echo",
+                "nmap_scan",
+                "httpx_probe",
+                "nuclei_scan",
+                "ffuf_scan",
+                "create_finding",
+                "list_findings",
+                "finding_export",
             ]
         )
         status = handle("status", "/status")
         status_data = runtime.registry.run("runtime_status", {}).data
-        checks["schema_version_ok"] = int(status_data["schema"]["schema_version"]) >= 4 and '"fts_available"' in status
-        checks["db_schema_counts_ok"] = all(key in status_data for key in ["context_nodes", "delegations", "media_artifacts", "tasks", "processes"])
+        checks["schema_version_ok"] = int(status_data["schema"]["schema_version"]) >= 5 and '"fts_available"' in status
+        checks["db_schema_counts_ok"] = all(key in status_data for key in ["context_nodes", "delegations", "media_artifacts", "tasks", "processes", "tool_runs", "findings"])
         skill_list = handle("skills", "/skills")
         skill_load = handle("skill-load", "/skill name=smoke-skill")
         checks["local_skills_ok"] = "Smoke skill for local progressive" in skill_list and "ROE and evidence first" in skill_load
@@ -198,6 +208,47 @@ def main(argv: list[str] | None = None) -> int:
             and "blocked" in destructive.lower()
             and "blocked" in dos.lower()
         )
+
+        nmap_output = "Starting Nmap\nNmap scan report for 10.10.0.5\nPORT    STATE SERVICE VERSION\n80/tcp  open  http    nginx 1.24\n443/tcp open  https   nginx 1.24\n"
+        nmap_structured = runtime.registry.run("nmap_scan", {"target": "10.10.0.5", "ports": "80,443", "stdout": nmap_output})
+        httpx_structured = runtime.registry.run("httpx_probe", {"url": "https://app.example.test", "stdout": json.dumps({"url": "https://app.example.test", "status_code": 200, "title": "ACME Portal", "tech": ["nginx"]})})
+        nuclei_structured = runtime.registry.run("nuclei_scan", {"url": "https://app.example.test", "stdout": json.dumps({"template-id": "exposed-panel", "info": {"name": "Exposed Panel", "severity": "medium"}, "matched-at": "https://app.example.test/admin"})})
+        ffuf_structured = runtime.registry.run("ffuf_scan", {"url": "https://app.example.test/FUZZ", "wordlist": "words.txt", "stdout": json.dumps({"results": [{"url": "https://app.example.test/admin", "status": 200, "length": 1234, "words": 12, "lines": 5}]})})
+        tool_runs = runtime.registry.run("list_tool_runs", {})
+        write("nmap-structured.json", json.dumps(nmap_structured.to_dict(), indent=2))
+        write("httpx-structured.json", json.dumps(httpx_structured.to_dict(), indent=2))
+        write("nuclei-structured.json", json.dumps(nuclei_structured.to_dict(), indent=2))
+        write("ffuf-structured.json", json.dumps(ffuf_structured.to_dict(), indent=2))
+        write("tool-runs.json", json.dumps(tool_runs.to_dict(), indent=2))
+        checks["structured_tool_wrappers_ok"] = (
+            nmap_structured.status == "parsed"
+            and nmap_structured.data["parsed"]["summary"]["open_ports"] == 2
+            and httpx_structured.status == "parsed"
+            and nuclei_structured.status == "parsed"
+            and ffuf_structured.status == "parsed"
+            and len(tool_runs.data.get("runs", [])) >= 4
+        )
+
+        created_finding = runtime.registry.run("create_finding", {
+            "title": "Exposed administrative interface",
+            "severity": "Medium",
+            "status": "needs-evidence",
+            "description": "An administrative interface was observed during safe enumeration.",
+            "impact": "Attackers could target administrative authentication workflows.",
+            "recommendation": "Restrict management access and require MFA.",
+            "tool_run_ids": str(nmap_structured.data["run_id"]),
+            "tags": "web,exposure",
+        })
+        finding_id = int(created_finding.data["finding"]["id"])
+        updated_finding = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Smoke UI screenshot evidence", "append_evidence": True})
+        listed_findings = runtime.registry.run("list_findings", {"status": "all"})
+        exported_finding = runtime.registry.run("finding_export", {"id": finding_id})
+        write("finding-create.json", json.dumps(created_finding.to_dict(), indent=2))
+        write("finding-update.json", json.dumps(updated_finding.to_dict(), indent=2))
+        write("findings.json", json.dumps(listed_findings.to_dict(), indent=2))
+        write("finding-export.json", json.dumps(exported_finding.to_dict(), indent=2))
+        finding_markdown = Path(exported_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if exported_finding.artifacts.get("markdown") else ""
+        checks["finding_lifecycle_ok"] = created_finding.status == "ok" and updated_finding.data["finding"]["status"] == "confirmed" and "Exposed administrative interface" in json.dumps(listed_findings.to_dict()) and "Tool run" in finding_markdown
 
         started = runtime.registry.run(
             "start_process",
@@ -434,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -467,7 +518,38 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+
+        ui_client_stdout = run_cmd("ui-client", [sys.executable, "-m", "phobos_agent.agent_cli", "ui-client", "--out", str(output / "phobos-remote-ui.html"), "--agent-url", "https://phobos-vps.example"])
+        remote_gateway = None
+        try:
+            try:
+                AgentGateway(runtime, host="0.0.0.0", port=0)
+                refused_unsafe = False
+            except ValueError:
+                refused_unsafe = True
+            remote_gateway = AgentGateway(runtime, port=0, token_env="PHOBOS_SMOKE_GATEWAY_TOKEN", allow_origins=("*",))
+            remote_thread = threading.Thread(target=remote_gateway.serve_forever, daemon=True)
+            remote_thread.start()
+            remote_host, remote_port = remote_gateway.server_address
+            with urllib.request.urlopen(f"http://{remote_host}:{remote_port}/health", timeout=5) as response:
+                remote_health = json.loads(response.read().decode("utf-8"))
+            try:
+                urllib.request.urlopen(f"http://{remote_host}:{remote_port}/status", timeout=5)
+                unauthorized_status = 200
+            except urllib.error.HTTPError as exc:
+                unauthorized_status = exc.code
+            authed_req = urllib.request.Request(f"http://{remote_host}:{remote_port}/status", headers={"Authorization": "Bearer smoke-gateway-token", "Origin": "https://ui.example"})
+            with urllib.request.urlopen(authed_req, timeout=5) as response:
+                remote_status = json.loads(response.read().decode("utf-8"))
+                cors_origin = response.headers.get("Access-Control-Allow-Origin")
+            with urllib.request.urlopen(f"http://{remote_host}:{remote_port}/ui-client", timeout=5) as response:
+                remote_ui = response.read().decode("utf-8")
+            write("remote-gateway-auth.json", json.dumps({"refused_unsafe": refused_unsafe, "health": remote_health, "unauthorized_status": unauthorized_status, "remote_status": remote_status, "cors_origin": cors_origin, "ui_client_stdout": ui_client_stdout}, indent=2))
+            checks["remote_vps_ui_auth_ok"] = refused_unsafe and remote_health.get("auth_required") is True and unauthorized_status == 401 and remote_status.get("status") == "ok" and cors_origin == "*" and "Phobos Agent Remote Client" in remote_ui and "phobos-vps.example" in (output / "phobos-remote-ui.html").read_text(encoding="utf-8")
+        finally:
+            if remote_gateway is not None:
+                remote_gateway.shutdown()
 
         pack = runtime.registry.run("export_pack", {"out": "closeout-pack.zip"})
         write("pack-export.json", json.dumps(pack.to_dict(), indent=2))

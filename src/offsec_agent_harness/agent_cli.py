@@ -9,7 +9,7 @@ from pathlib import Path
 from .agent_config import AgentAppConfig
 from .agent_bridges import BridgeConfig, BridgeMessage, handle_bridge_message, run_bridge
 from .agent_crypto import MAGIC as SEALED_MAGIC, seal_bytes, unseal_bytes
-from .agent_gateway import AgentGateway
+from .agent_gateway import AgentGateway, remote_client_html
 from .agent_runtime import AgentRuntimeConfig, OffSecAgentRuntime
 from .agent_store import AgentStore
 from .models import EngagementROE
@@ -107,10 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     jobs = sub.add_parser("run-due", help="Run due jobs for the session")
     jobs.add_argument("--engagement", required=True)
 
-    serve = sub.add_parser("serve", help="Run a local HTTP gateway for the agent")
+    serve = sub.add_parser("serve", help="Run a local or authenticated remote HTTP gateway for the agent")
     serve.add_argument("--engagement", required=True)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--token-env", help="Environment variable containing the gateway bearer token; required for non-local binds unless --unsafe-no-auth is used")
+    serve.add_argument("--allow-origin", action="append", default=[], help="CORS origin allowed to call this gateway, e.g. https://ui.example.com or *; repeatable")
+    serve.add_argument("--unsafe-no-auth", action="store_true", help="Allow a non-local bind without bearer auth; only for isolated throwaway test networks")
+
+    ui_client = sub.add_parser("ui-client", help="Write a standalone browser UI that can connect to a local or VPS-hosted Phobos gateway")
+    ui_client.add_argument("--out", default="phobos-remote-ui.html")
+    ui_client.add_argument("--agent-url", default="", help="Optional default gateway URL to prefill, e.g. https://agent.example.com")
 
     discord = sub.add_parser("discord", help="Run a Discord bot bridge for an allowlisted channel/thread or DM")
     discord.add_argument("--engagement", required=True)
@@ -243,6 +250,12 @@ def main(argv: list[str] | None = None) -> int:
         return _db_seal(args)
     if args.subcommand in {"db-unseal", "unseal-db"}:
         return _db_unseal(args)
+    if args.subcommand == "ui-client":
+        out = Path(args.out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(remote_client_html(default_base_url=args.agent_url), encoding="utf-8")
+        print(json.dumps({"status": "written", "ui": str(out), "agent_url_prefilled": bool(args.agent_url)}, indent=2))
+        return 0
 
     if args.subcommand == "init":
         roe = EngagementROE.load(args.engagement)
@@ -291,9 +304,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"jobs_run": runtime.run_due_jobs()}, indent=2))
             return 0
         if args.subcommand == "serve":
-            gateway = AgentGateway(runtime, host=args.host, port=args.port)
+            gateway = AgentGateway(runtime, host=args.host, port=args.port, token_env=args.token_env, allow_origins=tuple(args.allow_origin or ()), unsafe_no_auth=bool(args.unsafe_no_auth))
             host, port = gateway.server_address
-            print(json.dumps({"status": "listening", "host": host, "port": port, "session_id": runtime.session_id}, indent=2), flush=True)
+            print(json.dumps({"status": "listening", "host": host, "port": port, "session_id": runtime.session_id, "auth_required": gateway.auth_required, "token_env": args.token_env or "", "allow_origins": list(args.allow_origin or ()), "ui_client": f"http://{host}:{port}/ui-client"}, indent=2), flush=True)
             try:
                 gateway.serve_forever()
             finally:

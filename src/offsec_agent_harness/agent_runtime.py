@@ -243,7 +243,22 @@ class OffSecAgentRuntime:
             "bloodhound": "bloodhound_import",
             "bh": "bloodhound_import",
             "cve": "cve_advice",
+            "nmap": "nmap_scan",
+            "nmap-scan": "nmap_scan",
+            "httpx": "httpx_probe",
+            "httpx-probe": "httpx_probe",
+            "nuclei": "nuclei_scan",
+            "nuclei-scan": "nuclei_scan",
+            "ffuf": "ffuf_scan",
+            "ffuf-scan": "ffuf_scan",
+            "tool-runs": "list_tool_runs",
+            "tool-run": "get_tool_run",
             "finding": "export_finding",
+            "findings": "list_findings",
+            "finding-create": "create_finding",
+            "finding-update": "update_finding",
+            "finding-get": "get_finding",
+            "finding-export": "finding_export",
             "remember": "remember",
             "recall": "recall",
             "search": "search_session",
@@ -509,7 +524,17 @@ HELP_TEXT = """Phobos Agent commands:
 /burp-tab target=<host> tab_name=<name> request_file=<path> mcp_url=<url> create=false
 /bloodhound input=<json|dir|zip> principal=<USER@DOMAIN>
 /cve component=<product> version=<version> catalog=<catalog.json> online=false
+/nmap target=<host> ports=80,443 stdout=<optional-captured-output> execute=false
+/httpx url=<url> stdout=<optional-jsonl-output> execute=false
+/nuclei url=<url> stdout=<optional-jsonl-output> execute=false
+/ffuf url=<url/FUZZ> wordlist=<path> stdout=<optional-json-output> execute=false
+/tool-runs limit=20 tool_name=<optional>
 /finding finding_file=<finding.json>
+/findings status=all
+/finding-create title=<title> severity=Medium status=draft tool_run_ids=1,2
+/finding-update id=<finding-id> status=confirmed append_evidence=true
+/finding-get id=<finding-id>
+/finding-export id=<finding-id> out=<optional.md>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20

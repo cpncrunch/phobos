@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import unittest
 import zipfile
@@ -439,6 +440,108 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_structured_wrappers_findings_and_remote_gateway_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            old_token = os.environ.get("PHOBOS_GATEWAY_TEST_TOKEN")
+            os.environ["PHOBOS_GATEWAY_TEST_TOKEN"] = "unit-token"
+            try:
+                nmap_output = """Starting Nmap
+Nmap scan report for 10.10.0.5
+PORT    STATE SERVICE VERSION
+80/tcp  open  http    nginx 1.24
+443/tcp open  https   nginx 1.24
+"""
+                nmap = runtime.registry.run("nmap_scan", {"target": "10.10.0.5", "ports": "80,443", "stdout": nmap_output})
+                self.assertEqual(nmap.status, "parsed", nmap.to_dict())
+                self.assertEqual(nmap.data["parsed"]["summary"]["open_ports"], 2)
+                self.assertTrue(Path(nmap.data["artifact_path"]).exists())
+                nmap_run_id = nmap.data["run_id"]
+
+                httpx = runtime.registry.run("httpx_probe", {"url": "https://app.example.test", "stdout": json.dumps({"url": "https://app.example.test", "status_code": 200, "title": "ACME Portal", "tech": ["nginx"]})})
+                self.assertEqual(httpx.status, "parsed", httpx.to_dict())
+                self.assertEqual(httpx.data["parsed"]["responses"][0]["status_code"], 200)
+
+                nuclei_line = json.dumps({"template-id": "exposed-panel", "info": {"name": "Exposed Panel", "severity": "medium"}, "matched-at": "https://app.example.test/admin"})
+                nuclei = runtime.registry.run("nuclei_scan", {"url": "https://app.example.test", "stdout": nuclei_line})
+                self.assertEqual(nuclei.status, "parsed", nuclei.to_dict())
+                self.assertEqual(nuclei.data["parsed"]["summary"]["count"], 1)
+
+                ffuf_output = json.dumps({"results": [{"url": "https://app.example.test/admin", "status": 200, "length": 1234, "words": 12, "lines": 5}]})
+                ffuf = runtime.registry.run("ffuf_scan", {"url": "https://app.example.test/FUZZ", "wordlist": "words.txt", "stdout": ffuf_output})
+                self.assertEqual(ffuf.status, "parsed", ffuf.to_dict())
+                self.assertEqual(ffuf.data["parsed"]["summary"]["count"], 1)
+
+                runs = runtime.registry.run("list_tool_runs", {})
+                self.assertGreaterEqual(len(runs.data["runs"]), 4)
+                self.assertIn("nmap_scan", runtime.handle_message('/schemas name=nmap_scan'))
+                self.assertIn("Structured tool run", runtime.handle_message(f'/tool-run id={nmap_run_id}'))
+
+                created = runtime.registry.run("create_finding", {
+                    "title": "Exposed administrative interface",
+                    "severity": "Medium",
+                    "status": "needs-evidence",
+                    "description": "An administrative interface was exposed during safe enumeration.",
+                    "impact": "Attackers could target administrative authentication workflows.",
+                    "recommendation": "Restrict access to trusted management networks and require MFA.",
+                    "tool_run_ids": str(nmap_run_id),
+                    "tags": "web,exposure",
+                })
+                self.assertEqual(created.status, "ok", created.to_dict())
+                finding_id = created.data["finding"]["id"]
+                updated = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Gateway screenshot captured", "append_evidence": True})
+                self.assertEqual(updated.data["finding"]["status"], "confirmed")
+                exported = runtime.registry.run("finding_export", {"id": finding_id})
+                self.assertEqual(exported.status, "ok", exported.to_dict())
+                markdown = Path(exported.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Exposed administrative interface", markdown)
+                self.assertIn("Tool run", markdown)
+                listed = runtime.handle_message('/findings status=all')
+                self.assertIn("Exposed administrative interface", listed)
+                status = runtime.registry.run("runtime_status", {}).data
+                self.assertGreaterEqual(status["schema"]["schema_version"], 5)
+                self.assertGreaterEqual(status["tool_runs"], 4)
+                self.assertGreaterEqual(status["findings"], 1)
+
+                with self.assertRaises(ValueError):
+                    AgentGateway(runtime, host="0.0.0.0", port=0)
+                gateway = AgentGateway(runtime, port=0, token_env="PHOBOS_GATEWAY_TEST_TOKEN", allow_origins=("*",))
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=5) as response:
+                    health = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(health["auth_required"])
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5)
+                self.assertEqual(raised.exception.code, 401)
+                authed = urllib.request.Request(f"http://{host}:{port}/status", headers={"Authorization": "Bearer unit-token", "Origin": "https://ui.example"})
+                with urllib.request.urlopen(authed, timeout=5) as response:
+                    remote_status = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+                self.assertEqual(remote_status["status"], "ok")
+                with urllib.request.urlopen(f"http://{host}:{port}/ui-client", timeout=5) as response:
+                    ui_html = response.read().decode("utf-8")
+                self.assertIn("Phobos Agent Remote Client", ui_html)
+                finding_req = urllib.request.Request(
+                    f"http://{host}:{port}/finding",
+                    data=json.dumps({"title": "Remote-created finding", "severity": "Low"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer unit-token"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(finding_req, timeout=5) as response:
+                    remote_finding = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(remote_finding["result"]["status"], "ok")
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+                if old_token is None:
+                    os.environ.pop("PHOBOS_GATEWAY_TEST_TOKEN", None)
+                else:
+                    os.environ["PHOBOS_GATEWAY_TEST_TOKEN"] = old_token
+
     def test_bridge_allowlists_prefix_mentions_and_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
@@ -714,6 +817,15 @@ class AgentCliTests(unittest.TestCase):
             ], cwd=project, env=env, text=True, capture_output=True)
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("schema_version", status.stdout)
+
+            ui_client = tmp_path / "phobos-remote-ui.html"
+            ui = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "ui-client", "--out", str(ui_client), "--agent-url", "https://agent.example.test",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(ui.returncode, 0, ui.stderr)
+            self.assertTrue(ui_client.exists())
+            self.assertIn("Phobos Agent Remote Client", ui_client.read_text(encoding="utf-8"))
+            self.assertIn("https://agent.example.test", ui_client.read_text(encoding="utf-8"))
 
             auth_env = dict(env)
             auth_env["PHOBOS_DISCORD_TOKEN"] = "discord-secret-value"

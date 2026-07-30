@@ -4,11 +4,13 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 
 ## Runtime components
 
-- **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v4.
+- **Session management:** SQLite-backed sessions keyed by engagement path and session name, with schema-version metadata for local migrations; current runtime schema is v5.
 - **Persistent memory:** local SQLite memory table with `/remember` and `/recall`; Hindsight-style aliases (`/hindsight-retain`, `/hindsight-recall`, `/hindsight-reflect`) store/search/synthesize through the same local memory and context stores; memory and current/cross-session search use FTS5 when available and fall back to LIKE otherwise.
 - **Task board:** `/tasks`, `/task-add`, and `/task-update` provide durable local task tracking in SQLite.
 - **Context recovery:** `/compact` writes model/heuristic summaries to SQLite and Markdown; `/context` returns the latest summary plus recent session state; `/lcm-compact`, `/lcm-describe`, `/lcm-expand`, `/lcm-query`, and snake_case `lcm_*` tool aliases add explicit LCM-style context nodes that can be described, expanded, queried, exported, and imported.
 - **Tool registry and schemas:** every built-in/plugin tool has a named registry entry and JSON-style schema; inspect with `/tools` and `/schemas`.
+- **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable `tool_runs` records and redacted evidence artifacts.
+- **Finding lifecycle:** DB-backed findings track severity/status, narrative fields, linked tool runs, appended evidence, and Markdown exports for report drafting.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
@@ -24,7 +26,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
-- **Local HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default, including route discovery and views for schemas, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
+- **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, and views for schemas, findings, tool runs, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
 - **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
@@ -76,7 +78,18 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /burp-tab target=<host> tab_name=<name> request_file=<path> mcp_url=<url> create=false
 /bloodhound input=<json|dir|zip> principal=<USER@DOMAIN>
 /cve component=<product> version=<version> catalog=<catalog.json> online=false
+/nmap target=<host> ports=80,443 stdout=<optional-captured-output> execute=false
+/httpx url=<url> stdout=<optional-jsonl-output> execute=false
+/nuclei url=<url> stdout=<optional-jsonl-output> execute=false
+/ffuf url=<url/FUZZ> wordlist=<path> stdout=<optional-json-output> execute=false
+/tool-runs limit=20 tool_name=<optional>
+/tool-run id=<run-id>
 /finding finding_file=<finding.json>
+/findings status=all
+/finding-create title=<title> severity=Medium status=draft tool_run_ids=1,2
+/finding-update id=<finding-id> status=confirmed append_evidence=true
+/finding-get id=<finding-id>
+/finding-export id=<finding-id> out=<optional.md>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20
@@ -272,6 +285,44 @@ Destructive and denial-of-service-like commands still block and are never execut
 
 If you want the original conservative behaviour where active scans also require approval, create the engagement with `--safety-mode standard`.
 
+## Structured scanner wrappers and finding lifecycle
+
+The productized runtime includes scanner-style wrapper tools for common pentest enumeration outputs. They are structured tools, not raw remote shells: target-affecting execution is still ROE-gated and requires explicit `execute=true`; parser/demo paths can pass captured `stdout` or `input_file` and do not require the scanner binary to be installed.
+
+```bash
+# Parse captured nmap-style output into a durable tool run and evidence artifact.
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/nmap target=10.10.0.5 ports=80,443 stdout="80/tcp open http nginx"'
+
+# Parse captured JSON/JSONL-style outputs from HTTP probing, nuclei, and ffuf.
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/httpx url=https://app.example.test stdout="{\"url\":\"https://app.example.test\",\"status_code\":200}"'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/tool-runs limit=20'
+```
+
+When a scanner run supports a finding, create and promote a lifecycle record instead of treating every scanner hit as report-ready:
+
+```bash
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/finding-create title="Exposed administrative interface" severity=Medium status=needs-evidence tool_run_ids=1'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/finding-update id=1 status=confirmed append_evidence=true evidence="Validated with scoped admin panel screenshot"'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json once \
+  --engagement engagement.json \
+  --message '/finding-export id=1'
+```
+
+Finding statuses are intentionally lifecycle-oriented (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) so imports/parser hits remain candidate evidence until the operator confirms impact.
+
 ## Workspace, process, and context examples
 
 ```bash
@@ -461,6 +512,7 @@ Endpoints:
 
 ```text
 GET  /              local web dashboard
+GET  /ui-client     standalone browser client for local/VPS gateway use
 GET  /health
 GET  /routes
 GET  /status
@@ -470,6 +522,8 @@ GET  /sessions
 GET  /context
 GET  /lcm
 GET  /tasks
+GET  /findings
+GET  /tool-runs
 GET  /jobs
 GET  /processes
 GET  /approvals
@@ -480,12 +534,35 @@ GET  /bridges
 GET  /audit
 POST /message   {"message": "/tools"}
 POST /tool      {"name": "tool_name", "args": {}}
+POST /finding   {"title": "Finding title", "severity": "Medium", "description": "..."}
 POST /approve   {"id": 1, "by": "gateway"}
 POST /deny      {"id": 1, "by": "gateway", "reason": "outside window"}
 POST /run-due   {}
 ```
 
 Bind to localhost unless you have a clear reason to expose the agent on another interface.
+
+### VPS / remote browser client
+
+For a VPS-hosted agent, keep the browser UI separate from the running agent and make remote access explicit and authenticated:
+
+```bash
+# Generate a static browser client you can host separately or open locally.
+phobos-agent ui-client \
+  --out phobos-remote-ui.html \
+  --agent-url https://phobos-vps.example
+
+# On the VPS, bind publicly only with a long random token from an env var.
+export PHOBOS_GATEWAY_TOKEN='use-a-long-random-secret-from-your-password-manager'
+phobos-agent --db data/phobos-agent.db --config agent.config.json serve \
+  --engagement engagement.json \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --token-env PHOBOS_GATEWAY_TOKEN \
+  --allow-origin https://your-ui-origin.example
+```
+
+`/health` remains unauthenticated so load balancers and operators can confirm liveness, but operational endpoints require `Authorization: Bearer <token>` when a token is configured. Non-local binds refuse to start without `--token-env` unless `--unsafe-no-auth` is supplied; that override is only for isolated throwaway test networks. For real VPS deployments, put the stdlib gateway behind a firewall plus TLS reverse proxy, VPN, or SSH tunnel. Do not expose it directly as a multi-user production web application.
 
 ## Verified smoke coverage
 
@@ -495,7 +572,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 31 tests
+Ran 32 tests
 OK
 ```
 
@@ -523,6 +600,8 @@ auto_memory_recall=True
 auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
 guardrails_execution_approvals_blocks=True
+structured_tool_wrappers_ok=True
+finding_lifecycle_ok=True
 background_process_completed=True
 wait_process_ok=True
 jobs_and_subagents=True
@@ -544,10 +623,11 @@ bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
+remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=140
+artifact_count=159
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -585,6 +665,8 @@ gateway-health.json
 gateway-routes.json
 gateway-status.json
 gateway-tool.json
+remote-gateway-auth.json
+ui-client.stdout.txt
 hindsight-retain.json
 hindsight-recall.json
 hindsight-reflect.json
@@ -596,6 +678,15 @@ lcm-query.json
 legacy-term-grep.txt
 media-import.json
 media-list.json
+nmap-structured.json
+httpx-structured.json
+nuclei-structured.json
+ffuf-structured.json
+tool-runs.json
+finding-create.json
+finding-update.json
+findings.json
+finding-export.json
 operator-briefing.json
 pack-export.json
 plugin-echo.txt
@@ -635,10 +726,10 @@ This is now a real local Hermes-like offsec agent runtime, but it is still not a
 
 - Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
 - bridge media handling imports explicit local files and records remote platform attachment metadata, but does not blindly download remote attachments or transcribe voice/audio;
-- web UI is intentionally minimal/local, not a production console;
+- web UI is intentionally minimal and single-operator oriented, not a production multi-user console; remote/VPS use requires bearer-token auth plus TLS/reverse proxy, firewall, VPN, or SSH tunnel controls, and there is no RBAC/session management;
 - `/auto` has deterministic planning plus optional model-returned JSON plans and a bounded `/auto-loop`, but it is not Hermes' full native function-calling autonomy or general-purpose task computer;
 - local `/delegate` persists batches, artifacts, and child session records, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
 - sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
 - Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
 
-The important pieces for a standalone pentest agent are working: sessions, memory, Hindsight aliases, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches with child sessions, media/artifact import, bridge media metadata/import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, sealed DB backup/restore, local gateway/dashboard, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.
+The important pieces for a standalone pentest agent are working: sessions, memory, Hindsight aliases, task board, local skills, context snapshots/compaction, LCM-style context nodes, tool schemas, structured scanner wrapper evidence, finding lifecycle records, plugin loading, runtime policy, approvals, foreground/background process handling, jobs, model fallback, subagent role reviews, durable local delegation batches with child sessions, media/artifact import, bridge media metadata/import, auth/profile status, operator briefings, handoff export/import, sealed portable snapshots, sealed DB backup/restore, authenticated local/VPS gateway/dashboard and remote browser client, Discord/Slack/Telegram bridge dispatch, ROE-gated non-destructive execution, evidence logging, and the pentest-specific tools.

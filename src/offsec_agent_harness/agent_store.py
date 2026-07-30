@@ -10,7 +10,7 @@ import sqlite3
 import uuid
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -211,6 +211,36 @@ class AgentStore:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_media_session ON media_artifacts(session_id, id);
+            CREATE TABLE IF NOT EXISTS tool_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                command TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision_json TEXT NOT NULL DEFAULT '{}',
+                parsed_json TEXT NOT NULL DEFAULT '{}',
+                artifact_path TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_runs_session ON tool_runs(session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_tool_runs_tool ON tool_runs(tool_name, id);
+            CREATE TABLE IF NOT EXISTS findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'Informational',
+                status TEXT NOT NULL DEFAULT 'draft',
+                description TEXT NOT NULL DEFAULT '',
+                impact TEXT NOT NULL DEFAULT '',
+                recommendation TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_findings_session_status ON findings(session_id, status, id);
             """
         )
         self._init_meta()
@@ -624,6 +654,123 @@ class AgentStore:
         rows = self.conn.execute("SELECT * FROM media_artifacts WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
         return [_media_artifact_row(row) for row in rows]
 
+    def create_tool_run(
+        self,
+        session_id: str,
+        tool_name: str,
+        target: str,
+        command: str,
+        status: str,
+        decision: dict[str, Any] | None = None,
+        parsed: dict[str, Any] | None = None,
+        artifact_path: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO tool_runs(session_id, tool_name, target, command, status, decision_json, parsed_json, artifact_path, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                tool_name,
+                target,
+                command,
+                status,
+                json.dumps(decision or {}, sort_keys=True),
+                json.dumps(parsed or {}, sort_keys=True),
+                artifact_path,
+                json.dumps(metadata or {}, sort_keys=True),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_tool_run(self, run_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM tool_runs WHERE id=?", (run_id,)).fetchone()
+        return _tool_run_row(row) if row else None
+
+    def list_tool_runs(self, session_id: str, limit: int = 50, tool_name: str | None = None) -> list[dict[str, Any]]:
+        if tool_name:
+            rows = self.conn.execute("SELECT * FROM tool_runs WHERE session_id=? AND tool_name=? ORDER BY id DESC LIMIT ?", (session_id, tool_name, limit)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM tool_runs WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+        return [_tool_run_row(row) for row in rows]
+
+    def create_finding(
+        self,
+        session_id: str,
+        title: str,
+        severity: str = "Informational",
+        status: str = "draft",
+        description: str = "",
+        impact: str = "",
+        recommendation: str = "",
+        evidence: list[dict[str, Any]] | None = None,
+        tags: str = "",
+    ) -> int:
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            INSERT INTO findings(session_id, title, severity, status, description, impact, recommendation, evidence_json, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, title, severity, status, description, impact, recommendation, json.dumps(evidence or [], sort_keys=True), tags, now, now),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def update_finding(
+        self,
+        finding_id: int,
+        *,
+        title: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+        description: str | None = None,
+        impact: str | None = None,
+        recommendation: str | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        tags: str | None = None,
+    ) -> dict[str, Any] | None:
+        fields: list[str] = []
+        values: list[Any] = []
+        for column, value in {
+            "title": title,
+            "severity": severity,
+            "status": status,
+            "description": description,
+            "impact": impact,
+            "recommendation": recommendation,
+            "tags": tags,
+        }.items():
+            if value is not None:
+                fields.append(f"{column}=?")
+                values.append(value)
+        if evidence is not None:
+            fields.append("evidence_json=?")
+            values.append(json.dumps(evidence, sort_keys=True))
+        if not fields:
+            return self.get_finding(finding_id)
+        fields.append("updated_at=?")
+        values.append(utc_now())
+        values.append(finding_id)
+        self.conn.execute(f"UPDATE findings SET {', '.join(fields)} WHERE id=?", values)
+        self.conn.commit()
+        return self.get_finding(finding_id)
+
+    def get_finding(self, finding_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+        return _finding_row(row) if row else None
+
+    def list_findings(self, session_id: str, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        if status and status != "all":
+            rows = self.conn.execute("SELECT * FROM findings WHERE session_id=? AND status=? ORDER BY id DESC LIMIT ?", (session_id, status, limit)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM findings WHERE session_id=? ORDER BY CASE status WHEN 'confirmed' THEN 0 WHEN 'draft' THEN 1 WHEN 'needs-evidence' THEN 2 WHEN 'resolved' THEN 3 ELSE 4 END, id DESC LIMIT ?", (session_id, limit)).fetchall()
+        return [_finding_row(row) for row in rows]
+
     def create_approval(self, session_id: str, tool_name: str, args: dict[str, Any], decision: dict[str, Any]) -> int:
         cur = self.conn.execute(
             "INSERT INTO approvals(session_id, tool_name, args_json, decision_json, status, requested_at) VALUES (?, ?, ?, ?, 'pending', ?)",
@@ -857,6 +1004,39 @@ def _media_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
         "size": row["size"],
         "metadata": json.loads(row["metadata_json"] or "{}"),
         "created_at": row["created_at"],
+    }
+
+
+def _tool_run_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "tool_name": row["tool_name"],
+        "target": row["target"],
+        "command": row["command"],
+        "status": row["status"],
+        "decision": json.loads(row["decision_json"] or "{}"),
+        "parsed": json.loads(row["parsed_json"] or "{}"),
+        "artifact_path": row["artifact_path"],
+        "metadata": json.loads(row["metadata_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def _finding_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "title": row["title"],
+        "severity": row["severity"],
+        "status": row["status"],
+        "description": row["description"],
+        "impact": row["impact"],
+        "recommendation": row["recommendation"],
+        "evidence": json.loads(row["evidence_json"] or "[]"),
+        "tags": row["tags"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 
