@@ -37,6 +37,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "max_response_chars": 1800,
         "max_message_chars": 4000,
         "poll_interval": 2.0,
+        "mention_aliases": ["phobos", "phobos-agent", "phobos_agent"],
     },
     "slack": {
         "enabled": False,
@@ -342,6 +343,23 @@ def normalize_bridge_text(text: str, config: BridgeConfig, *, bot_user_id: str |
             # trigger wherever Discord places it, preferring the text after the
             # mention when present and falling back to the text before it.
             stripped = after or before
+    if not mentioned:
+        aliases = _tuple_of_strings(config.extra.get("mention_aliases", ()))
+        if not aliases and config.platform == "discord":
+            aliases = ("phobos", "phobos-agent", "phobos_agent")
+        for alias in aliases:
+            alias = alias.strip().lstrip("@")
+            if not alias:
+                continue
+            alias_pattern = re.compile(rf"(?<![\w@])@{re.escape(alias)}(?![\w-])[:,]?\s*", re.IGNORECASE)
+            match = alias_pattern.search(original)
+            if not match:
+                continue
+            mentioned = True
+            after = original[match.end() :].strip()
+            before = original[: match.start()].strip()
+            stripped = after or before
+            break
     prefixed = False
     if config.command_prefix:
         if stripped.startswith(config.command_prefix):

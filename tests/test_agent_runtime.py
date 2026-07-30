@@ -675,6 +675,27 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(inline_mention.normalized_text, "/status")
                 self.assertIn('"safety_mode": "non_destructive"', inline_mention.response)
 
+                literal_alias = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="@phobos /status", channel_id="C1", user_id="U1"),
+                    config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(literal_alias.status, "handled")
+                self.assertEqual(literal_alias.reason, "mentioned")
+                self.assertEqual(literal_alias.normalized_text, "/status")
+                self.assertIn('"safety_mode": "non_destructive"', literal_alias.response)
+
+                trailing_alias = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="/tools @Phobos", channel_id="C1", user_id="U1"),
+                    config,
+                    bot_user_id="BOT1",
+                )
+                self.assertEqual(trailing_alias.status, "handled")
+                self.assertEqual(trailing_alias.normalized_text, "/tools")
+                self.assertIn("Available tools", trailing_alias.response)
+
                 trailing_mention = handle_bridge_message(
                     runtime,
                     BridgeMessage(platform="discord", text="/tools <@BOT1>", channel_id="C1", user_id="U2"),
