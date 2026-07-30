@@ -1403,6 +1403,13 @@ def main(argv: list[str] | None = None) -> int:
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
+        invalid_gateway_queries: dict[str, dict[str, object]] = {}
+        for route in ["/timeline?limit=not-an-int", "/manifest?max_bytes=not-an-int", f"/finding-bundle?id={finding_id}&max_bytes=not-an-int"]:
+            try:
+                with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
+                    invalid_gateway_queries[route] = {"status_code": response.status, "payload": json.loads(response.read().decode("utf-8"))}
+            except urllib.error.HTTPError as exc:
+                invalid_gateway_queries[route] = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
         message_req = urllib.request.Request(
             f"http://{host}:{port}/message",
             data=json.dumps({"message": "/status"}).encode("utf-8"),
@@ -1450,6 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-status.json", json.dumps(gateway_status, indent=2))
         write("gateway-guardrails.json", json.dumps({"before": gateway_gets.get("/guardrails"), "after": gateway_guardrail_update}, indent=2))
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
+        write("gateway-invalid-query.json", json.dumps(invalid_gateway_queries, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         preflight_route_obj = gateway_gets.get("/preflight")
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
@@ -1494,6 +1502,13 @@ def main(argv: list[str] | None = None) -> int:
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
         checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and guardrail_route_data.get("no_target_activity") is True and guardrail_route_data.get("readiness") == "ready" and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(guardrail_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        invalid_gateway_blob = json.dumps(invalid_gateway_queries)
+        invalid_gateway_ok = True
+        for item in invalid_gateway_queries.values():
+            payload_obj = item.get("payload")
+            if not isinstance(payload_obj, dict) or item.get("status_code") != 400 or "must be an integer" not in str(payload_obj.get("error", "")):
+                invalid_gateway_ok = False
+        checks["gateway_invalid_query_handling_ok"] = invalid_gateway_ok and "Traceback" not in invalid_gateway_blob
         checks["gateway_audit_detail_route_ok"] = audit_route_payload.get("status") == "ok" and audit_route_data.get("no_target_activity") is True and "storage-audit-secret" not in json.dumps(audit_route_payload) and "storage-audit-bearer" not in json.dumps(audit_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"

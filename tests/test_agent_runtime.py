@@ -1812,6 +1812,23 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(audit_detail["status"], "ok")
                 self.assertEqual(audit_detail["data"]["audit"]["id"], audit_id)
                 self.assertNotIn("gateway-audit-secret", json.dumps(audit_detail))
+
+                for bad_route, expected_error in [
+                    ("/timeline?limit=not-an-int", "limit must be an integer"),
+                    ("/manifest?max_bytes=not-an-int", "max_bytes must be an integer"),
+                    (f"/finding-bundle?id={finding_id}&max_bytes=not-an-int", "max_bytes must be an integer"),
+                ]:
+                    bad_query_req = urllib.request.Request(
+                        f"http://{host}:{port}{bad_route}",
+                        headers={"Authorization": "Bearer unit-token"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as bad_query:
+                        urllib.request.urlopen(bad_query_req, timeout=5)
+                    self.assertEqual(bad_query.exception.code, 400)
+                    bad_payload = json.loads(bad_query.exception.read().decode("utf-8"))
+                    self.assertEqual(bad_payload.get("error"), expected_error)
+                    self.assertNotIn("Traceback", json.dumps(bad_payload))
+
                 with urllib.request.urlopen(f"http://{host}:{port}/ui-client", timeout=5) as response:
                     ui_html = response.read().decode("utf-8")
                 self.assertIn("Phobos Agent Remote Client", ui_html)

@@ -137,7 +137,10 @@ class AgentGateway:
                         return
                     if path == "/memories":
                         query = parse_qs(parsed.query)
-                        args: dict[str, Any] = {"limit": int((query.get("limit") or [50])[0])}
+                        limit = _query_int(self, query, "limit", 50)
+                        if limit is None:
+                            return
+                        args: dict[str, Any] = {"limit": limit}
                         if (query.get("query") or [""])[0]:
                             args["query"] = (query.get("query") or [""])[0]
                         _write_json(self, runtime.registry.run("list_memories", args).to_dict())
@@ -154,9 +157,12 @@ class AgentGateway:
                         return
                     if path == "/approvals":
                         query = parse_qs(parsed.query)
+                        limit = _query_int(self, query, "limit", 100)
+                        if limit is None:
+                            return
                         args: dict[str, Any] = {
                             "status": (query.get("status") or ["pending"])[0],
-                            "limit": int((query.get("limit") or [100])[0]),
+                            "limit": limit,
                         }
                         _write_json(self, runtime.registry.run("list_approvals", args).to_dict())
                         return
@@ -170,7 +176,10 @@ class AgentGateway:
                         return
                     if path == "/audit":
                         query = parse_qs(parsed.query)
-                        _write_json(self, runtime.registry.run("audit_log", {"limit": int((query.get("limit") or [50])[0])}).to_dict())
+                        limit = _query_int(self, query, "limit", 50)
+                        if limit is None:
+                            return
+                        _write_json(self, runtime.registry.run("audit_log", {"limit": limit}).to_dict())
                         return
                     if path in {"/audit-detail", "/audit-event"}:
                         query = parse_qs(parsed.query)
@@ -182,7 +191,10 @@ class AgentGateway:
                         return
                     if path == "/timeline":
                         query = parse_qs(parsed.query)
-                        args: dict[str, Any] = {"limit": int((query.get("limit") or [100])[0])}
+                        limit = _query_int(self, query, "limit", 100)
+                        if limit is None:
+                            return
+                        args: dict[str, Any] = {"limit": limit}
                         if (query.get("category") or [""])[0]:
                             args["category"] = (query.get("category") or [""])[0]
                         if (query.get("include_audit") or [""])[0]:
@@ -191,34 +203,52 @@ class AgentGateway:
                         return
                     if path in {"/manifest", "/evidence-manifest"}:
                         query = parse_qs(parsed.query)
-                        args = {"limit": int((query.get("limit") or [1000])[0])}
+                        limit = _query_int(self, query, "limit", 1000)
+                        if limit is None:
+                            return
+                        args = {"limit": limit}
                         if (query.get("max_bytes") or [""])[0]:
-                            args["max_bytes"] = int((query.get("max_bytes") or [50000000])[0])
+                            max_bytes = _query_int(self, query, "max_bytes", 50000000)
+                            if max_bytes is None:
+                                return
+                            args["max_bytes"] = max_bytes
                         if (query.get("include_agent") or [""])[0]:
                             args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
                         _write_json(self, runtime.registry.run("evidence_manifest", args).to_dict())
                         return
                     if path in {"/manifest-verify", "/evidence-manifest-verify"}:
                         query = parse_qs(parsed.query)
+                        limit = _query_int(self, query, "limit", 1000)
+                        if limit is None:
+                            return
                         args = {
                             "path": (query.get("path") or query.get("manifest") or [""])[0],
-                            "limit": int((query.get("limit") or [1000])[0]),
+                            "limit": limit,
                         }
                         if (query.get("out") or [""])[0]:
                             args["out"] = (query.get("out") or [""])[0]
                         if (query.get("max_bytes") or [""])[0]:
-                            args["max_bytes"] = int((query.get("max_bytes") or [50000000])[0])
+                            max_bytes = _query_int(self, query, "max_bytes", 50000000)
+                            if max_bytes is None:
+                                return
+                            args["max_bytes"] = max_bytes
                         if (query.get("detect_new") or [""])[0]:
                             args["detect_new"] = (query.get("detect_new") or [""])[0].strip().lower() not in {"0", "false", "no"}
                         _write_json(self, runtime.registry.run("evidence_manifest_verify", args).to_dict())
                         return
                     if path in {"/secret-scan", "/evidence-secret-scan"}:
                         query = parse_qs(parsed.query)
-                        args = {"limit": int((query.get("limit") or [200])[0])}
+                        limit = _query_int(self, query, "limit", 200)
+                        if limit is None:
+                            return
+                        args = {"limit": limit}
                         if (query.get("out") or [""])[0]:
                             args["out"] = (query.get("out") or [""])[0]
                         if (query.get("max_bytes") or [""])[0]:
-                            args["max_bytes"] = int((query.get("max_bytes") or [2000000])[0])
+                            max_bytes = _query_int(self, query, "max_bytes", 2000000)
+                            if max_bytes is None:
+                                return
+                            args["max_bytes"] = max_bytes
                         if (query.get("include_agent") or [""])[0]:
                             args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
                         _write_json(self, runtime.registry.run("evidence_secret_scan", args).to_dict())
@@ -249,9 +279,12 @@ class AgentGateway:
                         return
                     if path == "/tasks":
                         query = parse_qs(parsed.query)
+                        limit = _query_int(self, query, "limit", 100)
+                        if limit is None:
+                            return
                         args = {
                             "status": (query.get("status") or ["all"])[0],
-                            "limit": int((query.get("limit") or [100])[0]),
+                            "limit": limit,
                         }
                         _write_json(self, runtime.registry.run("list_tasks", args).to_dict())
                         return
@@ -265,7 +298,10 @@ class AgentGateway:
                         return
                     if path == "/findings":
                         query = parse_qs(parsed.query)
-                        _write_json(self, runtime.registry.run("list_findings", {"status": (query.get("status") or ["all"])[0], "limit": int((query.get("limit") or [50])[0])}).to_dict())
+                        limit = _query_int(self, query, "limit", 50)
+                        if limit is None:
+                            return
+                        _write_json(self, runtime.registry.run("list_findings", {"status": (query.get("status") or ["all"])[0], "limit": limit}).to_dict())
                         return
                     if path in {"/finding", "/finding-detail"}:
                         query = parse_qs(parsed.query)
@@ -285,16 +321,18 @@ class AgentGateway:
                         if (query.get("out") or [""])[0]:
                             args["out"] = (query.get("out") or [""])[0]
                         if (query.get("max_bytes") or [""])[0]:
-                            try:
-                                args["max_bytes"] = int((query.get("max_bytes") or [2000000])[0])
-                            except ValueError:
-                                _write_json(self, {"error": "max_bytes must be an integer"}, status=400)
+                            max_bytes = _query_int(self, query, "max_bytes", 2000000)
+                            if max_bytes is None:
                                 return
+                            args["max_bytes"] = max_bytes
                         _write_json(self, runtime.registry.run("finding_bundle", args).to_dict())
                         return
                     if path == "/tool-runs":
                         query = parse_qs(parsed.query)
-                        args: dict[str, Any] = {"limit": int((query.get("limit") or [50])[0])}
+                        limit = _query_int(self, query, "limit", 50)
+                        if limit is None:
+                            return
+                        args: dict[str, Any] = {"limit": limit}
                         if (query.get("tool_name") or [""])[0]:
                             args["tool_name"] = (query.get("tool_name") or [""])[0]
                         _write_json(self, runtime.registry.run("list_tool_runs", args).to_dict())
@@ -320,7 +358,10 @@ class AgentGateway:
                         return
                     if path == "/processes":
                         query = parse_qs(parsed.query)
-                        args = {"limit": int((query.get("limit") or [20])[0])}
+                        limit = _query_int(self, query, "limit", 20)
+                        if limit is None:
+                            return
+                        args = {"limit": limit}
                         _write_json(self, runtime.registry.run("list_processes", args).to_dict())
                         return
                     if path in {"/process", "/process-detail"}:
@@ -512,6 +553,17 @@ def _gateway_paths() -> list[str]:
         "/deny",
         "/run-due",
     ]
+
+
+def _query_int(handler: BaseHTTPRequestHandler, query: dict[str, list[str]], name: str, default: int) -> int | None:
+    raw = (query.get(name) or [default])[0]
+    if raw == "":
+        raw = default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _write_json(handler, {"error": f"{name} must be an integer"}, status=400)
+        return None
 
 
 def remote_client_html(default_base_url: str = "") -> str:
