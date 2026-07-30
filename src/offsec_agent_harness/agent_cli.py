@@ -174,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--engagement", required=True)
     preflight.add_argument("--out", help="Optional Markdown output path under the engagement agent/preflight artifacts directory")
 
+    evidence_manifest = sub.add_parser("evidence-manifest", help="Write a read-only SHA-256 evidence artifact inventory")
+    evidence_manifest.add_argument("--engagement", required=True)
+    evidence_manifest.add_argument("--out", help="Optional JSON output path under the engagement agent/manifests artifacts directory")
+    evidence_manifest.add_argument("--limit", type=int, default=1000)
+    evidence_manifest.add_argument("--max-bytes", type=int, default=50_000_000)
+    evidence_manifest.add_argument("--exclude-agent", action="store_true", help="Exclude agent-generated artifacts from the inventory")
+
     export_pack = sub.add_parser("export-pack", help="Create a redacted engagement pack ZIP")
     export_pack.add_argument("--engagement", required=True)
     export_pack.add_argument("--out")
@@ -399,6 +406,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.subcommand == "preflight":
             tool_args = {"out": args.out} if args.out else {}
             result = runtime.registry.run("safety_preflight", tool_args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand == "evidence-manifest":
+            result = runtime.registry.run("evidence_manifest", {
+                "out": args.out or "",
+                "limit": args.limit,
+                "max_bytes": args.max_bytes,
+                "include_agent": not args.exclude_agent,
+            })
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2
         if args.subcommand == "export-pack":

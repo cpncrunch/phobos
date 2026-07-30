@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -270,6 +271,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("export_session", {"out": str(Path(tmp) / "outside-handoff.json")}, Path(tmp) / "outside-handoff.json"),
                     ("export_pack", {"out": str(Path(tmp) / "outside-pack.zip")}, Path(tmp) / "outside-pack.zip"),
                     ("sealed_export", {"passphrase_env": "PHOBOS_TEST_ARTIFACT_SEAL", "out": str(Path(tmp) / "outside-sealed.json")}, Path(tmp) / "outside-sealed.json"),
+                    ("evidence_manifest", {"out": str(Path(tmp) / "outside-manifest.json")}, Path(tmp) / "outside-manifest.json"),
                 ]
                 for tool, args, outside_path in escape_cases:
                     blocked = runtime.registry.run(tool, args)
@@ -350,6 +352,64 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(payload["status"], "ok")
                 gateway_categories = {entry["category"] for entry in payload["data"]["entries"]}
                 self.assertTrue({"tool_run", "finding", "approval", "task", "media"}.issubset(gateway_categories), gateway_categories)
+                self.assertNotIn("supersecret", json.dumps(payload))
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
+    def test_evidence_manifest_hashes_artifacts_without_content_or_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                evidence_root = runtime.registry.harness.store.root
+                proof = evidence_root / "reports" / "manifest-proof-token=supersecret.txt"
+                proof.parent.mkdir(parents=True, exist_ok=True)
+                proof_bytes = b"manifest proof body token=supersecret"
+                proof.write_bytes(proof_bytes)
+                outside = Path(tmp) / "outside-manifest-sentinel.txt"
+                outside.write_text("OUTSIDE_MANIFEST_SENTINEL", encoding="utf-8")
+                link = evidence_root / "agent" / "media" / "manifest-escape-link.txt"
+                link.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    link.symlink_to(outside)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+
+                manifest = runtime.registry.run("evidence_manifest", {"out": "unit-manifest.json", "limit": 100})
+                self.assertEqual(manifest.status, "ok", manifest.to_dict())
+                self.assertTrue(manifest.data["no_target_activity"])
+                self.assertTrue(manifest.data["secret_values_redacted"])
+                expected_hash = hashlib.sha256(proof_bytes).hexdigest()
+                self.assertTrue(any(entry.get("sha256") == expected_hash and entry.get("category") == "finding" for entry in manifest.data["entries"]), manifest.data["entries"])
+                self.assertTrue(any(item.get("reason") == "symlink target outside evidence root" for item in manifest.data["skipped"]), manifest.data["skipped"])
+                serialized = json.dumps(manifest.to_dict())
+                self.assertNotIn("supersecret", serialized)
+                self.assertNotIn("OUTSIDE_MANIFEST_SENTINEL", serialized)
+                json_path = Path(manifest.artifacts["json"])
+                markdown_path = Path(manifest.artifacts["markdown"])
+                self.assertTrue(json_path.exists())
+                self.assertTrue(markdown_path.exists())
+                markdown = markdown_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Evidence Manifest", markdown)
+                self.assertIn(expected_hash, markdown)
+                self.assertNotIn("supersecret", markdown)
+                self.assertNotIn("OUTSIDE_MANIFEST_SENTINEL", markdown)
+
+                slash = runtime.handle_message('/manifest limit=10 out=slash-manifest.json')
+                self.assertIn("Evidence manifest wrote", slash)
+                self.assertIn("evidence_manifest", runtime.handle_message("/schemas name=evidence_manifest"))
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/manifest?limit=50&include_agent=false", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertTrue(payload["data"]["no_target_activity"])
+                self.assertFalse(payload["data"]["include_agent"])
                 self.assertNotIn("supersecret", json.dumps(payload))
             finally:
                 if gateway is not None:
@@ -1225,6 +1285,15 @@ class AgentCliTests(unittest.TestCase):
             ], cwd=project, env=env, text=True, capture_output=True)
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("schema_version", status.stdout)
+
+            evidence_manifest = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "evidence-manifest", "--engagement", str(engagement), "--out", "cli-manifest.json",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(evidence_manifest.returncode, 0, evidence_manifest.stderr)
+            manifest_json = json.loads(evidence_manifest.stdout)
+            self.assertEqual(manifest_json["status"], "ok")
+            self.assertTrue(Path(manifest_json["artifacts"]["json"]).exists())
+            self.assertTrue(Path(manifest_json["artifacts"]["markdown"]).exists())
 
             ui_client = tmp_path / "phobos-remote-ui.html"
             ui = subprocess.run([

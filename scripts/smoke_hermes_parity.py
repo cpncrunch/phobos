@@ -168,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
                 "finding_export",
                 "finding_review",
                 "evidence_timeline",
+                "evidence_manifest",
             ]
         )
         status = handle("status", "/status")
@@ -413,6 +414,23 @@ def main(argv: list[str] | None = None) -> int:
             and "supersecret" not in timeline_text
         )
 
+        manifest = runtime.registry.run("evidence_manifest", {"limit": 1000, "out": "smoke-manifest.json"})
+        write("evidence-manifest.json", json.dumps(manifest.to_dict(), indent=2))
+        manifest_path = Path(manifest.artifacts.get("markdown", ""))
+        manifest_text = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
+        manifest_hashes = {entry.get("sha256") for entry in manifest.data.get("entries", [])}
+        checks["evidence_manifest_ok"] = (
+            manifest.status == "ok"
+            and manifest.data.get("no_target_activity") is True
+            and manifest.data.get("secret_values_redacted") is True
+            and any(len(str(digest or "")) == 64 for digest in manifest_hashes)
+            and "Phobos Evidence Manifest" in manifest_text
+            and "supersecret" not in json.dumps(manifest.to_dict())
+            and "supersecret" not in manifest_text
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(manifest.to_dict()) + manifest_text
+            and (not pack_symlink_created or any(item.get("reason") == "symlink target outside evidence root" for item in manifest.data.get("skipped", [])))
+        )
+
         sealed_missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_MISSING"})
         sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_SEAL", "out": "smoke.sealed.json"})
         write("sealed-missing.json", json.dumps(sealed_missing.to_dict(), indent=2))
@@ -590,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -645,9 +663,13 @@ def main(argv: list[str] | None = None) -> int:
         preflight_route: dict[str, object] = preflight_route_obj if isinstance(preflight_route_obj, dict) else {}
         preflight_data_obj = preflight_route.get("data")
         preflight_route_data: dict[str, object] = preflight_data_obj if isinstance(preflight_data_obj, dict) else {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        manifest_route_obj = gateway_gets.get("/manifest?limit=50&include_agent=false")
+        manifest_route: dict[str, object] = manifest_route_obj if isinstance(manifest_route_obj, dict) else {}
+        manifest_data_obj = manifest_route.get("data")
+        manifest_route_data: dict[str, object] = manifest_data_obj if isinstance(manifest_data_obj, dict) else {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

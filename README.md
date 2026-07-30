@@ -259,6 +259,7 @@ agent/context-summary-*.md           # compacted session summaries
 agent/context-nodes/*.md             # LCM-style expandable context node summaries
 agent/delegations/delegation-*/       # durable local pseudo-subagent task artifacts
 agent/preflight/*                     # read-only ROE/runtime readiness reports
+agent/manifests/*                     # read-only SHA-256 artifact inventories
 agent/media/*                         # copied local media/artifact evidence with hashes
 agent/briefings/operator-briefing-*.md # redacted operator briefings
 agent/session-exports/*.json         # portable redacted session handoffs
@@ -280,7 +281,7 @@ python scripts/smoke_hermes_parity.py
 
 The unit suite and smoke include deterministic finding QA review coverage and read-only safety preflight coverage: `/finding-review` writes a redacted Markdown readiness review for findings, while `/preflight` checks ROE/runtime readiness, writes redacted Markdown, and performs no target activity.
 
-Current verification: 39 tests pass, covering guardrails, CLI/profile/auth-status/preflight, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 40 tests pass, covering guardrails, CLI/profile/auth-status/preflight, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -312,8 +313,8 @@ This turns the harness into a standalone agent-style application with:
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
-- redacted evidence timeline, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/preflight views, and routes for status/tools/schemas/sessions/context/preflight/timeline/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
+- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -423,6 +424,10 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
   --message '/timeline limit=50 include_audit=false'
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json evidence-manifest \
+  --engagement engagement.json \
+  --out closeout-manifest.json
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
@@ -539,7 +544,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 39 tests
+Ran 40 tests
 OK
 ```
 
@@ -580,6 +585,7 @@ auth_status_redacted_ok=True
 safety_preflight_ok=True
 media_artifacts_ok=True
 evidence_timeline_ok=True
+evidence_manifest_ok=True
 sealed_snapshot_roundtrip_ok=True
 db_seal_at_rest_roundtrip_ok=True
 redacted_exports_not_db_encryption_ok=True
@@ -597,7 +603,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=196
+artifact_count=201
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

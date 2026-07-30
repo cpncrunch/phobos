@@ -202,6 +202,7 @@ class OffSecToolRegistry:
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
+        self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
@@ -1335,6 +1336,111 @@ class OffSecToolRegistry:
         out.write_text(_timeline_markdown(self.roe.name, entries, counts, total_entries, category_filter, include_audit), encoding="utf-8")
         return ToolResult("ok", f"Evidence timeline assembled with {len(entries)} event(s).", {"entries": entries, "counts": counts, "total_entries": total_entries, "order": "desc" if reverse else "asc", "category_filter": sorted(category_filter), "include_audit": include_audit, "path": str(out)}, {"markdown": str(out)})
 
+    def evidence_manifest(self, args: dict[str, Any]) -> ToolResult:
+        """Build a read-only chain-of-custody style inventory of evidence files.
+
+        The manifest intentionally records metadata and hashes only. It does not
+        emit artifact contents, and it resolves every candidate path before stat
+        or read so symlink escapes cannot become host-file reads.
+        """
+
+        limit = max(1, min(int(args.get("limit", 1000)), 5000))
+        max_bytes = max(1, min(int(args.get("max_bytes", 50_000_000)), 500_000_000))
+        include_agent = _truthy_bool(args.get("include_agent", True), default=True)
+        evidence_root = self.harness.store.root.resolve(strict=False)
+        manifest_dir = (self.harness.store.root / "agent" / "manifests").resolve(strict=False)
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out_json = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "manifests",
+            str(args.get("out") or "").strip(),
+            f"evidence-manifest-{stamp}.json",
+            suffix=".json",
+        )
+        out_markdown = out_json.with_suffix(".md")
+        if not _is_relative_to(out_markdown.resolve(strict=False), manifest_dir):
+            raise ValueError("artifact output path escapes the manifests artifact directory")
+
+        entries: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        total_files_seen = 0
+        total_bytes = 0
+        counts_by_category: dict[str, int] = {}
+        truncated = False
+
+        for path in sorted(evidence_root.rglob("*")):
+            try:
+                resolved = path.resolve(strict=False)
+                rel = path.relative_to(evidence_root).as_posix()
+            except (OSError, RuntimeError, ValueError) as exc:
+                skipped.append({"path": redact_secrets(str(path)) or str(path), "reason": f"path could not be safely resolved: {exc}"})
+                continue
+            if not _is_relative_to(resolved, evidence_root):
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": "symlink target outside evidence root"})
+                continue
+            if _is_relative_to(resolved, manifest_dir):
+                continue
+            if not include_agent and rel.startswith("agent/"):
+                continue
+            if not resolved.is_file():
+                continue
+            total_files_seen += 1
+            stat_result = resolved.stat()
+            if stat_result.st_size > max_bytes:
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"larger than max_bytes ({max_bytes})", "bytes": stat_result.st_size})
+                continue
+            if len(entries) >= limit:
+                truncated = True
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": f"limit reached ({limit})"})
+                continue
+            data = resolved.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            category = _artifact_category(rel)
+            counts_by_category[category] = counts_by_category.get(category, 0) + 1
+            total_bytes += stat_result.st_size
+            entries.append(_redacted_mapping({
+                "path": rel,
+                "category": category,
+                "bytes": stat_result.st_size,
+                "sha256": digest,
+                "mime_type": mimetypes.guess_type(rel)[0] or "application/octet-stream",
+                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
+            }))
+
+        counts = {
+            "files_hashed": len(entries),
+            "files_seen": total_files_seen,
+            "bytes_hashed": total_bytes,
+            "skipped": len(skipped),
+            "by_category": dict(sorted(counts_by_category.items())),
+            "truncated": truncated,
+        }
+        payload = _redacted_mapping({
+            "created_at": utc_now(),
+            "engagement": self.roe.name,
+            "session_id": self.session_id,
+            "evidence_root": str(evidence_root),
+            "include_agent": include_agent,
+            "max_bytes": max_bytes,
+            "limit": limit,
+            "counts": counts,
+            "entries": entries,
+            "skipped": skipped,
+            "no_target_activity": True,
+            "secret_values_redacted": True,
+        })
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        out_markdown.write_text(_evidence_manifest_markdown(self.roe.name, entries, skipped, counts), encoding="utf-8")
+        payload["path"] = str(out_json)
+        payload["markdown_path"] = str(out_markdown)
+        return ToolResult(
+            "ok",
+            f"Evidence manifest wrote {len(entries)} file hash(es); skipped {len(skipped)}.",
+            payload,
+            {"json": str(out_json), "markdown": str(out_markdown)},
+        )
+
     def export_pack(self, args: dict[str, Any]) -> ToolResult:
         export_dir = self.harness.store.root / "agent" / "exports"
         stamp = utc_now().replace(":", "").replace("+0000", "Z").replace("+00:00", "Z")
@@ -2417,6 +2523,98 @@ def _timeline_markdown(engagement_name: str, entries: list[dict[str, Any]], coun
     return redact_secrets("\n".join(lines) + "\n") or ""
 
 
+def _evidence_manifest_markdown(engagement_name: str, entries: list[dict[str, Any]], skipped: list[dict[str, Any]], counts: dict[str, Any]) -> str:
+    lines = [
+        "# Phobos Evidence Manifest",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        "No target activity was performed. This report records artifact metadata and SHA-256 hashes only; it does not include file contents.",
+        "",
+        "## Summary",
+        "",
+        f"- Files hashed: {counts.get('files_hashed', 0)}",
+        f"- Files seen: {counts.get('files_seen', 0)}",
+        f"- Bytes hashed: {counts.get('bytes_hashed', 0)}",
+        f"- Skipped: {counts.get('skipped', 0)}",
+        f"- Truncated by limit: {counts.get('truncated', False)}",
+        "",
+        "## Category counts",
+        "",
+        "| Category | Files |",
+        "|---|---|",
+    ]
+    by_category = counts.get("by_category") if isinstance(counts.get("by_category"), dict) else {}
+    if by_category:
+        for category, count in sorted(by_category.items()):
+            lines.append(f"| {_md_cell(category)} | {_md_cell(count)} |")
+    else:
+        lines.append("| none | 0 |")
+    lines += [
+        "",
+        "## Hashed artifacts",
+        "",
+        "| Path | Category | Bytes | SHA-256 | Modified | MIME |",
+        "|---|---|---|---|---|---|",
+    ]
+    if not entries:
+        lines.append("| | | | No files hashed. | | |")
+    for entry in entries:
+        lines.append(
+            "| "
+            + " | ".join(
+                _md_cell(value)
+                for value in [
+                    entry.get("path", ""),
+                    entry.get("category", ""),
+                    entry.get("bytes", ""),
+                    entry.get("sha256", ""),
+                    entry.get("modified_at", ""),
+                    entry.get("mime_type", ""),
+                ]
+            )
+            + " |"
+        )
+    lines += ["", "## Skipped artifacts", "", "| Path | Reason |", "|---|---|"]
+    if not skipped:
+        lines.append("| | None |")
+    for item in skipped[:200]:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("path", ""), item.get("reason", "")]) + " |")
+    if len(skipped) > 200:
+        lines.append(f"| ... | {len(skipped) - 200} additional skipped artifact(s) omitted from Markdown. |")
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
+def _artifact_category(relative_path: str) -> str:
+    rel = relative_path.replace("\\", "/").lstrip("/")
+    if rel in {"decisions.jsonl", "command-log.md", "evidence-matrix.md"}:
+        return "guardrail"
+    prefixes = [
+        ("plans/", "plan"),
+        ("burp/", "burp"),
+        ("ad/", "ad"),
+        ("cve/", "cve"),
+        ("reports/", "finding"),
+        ("agent/findings/", "finding"),
+        ("agent/tool-runs/", "tool_run"),
+        ("agent/processes/", "process"),
+        ("agent/context-nodes/", "context"),
+        ("agent/delegations/", "delegation"),
+        ("agent/preflight/", "preflight"),
+        ("agent/media/", "media"),
+        ("agent/timelines/", "timeline"),
+        ("agent/briefings/", "briefing"),
+        ("agent/session-exports/", "handoff"),
+        ("agent/sealed/", "sealed"),
+        ("agent/exports/", "export"),
+        ("agent/workspace/", "workspace"),
+    ]
+    for prefix, category in prefixes:
+        if rel.startswith(prefix):
+            return category
+    return "evidence"
+
+
 def _md_cell(value: Any) -> str:
     text = redact_secrets(str(value or "")) or ""
     return text.replace("|", "\\|").replace("\n", "<br>")[:1200]
@@ -2456,6 +2654,21 @@ def _safe_json(value: dict[str, Any]) -> dict[str, Any]:
     text = json.dumps(value, default=str)
     text = redact_secrets(text) or "{}"
     return json.loads(text)
+
+
+def _truthy_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _string(description: str) -> dict[str, str]:
