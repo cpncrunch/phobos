@@ -144,6 +144,67 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_evidence_timeline_tool_slash_and_gateway_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                runtime.handle_message('/task-add content="Review timeline evidence token=supersecret" status=pending')
+                nmap_output = "Starting Nmap\nNmap scan report for 10.10.0.5\nPORT   STATE SERVICE VERSION\n80/tcp open  http    nginx 1.24\n"
+                nmap = runtime.registry.run("nmap_scan", {"target": "10.10.0.5", "ports": "80", "stdout": nmap_output})
+                self.assertEqual(nmap.status, "parsed", nmap.to_dict())
+                finding = runtime.registry.run("create_finding", {
+                    "title": "Timeline finding token=supersecret",
+                    "severity": "Low",
+                    "status": "needs-evidence",
+                    "tool_run_ids": str(nmap.data["run_id"]),
+                })
+                self.assertEqual(finding.status, "ok", finding.to_dict())
+                media_src = Path(tmp) / "timeline-media.txt"
+                media_src.write_text("timeline media token=supersecret", encoding="utf-8")
+                media = runtime.registry.run("media_import", {"path": str(media_src)})
+                self.assertEqual(media.status, "ok", media.to_dict())
+                approval = runtime.registry.run("run_command", {
+                    "target": "app.example.test",
+                    "type": "web",
+                    "purpose": "timeline confirm token=supersecret",
+                    "command": "curl -X POST https://app.example.test/profile?token=supersecret",
+                    "execute": True,
+                })
+                self.assertEqual(approval.status, "needs_approval", approval.to_dict())
+
+                timeline = runtime.registry.run("evidence_timeline", {"include_audit": True, "limit": 100})
+                self.assertEqual(timeline.status, "ok", timeline.to_dict())
+                categories = {entry["category"] for entry in timeline.data["entries"]}
+                self.assertTrue({"tool_run", "finding", "approval", "task", "media", "audit"}.issubset(categories), categories)
+                serialized = json.dumps(timeline.to_dict())
+                self.assertNotIn("supersecret", serialized)
+                markdown_path = Path(timeline.artifacts["markdown"])
+                self.assertTrue(markdown_path.exists())
+                markdown = markdown_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Evidence Timeline", markdown)
+                self.assertIn("nmap_scan", markdown)
+                self.assertNotIn("supersecret", markdown)
+
+                slash = runtime.handle_message('/timeline limit=10 include_audit=false')
+                self.assertIn("Evidence timeline assembled", slash)
+                self.assertIn("markdown", slash)
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/timeline?limit=50&include_audit=false", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                gateway_categories = {entry["category"] for entry in payload["data"]["entries"]}
+                self.assertTrue({"tool_run", "finding", "approval", "task", "media"}.issubset(gateway_categories), gateway_categories)
+                self.assertNotIn("supersecret", json.dumps(payload))
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
     def test_lcm_context_reflect_cross_session_delegation_and_wait(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)
@@ -882,6 +943,7 @@ PORT    STATE SERVICE VERSION
                     ("/schemas?name=start_process", "start_process"),
                     ("/jobs", "gateway-job"),
                     ("/processes", "gateway route process"),
+                    ("/timeline?include_audit=false", "gateway route process"),
                     ("/delegations", "gateway delegation marker"),
                     ("/media", "gateway-proof"),
                     ("/auth", "secret_values_redacted"),

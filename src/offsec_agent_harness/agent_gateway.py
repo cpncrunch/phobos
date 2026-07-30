@@ -120,6 +120,15 @@ class AgentGateway:
                     if path == "/audit":
                         _write_json(self, runtime.registry.run("audit_log", {"limit": 50}).to_dict())
                         return
+                    if path == "/timeline":
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {"limit": int((query.get("limit") or [100])[0])}
+                        if (query.get("category") or [""])[0]:
+                            args["category"] = (query.get("category") or [""])[0]
+                        if (query.get("include_audit") or [""])[0]:
+                            args["include_audit"] = (query.get("include_audit") or [""])[0].strip().lower() not in {"0", "false", "no"}
+                        _write_json(self, runtime.registry.run("evidence_timeline", args).to_dict())
+                        return
                     if path == "/tasks":
                         _write_json(self, runtime.registry.run("list_tasks", {"status": "all"}).to_dict())
                         return
@@ -246,6 +255,7 @@ def _gateway_paths() -> list[str]:
         "/schemas",
         "/sessions",
         "/context",
+        "/timeline",
         "/lcm",
         "/tasks",
         "/findings",
@@ -297,6 +307,7 @@ def remote_client_html(default_base_url: str = "") -> str:
   </section>
   <div class="grid">
     <section><h2>Status</h2><pre id="status"></pre></section>
+    <section><h2>Timeline</h2><pre id="timeline"></pre></section>
     <section><h2>Findings</h2><pre id="findings"></pre></section>
     <section><h2>Tool Runs</h2><pre id="toolruns"></pre></section>
     <section><h2>Approvals</h2><pre id="approvals"></pre></section>
@@ -353,7 +364,7 @@ function show(id, data) {{ document.getElementById(id).textContent = JSON.string
 function err(e) {{ document.getElementById('errors').textContent = String(e); }}
 async function health() {{ try {{ show('errors', await api('/health')); }} catch(e) {{ err(e); }} }}
 async function loadAll() {{ try {{ document.getElementById('errors').textContent=''; await Promise.all([
-  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
+  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/timeline?limit=25&include_audit=false').then(d=>show('timeline',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
 ]); }} catch(e) {{ err(e); }} }}
 function setLines(id, values) {{ document.getElementById(id).value = (values || []).join('\\n'); }}
 function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}

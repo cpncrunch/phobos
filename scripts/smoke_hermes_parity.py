@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
                 "create_finding",
                 "list_findings",
                 "finding_export",
+                "evidence_timeline",
             ]
         )
         status = handle("status", "/status")
@@ -335,6 +336,19 @@ def main(argv: list[str] | None = None) -> int:
         write("media-import.json", json.dumps(media_import.to_dict(), indent=2))
         write("media-list.json", json.dumps(media_list.to_dict(), indent=2))
         checks["media_artifacts_ok"] = media_import.status == "ok" and media_list.data.get("media") and Path(media_import.artifacts.get("file", "")).exists()
+
+        timeline = runtime.registry.run("evidence_timeline", {"limit": 300, "include_audit": True})
+        write("evidence-timeline.json", json.dumps(timeline.to_dict(), indent=2))
+        timeline_path = Path(timeline.artifacts.get("markdown", ""))
+        timeline_text = timeline_path.read_text(encoding="utf-8") if timeline_path.exists() else ""
+        timeline_categories = {entry.get("category") for entry in timeline.data.get("entries", [])}
+        checks["evidence_timeline_ok"] = (
+            timeline.status == "ok"
+            and {"tool_run", "finding", "approval", "task", "media", "process", "audit"}.issubset(timeline_categories)
+            and "Phobos Evidence Timeline" in timeline_text
+            and "supersecret" not in json.dumps(timeline.to_dict())
+            and "supersecret" not in timeline_text
+        )
 
         sealed_missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_MISSING"})
         sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_SEAL", "out": "smoke.sealed.json"})
@@ -513,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -565,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         write("gateway-routes.json", json.dumps({"gets": gateway_gets, "message": gateway_message, "run_due": gateway_run_due}, indent=2))
         write("gateway-tool.json", json.dumps(gateway_tool, indent=2))
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = all(gateway_gets.get(route) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/timeline?limit=25&include_audit=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]) and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

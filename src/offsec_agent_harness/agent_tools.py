@@ -197,6 +197,7 @@ class OffSecToolRegistry:
         self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List pending approvals.", {"status": _string("Approval status; default pending.")}))
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
+        self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
@@ -1028,6 +1029,155 @@ class OffSecToolRegistry:
         }
         return ToolResult("ok", "Runtime status assembled.", data)
 
+    def evidence_timeline(self, args: dict[str, Any]) -> ToolResult:
+        limit = max(1, min(int(args.get("limit", 100)), 500))
+        order = str(args.get("order") or "desc").strip().lower()
+        reverse = order not in {"asc", "oldest", "oldest-first"}
+        raw_categories = str(args.get("category") or args.get("categories") or "").strip()
+        category_filter = {part.strip().lower().replace("-", "_") for part in re.split(r"[,\s]+", raw_categories) if part.strip()} if raw_categories else set()
+        include_audit = bool(args.get("include_audit", True))
+        entries: list[dict[str, Any]] = []
+
+        def add(timestamp: str | None, category: str, title: str, *, status: str = "", ref: str = "", summary: str = "", artifacts: list[str] | None = None, data: dict[str, Any] | None = None) -> None:
+            category_name = category.strip().lower().replace("-", "_")
+            if category_filter and category_name not in category_filter:
+                return
+            entry = {
+                "timestamp": str(timestamp or ""),
+                "category": category_name,
+                "status": str(status or ""),
+                "ref": str(ref or ""),
+                "title": str(title or ""),
+                "summary": str(summary or ""),
+                "artifacts": [str(item) for item in (artifacts or []) if str(item)],
+            }
+            if data:
+                entry["data"] = data
+            entries.append(_redacted_mapping(entry))
+
+        for run in self.store.list_tool_runs(self.session_id, limit=max(limit, 100)):
+            parsed = run.get("parsed") if isinstance(run.get("parsed"), dict) else {}
+            parsed_summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+            summary_parts = [str(run.get("command") or "").strip()]
+            if parsed_summary:
+                summary_parts.append("parsed=" + json.dumps(parsed_summary, sort_keys=True))
+            add(
+                run.get("created_at"),
+                "tool_run",
+                f"{run.get('tool_name')} against {run.get('target')}",
+                status=str(run.get("status") or ""),
+                ref=f"tool_run:{run.get('id')}",
+                summary="; ".join(part for part in summary_parts if part),
+                artifacts=[str(run.get("artifact_path") or "")],
+                data={"id": run.get("id"), "tool_name": run.get("tool_name"), "target": run.get("target"), "parsed_summary": parsed_summary},
+            )
+
+        for finding in self.store.list_findings(self.session_id, status="all", limit=max(limit, 100)):
+            add(
+                finding.get("updated_at") or finding.get("created_at"),
+                "finding",
+                f"{finding.get('severity')} — {finding.get('title')}",
+                status=str(finding.get("status") or ""),
+                ref=f"finding:{finding.get('id')}",
+                summary=str(finding.get("description") or finding.get("impact") or "")[:600],
+                data={"id": finding.get("id"), "evidence_count": len(finding.get("evidence") or [])},
+            )
+
+        for approval_status in ("pending", "approved", "denied"):
+            for approval in self.store.list_approvals(self.session_id, status=approval_status):
+                add(
+                    approval.get("resolved_at") or approval.get("requested_at"),
+                    "approval",
+                    f"{approval.get('tool_name')} approval #{approval.get('id')}",
+                    status=str(approval.get("status") or approval_status),
+                    ref=f"approval:{approval.get('id')}",
+                    summary=json.dumps(approval.get("args", {}), sort_keys=True)[:800],
+                    data={"id": approval.get("id"), "tool_name": approval.get("tool_name"), "decision": approval.get("decision", {})},
+                )
+
+        for task in self.store.list_tasks(self.session_id, status="all", limit=max(limit, 100)):
+            add(
+                task.get("updated_at") or task.get("created_at"),
+                "task",
+                str(task.get("content") or "")[:240],
+                status=str(task.get("status") or ""),
+                ref=f"task:{task.get('id')}",
+                data={"id": task.get("id")},
+            )
+
+        for process in self.store.list_processes(self.session_id, limit=max(limit, 100)):
+            add(
+                process.get("ended_at") or process.get("started_at"),
+                "process",
+                f"{process.get('purpose')} on {process.get('target')}",
+                status=str(process.get("status") or ""),
+                ref=f"process:{process.get('id')}",
+                summary=str(process.get("command") or "")[:800],
+                artifacts=[str(process.get("stdout_path") or ""), str(process.get("stderr_path") or "")],
+                data={"id": process.get("id"), "exit_code": process.get("exit_code")},
+            )
+
+        for delegation in self.store.list_delegations(self.session_id, limit=max(limit, 100)):
+            add(
+                delegation.get("updated_at") or delegation.get("created_at"),
+                "delegation",
+                str(delegation.get("prompt") or "")[:240],
+                status=str(delegation.get("status") or ""),
+                ref=f"delegation:{delegation.get('id')}",
+                artifacts=[str(value) for value in (delegation.get("artifacts") or {}).values()],
+                data={"id": delegation.get("id"), "task_count": len(delegation.get("tasks") or []), "result_count": len(delegation.get("results") or [])},
+            )
+
+        for media in self.store.list_media_artifacts(self.session_id, limit=max(limit, 100)):
+            add(
+                media.get("created_at"),
+                "media",
+                f"{media.get('kind')} artifact #{media.get('id')}",
+                status=str(media.get("mime_type") or ""),
+                ref=f"media:{media.get('id')}",
+                summary=f"{media.get('size')} bytes sha256={media.get('sha256')}",
+                artifacts=[str(media.get("artifact_path") or "")],
+                data={"id": media.get("id"), "kind": media.get("kind"), "metadata": media.get("metadata", {})},
+            )
+
+        if include_audit:
+            for row in self.store.list_audit(self.session_id, limit=max(limit, 100)):
+                event = str(row.get("event") or "")
+                if event == "gateway_access":
+                    continue
+                data = row.get("data") if isinstance(row.get("data"), dict) else {}
+                title, status, summary = _timeline_audit_preview(event, data)
+                add(
+                    row.get("created_at"),
+                    "audit",
+                    title,
+                    status=status,
+                    ref=f"audit:{row.get('id')}",
+                    summary=summary,
+                    data={"id": row.get("id"), "event": event},
+                )
+
+        entries.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=reverse)
+        total_entries = len(entries)
+        entries = entries[:limit]
+        counts: dict[str, int] = {}
+        for entry in entries:
+            category = str(entry.get("category") or "unknown")
+            counts[category] = counts.get(category, 0) + 1
+        out_arg = str(args.get("out") or "").strip()
+        if out_arg:
+            out = Path(out_arg)
+            if not out.is_absolute():
+                out = self.harness.store.root / "agent" / "timelines" / out
+        else:
+            stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+            out = self.harness.store.root / "agent" / "timelines" / f"evidence-timeline-{stamp}.md"
+        if out.suffix.lower() != ".md":
+            out = out.with_suffix(".md")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_timeline_markdown(self.roe.name, entries, counts, total_entries, category_filter, include_audit), encoding="utf-8")
+        return ToolResult("ok", f"Evidence timeline assembled with {len(entries)} event(s).", {"entries": entries, "counts": counts, "total_entries": total_entries, "order": "desc" if reverse else "asc", "category_filter": sorted(category_filter), "include_audit": include_audit, "path": str(out)}, {"markdown": str(out)})
+
     def export_pack(self, args: dict[str, Any]) -> ToolResult:
         export_dir = self.harness.store.root / "agent" / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -1653,6 +1803,66 @@ def _kind_from_mime(mime_type: str) -> str:
     if mime_type.startswith("video/"):
         return "video"
     return "file"
+
+
+def _timeline_audit_preview(event: str, data: dict[str, Any]) -> tuple[str, str, str]:
+    tool = str(data.get("tool") or "").strip()
+    if event == "tool_call" and tool:
+        return (f"Tool call: {tool}", "", json.dumps(data.get("args", {}), sort_keys=True)[:800])
+    if event == "tool_result" and tool:
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        status = str(result.get("status") or "")
+        message = str(result.get("message") or "")
+        return (f"Tool result: {tool}", status, message[:800])
+    if event == "tool_policy_confirm" and tool:
+        return (f"Tool approval queued: {tool}", "needs_approval", f"approval_id={data.get('approval_id')}")
+    if event == "tool_blocked" and tool:
+        return (f"Tool blocked: {tool}", "blocked", json.dumps(data.get("args", {}), sort_keys=True)[:800])
+    if event == "natural_response":
+        return ("Natural response", "no_tools_executed", str(data.get("message_preview") or "")[:800])
+    if event == "gateway_auth_failed":
+        return ("Gateway auth failed", "blocked", str(data.get("path") or "")[:800])
+    if event == "agent_init":
+        return ("Agent initialized", "ok", json.dumps({key: data.get(key) for key in ("engagement", "safety_mode", "scope") if key in data}, sort_keys=True)[:800])
+    summary = json.dumps(data, sort_keys=True, default=str)[:800] if data else ""
+    return (event.replace("_", " ").title() or "Audit event", "", summary)
+
+
+def _timeline_markdown(engagement_name: str, entries: list[dict[str, Any]], counts: dict[str, int], total_entries: int, category_filter: set[str], include_audit: bool) -> str:
+    lines = [
+        "# Phobos Evidence Timeline",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Events returned: {len(entries)} of {total_entries}",
+        f"Categories: {', '.join(f'{key}={value}' for key, value in sorted(counts.items())) or 'none'}",
+        f"Category filter: {', '.join(sorted(category_filter)) or 'none'}",
+        f"Audit events included: {include_audit}",
+        "",
+        "| Time | Category | Status | Ref | Summary | Artifacts |",
+        "|---|---|---|---|---|---|",
+    ]
+    if not entries:
+        lines.append("| | | | | No timeline entries matched. | |")
+    for entry in entries:
+        title = str(entry.get("title") or "")
+        summary = str(entry.get("summary") or "")
+        detail = title if not summary else f"{title} — {summary}"
+        artifacts = "; ".join(str(item) for item in entry.get("artifacts", []) if str(item))
+        lines.append(
+            "| "
+            + " | ".join(
+                _md_cell(value)
+                for value in [entry.get("timestamp", ""), entry.get("category", ""), entry.get("status", ""), entry.get("ref", ""), detail, artifacts]
+            )
+            + " |"
+        )
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
+def _md_cell(value: Any) -> str:
+    text = redact_secrets(str(value or "")) or ""
+    return text.replace("|", "\\|").replace("\n", "<br>")[:1200]
 
 
 def _write_context_node_artifact(root: Path, node_id: int, title: str, summary: str) -> Path:
