@@ -729,6 +729,9 @@ class AgentStore:
         artifact_path: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        redacted_decision = _redact_json_value(decision or {})
+        redacted_parsed = _redact_json_value(parsed or {})
+        redacted_metadata = _redact_json_value(metadata or {})
         cur = self.conn.execute(
             """
             INSERT INTO tool_runs(session_id, tool_name, target, command, status, decision_json, parsed_json, artifact_path, metadata_json, created_at)
@@ -737,13 +740,13 @@ class AgentStore:
             (
                 session_id,
                 tool_name,
-                target,
-                command,
+                redact_secrets(target) or "",
+                redact_secrets(command) or "",
                 status,
-                json.dumps(decision or {}, sort_keys=True),
-                json.dumps(parsed or {}, sort_keys=True),
+                json.dumps(redacted_decision, sort_keys=True),
+                json.dumps(redacted_parsed, sort_keys=True),
                 artifact_path,
-                json.dumps(metadata or {}, sort_keys=True),
+                json.dumps(redacted_metadata, sort_keys=True),
                 utc_now(),
             ),
         )
@@ -777,12 +780,25 @@ class AgentStore:
         tags: str = "",
     ) -> int:
         now = utc_now()
+        redacted_evidence = _redact_json_value(evidence or [])
         cur = self.conn.execute(
             """
             INSERT INTO findings(session_id, title, severity, status, description, impact, recommendation, evidence_json, tags, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, title, severity, status, description, impact, recommendation, json.dumps(evidence or [], sort_keys=True), tags, now, now),
+            (
+                session_id,
+                redact_secrets(title) or "",
+                severity,
+                status,
+                redact_secrets(description) or "",
+                redact_secrets(impact) or "",
+                redact_secrets(recommendation) or "",
+                json.dumps(redacted_evidence, sort_keys=True),
+                redact_secrets(tags) or "",
+                now,
+                now,
+            ),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -814,10 +830,13 @@ class AgentStore:
         }.items():
             if value is not None:
                 fields.append(f"{column}=?")
-                values.append(value)
+                if column in {"severity", "status"}:
+                    values.append(value)
+                else:
+                    values.append(redact_secrets(str(value)) or "")
         if evidence is not None:
             fields.append("evidence_json=?")
-            values.append(json.dumps(evidence, sort_keys=True))
+            values.append(json.dumps(_redact_json_value(evidence), sort_keys=True))
         if not fields:
             return self.get_finding(finding_id, session_id=session_id)
         fields.append("updated_at=?")
@@ -1106,11 +1125,12 @@ def next_run_for_schedule(schedule: str) -> str:
 def _redact_json_value(value: Any) -> Any:
     """Recursively redact secret-like strings before local SQLite storage/display.
 
-    Audit events, approvals, and delegation batches are intentionally useful for
-    troubleshooting and closeout, but they are still plaintext local records.
-    Redacting at write time prevents a plugin/tool/delegation boundary from
-    accidentally persisting bearer tokens, passwords, or API keys; read paths can
-    apply it again to sanitize rows written by older Phobos versions.
+    Audit events, approvals, delegation batches, structured tool runs, and
+    finding evidence are intentionally useful for troubleshooting and closeout,
+    but they are still plaintext local records. Redacting at write time prevents
+    a plugin/tool/delegation/finding boundary from accidentally persisting bearer
+    tokens, passwords, or API keys; read paths can apply it again to sanitize
+    rows written by older Phobos versions.
     """
 
     if isinstance(value, dict):

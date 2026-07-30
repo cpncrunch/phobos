@@ -422,6 +422,52 @@ def main(argv: list[str] | None = None) -> int:
             and reverse_tool_detail.status == "error"
             and reverse_finding_detail.status == "error"
         )
+
+        storage_run_id = runtime.store.create_tool_run(
+            runtime.session_id,
+            "httpx_probe",
+            "https://app.example.test token=storage-smoke-secret",
+            "httpx -json https://app.example.test token=storage-smoke-secret",
+            "parsed",
+            decision={"status": "allow", "api_key": "storage-smoke-secret", "reason": "token=storage-smoke-secret"},
+            parsed={"responses": [{"url": "https://app.example.test", "title": "token=storage-smoke-secret", "headers": {"token": "storage-smoke-secret"}}]},
+            metadata={"token": "storage-smoke-secret", "note": "secret=storage-smoke-secret"},
+        )
+        storage_finding_id = runtime.store.create_finding(
+            runtime.session_id,
+            "Stored finding token=storage-smoke-secret",
+            severity="Medium",
+            status="needs-evidence",
+            description="Description includes password=storage-smoke-secret for redaction testing.",
+            impact="Impact includes secret=storage-smoke-secret for redaction testing.",
+            recommendation="Recommendation includes api_key=storage-smoke-secret for redaction testing.",
+            evidence=[{"type": "tool_run", "id": storage_run_id, "note": "token=storage-smoke-secret", "api_key": "storage-smoke-secret"}],
+            tags="token=storage-smoke-secret",
+        )
+        runtime.store.update_finding(
+            storage_finding_id,
+            session_id=runtime.session_id,
+            description="Updated description secret=storage-smoke-secret",
+            evidence=[{"type": "manual", "note": "password=storage-smoke-secret", "token": "storage-smoke-secret"}],
+        )
+        raw_storage_tool = runtime.store.conn.execute(
+            "SELECT target, command, decision_json, parsed_json, metadata_json FROM tool_runs WHERE id=?",
+            (storage_run_id,),
+        ).fetchone()
+        raw_storage_finding = runtime.store.conn.execute(
+            "SELECT title, description, impact, recommendation, evidence_json, tags FROM findings WHERE id=?",
+            (storage_finding_id,),
+        ).fetchone()
+        storage_detail = {
+            "raw_tool": dict(raw_storage_tool) if raw_storage_tool else {},
+            "raw_finding": dict(raw_storage_finding) if raw_storage_finding else {},
+            "tool_detail": runtime.registry.run("get_tool_run", {"id": storage_run_id}).to_dict(),
+            "finding_detail": runtime.registry.run("get_finding", {"id": storage_finding_id}).to_dict(),
+        }
+        storage_blob = json.dumps(storage_detail, sort_keys=True)
+        write("finding-tool-run-storage-redaction.json", json.dumps(storage_detail, indent=2, sort_keys=True))
+        checks["finding_tool_run_storage_redaction_ok"] = "storage-smoke-secret" not in storage_blob and "<REDACTED>" in storage_blob
+
         outside_artifact = root / "outside-artifact-output.md"
         artifact_escape = runtime.registry.run("finding_review", {"id": finding_id, "out": str(outside_artifact)})
         scoped_briefing = runtime.registry.run("operator_briefing", {"out": "containment-briefing.md"})

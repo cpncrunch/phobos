@@ -1198,6 +1198,61 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_tool_run_and_finding_storage_redaction_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            try:
+                run_id = runtime.store.create_tool_run(
+                    runtime.session_id,
+                    "httpx_probe",
+                    "https://app.example.test token=storage-secret",
+                    "httpx -json https://app.example.test token=storage-secret",
+                    "parsed",
+                    decision={"status": "allow", "api_key": "storage-secret", "reason": "token=storage-secret"},
+                    parsed={"responses": [{"url": "https://app.example.test", "title": "token=storage-secret", "headers": {"token": "storage-secret"}}]},
+                    metadata={"token": "storage-secret", "note": "secret=storage-secret"},
+                )
+                finding_id = runtime.store.create_finding(
+                    runtime.session_id,
+                    "Stored finding token=storage-secret",
+                    severity="Medium",
+                    status="needs-evidence",
+                    description="Description includes password=storage-secret for redaction testing.",
+                    impact="Impact includes secret=storage-secret for redaction testing.",
+                    recommendation="Recommendation includes api_key=storage-secret for redaction testing.",
+                    evidence=[{"type": "tool_run", "id": run_id, "note": "token=storage-secret", "api_key": "storage-secret"}],
+                    tags="token=storage-secret",
+                )
+                updated = runtime.store.update_finding(
+                    finding_id,
+                    session_id=runtime.session_id,
+                    evidence=[{"type": "manual", "note": "password=storage-secret", "token": "storage-secret"}],
+                    description="Updated description secret=storage-secret",
+                )
+                self.assertIsNotNone(updated)
+
+                raw_tool = runtime.store.conn.execute(
+                    "SELECT target, command, decision_json, parsed_json, metadata_json FROM tool_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                raw_finding = runtime.store.conn.execute(
+                    "SELECT title, description, impact, recommendation, evidence_json, tags FROM findings WHERE id=?",
+                    (finding_id,),
+                ).fetchone()
+                serialized_raw = json.dumps({"tool": dict(raw_tool), "finding": dict(raw_finding)}, sort_keys=True)
+                self.assertNotIn("storage-secret", serialized_raw)
+                self.assertIn("<REDACTED>", serialized_raw)
+
+                tool_detail = runtime.registry.run("get_tool_run", {"id": run_id})
+                finding_detail = runtime.registry.run("get_finding", {"id": finding_id})
+                serialized_detail = json.dumps({"tool": tool_detail.to_dict(), "finding": finding_detail.to_dict()}, sort_keys=True)
+                self.assertEqual(tool_detail.status, "ok", tool_detail.to_dict())
+                self.assertEqual(finding_detail.status, "ok", finding_detail.to_dict())
+                self.assertNotIn("storage-secret", serialized_detail)
+                self.assertIn("<REDACTED>", serialized_detail)
+            finally:
+                runtime.close()
+
     def test_structured_wrappers_findings_and_remote_gateway_auth(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
