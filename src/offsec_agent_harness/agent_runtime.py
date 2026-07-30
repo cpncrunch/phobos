@@ -346,6 +346,9 @@ class OffSecAgentRuntime:
             "evidence-timeline": "evidence_timeline",
             "manifest": "evidence_manifest",
             "evidence-manifest": "evidence_manifest",
+            "closeout": "closeout_review",
+            "closeout-review": "closeout_review",
+            "closeout-readiness": "closeout_review",
             "status": "runtime_status",
             "export-pack": "export_pack",
             "pack": "export_pack",
@@ -613,7 +616,7 @@ def _render_tools_chat(runtime: OffSecAgentRuntime) -> str:
         "- `/nmap target=<host> ports=80,443 execute=false` — safe service-enum wrapper.",
         "- `/httpx url=<url> execute=false` / `/nuclei url=<url> template=<path> execute=false` — web evidence wrappers.",
         "- `/finding-create ...`, `/finding-review id=<id>`, and `/findings status=all` — finding lifecycle and QA.",
-        "- `/timeline` and `/manifest` — redacted chronology plus SHA-256 evidence inventory for handoff and report reconstruction.",
+        "- `/timeline`, `/manifest`, and `/closeout` — redacted chronology, SHA-256 inventory, and closeout readiness review for handoff/report reconstruction.",
         "- `/briefing` — operator handoff with tasks, approvals, evidence, and context.",
         "- `/approvals` — pending confirm-gated actions.",
         "Use `/schemas name=<tool>` for exact arguments. Target-affecting tools still go through ROE and runtime policy.",
@@ -897,6 +900,7 @@ HELP_TEXT = """Phobos Agent commands:
 /briefing query=<optional> out=<optional.md>
 /timeline limit=100 category=<optional> include_audit=true out=<optional.md>
 /manifest limit=1000 max_bytes=50000000 include_agent=true out=<optional.json>
+/closeout out=<optional.md>
 /tasks status=all
 /task-add content=<task> status=pending
 /task-update id=<task-id> status=completed content=<optional>

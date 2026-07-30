@@ -203,6 +203,7 @@ class OffSecToolRegistry:
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
+        self.register_tool("closeout_review", self.closeout_review, _spec("closeout_review", "Run a read-only engagement closeout readiness review across ROE, approvals, tasks, findings, processes, and evidence artifacts.", {"out": _string("Optional Markdown output path; relative paths go under agent/closeout.")}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
@@ -1441,6 +1442,156 @@ class OffSecToolRegistry:
             {"json": str(out_json), "markdown": str(out_markdown)},
         )
 
+    def closeout_review(self, args: dict[str, Any]) -> ToolResult:
+        """Review whether the local evidence/session state is ready for engagement closeout.
+
+        This is intentionally read-only with respect to targets: it inspects ROE,
+        local SQLite state, and local evidence artifact metadata only, then writes
+        a redacted Markdown checklist under ``agent/closeout``.
+        """
+
+        preflight_checks = _preflight_checks(
+            self.roe,
+            self.harness.store.root,
+            self.workspace_root,
+            self.store,
+            self.session_id,
+            self.blocked_tools,
+            self.confirm_tools,
+            sorted(self.tool_specs),
+            self.runtime_metadata,
+        )
+        preflight_counts = _preflight_counts(preflight_checks)
+        pending_approvals = self.store.list_approvals(self.session_id, status="pending")
+        tasks = self.store.list_tasks(self.session_id, status="all", limit=500)
+        findings = self.store.list_findings(self.session_id, status="all", limit=500)
+        processes = self.store.list_processes(self.session_id, limit=500)
+        tool_runs = self.store.list_tool_runs(self.session_id, limit=500)
+        artifact_inventory = _closeout_artifact_inventory(self.harness.store.root)
+        closeout_artifacts = _closeout_artifact_presence(self.harness.store.root)
+        checks: list[dict[str, Any]] = []
+
+        def add(category: str, name: str, status: str, detail: str, recommendation: str = "") -> None:
+            checks.append(_closeout_check(category, name, status, detail, recommendation))
+
+        if preflight_counts.get("fail", 0):
+            add("readiness", "safety_preflight", "fail", f"Preflight has {preflight_counts.get('fail', 0)} fail and {preflight_counts.get('warn', 0)} warn check(s).", "Run /preflight and resolve fail-level ROE/runtime issues before closeout.")
+        elif preflight_counts.get("warn", 0):
+            add("readiness", "safety_preflight", "warn", f"Preflight has {preflight_counts.get('warn', 0)} warning(s).", "Review /preflight warnings and document accepted limitations before closeout.")
+        else:
+            add("readiness", "safety_preflight", "pass", "Safety preflight is ready with no fail/warn checks.")
+
+        if pending_approvals:
+            add("operations", "pending_approvals", "fail", f"{len(pending_approvals)} approval(s) remain pending.", "Approve or deny queued state-changing/confirm-level actions before closeout so no ambiguous execution requests remain.")
+        else:
+            add("operations", "pending_approvals", "pass", "No pending approvals remain.")
+
+        active_processes = [proc for proc in processes if str(proc.get("status") or "") in {"starting", "running"}]
+        failed_processes = [proc for proc in processes if str(proc.get("status") or "") == "failed"]
+        if active_processes:
+            add("operations", "background_processes", "fail", f"{len(active_processes)} tracked background process(es) are still active.", "Wait for, poll, or stop active processes before handing off or exporting closeout evidence.")
+        elif failed_processes:
+            add("operations", "background_processes", "warn", f"{len(failed_processes)} tracked background process(es) failed.", "Review failed process logs and decide whether the failure affects evidence completeness.")
+        else:
+            add("operations", "background_processes", "pass", f"No active background processes; {len(processes)} process record(s) total.")
+
+        open_tasks = [task for task in tasks if str(task.get("status") or "") not in {"completed", "cancelled"}]
+        if open_tasks:
+            add("workflow", "open_tasks", "warn", f"{len(open_tasks)} task(s) are still pending or in progress.", "Complete, cancel, or explicitly carry forward open task-board items in the operator briefing.")
+        else:
+            add("workflow", "open_tasks", "pass", "No open task-board items remain.")
+
+        finding_reviews: list[dict[str, Any]] = []
+        for finding in findings:
+            review = self._build_finding_review(finding)
+            score = review.get("score") if isinstance(review.get("score"), dict) else {}
+            finding_reviews.append(_redacted_mapping({
+                "id": finding.get("id"),
+                "title": finding.get("title"),
+                "severity": finding.get("severity"),
+                "status": finding.get("status"),
+                "readiness": review.get("readiness"),
+                "blocking_gaps": len(review.get("blocking_gaps") or []),
+                "advisory_gaps": len(review.get("advisory_gaps") or []),
+                "score": score,
+            }))
+        confirmed_statuses = {"confirmed", "resolved", "accepted-risk"}
+        candidate_statuses = {"draft", "needs-evidence"}
+        confirmed_with_blocking_gaps = [item for item in finding_reviews if item.get("status") in confirmed_statuses and item.get("readiness") == "needs_evidence"]
+        candidate_findings = [item for item in finding_reviews if item.get("status") in candidate_statuses]
+        if not findings:
+            add("findings", "finding_inventory", "warn", "No findings are recorded in the local DB.", "If this was a no-finding engagement, document that explicitly in the operator briefing/report notes.")
+        elif confirmed_with_blocking_gaps:
+            add("findings", "finding_readiness", "fail", f"{len(confirmed_with_blocking_gaps)} confirmed/resolved/accepted-risk finding(s) still have blocking evidence gaps.", "Run /finding-review on each listed finding and close blocking gaps before client-ready export.")
+        elif candidate_findings:
+            add("findings", "candidate_findings", "warn", f"{len(candidate_findings)} draft/needs-evidence finding(s) remain candidate records.", "Confirm, resolve, accept risk, or mark false-positive before closeout, or document them as internal-only notes.")
+        else:
+            add("findings", "finding_readiness", "pass", f"{len(findings)} finding record(s) are in closeout-compatible lifecycle states.")
+
+        if int(artifact_inventory.get("files_seen", 0)) <= 0:
+            add("artifacts", "evidence_files", "warn", "No local evidence files were found under the engagement evidence root.", "Import or generate evidence artifacts before closeout, or document why the engagement has no local evidence files.")
+        else:
+            add("artifacts", "evidence_files", "pass", f"{artifact_inventory.get('files_seen')} local evidence file(s) recorded across {len(artifact_inventory.get('by_category', {}))} category/categories.")
+        if int(artifact_inventory.get("skipped", 0)) > 0:
+            add("artifacts", "skipped_artifacts", "warn", f"{artifact_inventory.get('skipped')} artifact path(s) were skipped during safe metadata inventory.", "Review skipped symlinks/path errors so closeout packaging cannot miss expected evidence.")
+
+        for key, label, recommendation in (
+            ("manifests", "evidence manifest", "Run /manifest to write a SHA-256 inventory for chain-of-custody review."),
+            ("timelines", "evidence timeline", "Run /timeline to write a redacted action/evidence chronology."),
+            ("exports", "redacted export pack", "Run /export-pack after final QA to produce a redacted handoff ZIP."),
+        ):
+            count = int(closeout_artifacts.get(key, {}).get("count", 0)) if isinstance(closeout_artifacts.get(key), dict) else 0
+            if count:
+                add("artifacts", key, "pass", f"Found {count} {label} artifact(s).")
+            else:
+                add("artifacts", key, "warn", f"No {label} artifact found yet.", recommendation)
+
+        if not tool_runs and findings:
+            add("evidence", "structured_tool_runs", "warn", "Findings exist but no structured tool-run records are linked in this session.", "Prefer linking scanner/parser evidence or explicit artifact paths so findings are replayable.")
+        else:
+            add("evidence", "structured_tool_runs", "pass", f"{len(tool_runs)} structured tool-run record(s) available.")
+
+        add("limitations", "live_plaintext_db", "info", "Local SQLite/WAL/SHM remain plaintext while the runtime is live; sealed exports/backups are portable protection, not transparent live DB encryption.")
+        counts = _preflight_counts(checks)
+        readiness = "blocked" if counts.get("fail", 0) else "review" if counts.get("warn", 0) else "ready"
+        summary = _redacted_mapping({
+            "pending_approvals": len(pending_approvals),
+            "open_tasks": len(open_tasks),
+            "active_processes": len(active_processes),
+            "failed_processes": len(failed_processes),
+            "findings": len(findings),
+            "candidate_findings": len(candidate_findings),
+            "confirmed_findings_with_blocking_gaps": len(confirmed_with_blocking_gaps),
+            "tool_runs": len(tool_runs),
+            "artifact_inventory": artifact_inventory,
+            "closeout_artifacts": closeout_artifacts,
+        })
+        stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+        out = _scoped_artifact_output_path(
+            self.harness.store.root,
+            "closeout",
+            str(args.get("out") or "").strip(),
+            f"closeout-review-{stamp}.md",
+            suffix=".md",
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        markdown = _closeout_review_markdown(self.roe.name, readiness, checks, counts, summary, finding_reviews)
+        out.write_text(markdown, encoding="utf-8")
+        payload = _redacted_mapping({
+            "readiness": readiness,
+            "counts": counts,
+            "checks": checks,
+            "summary": summary,
+            "finding_reviews": finding_reviews,
+            "preflight_counts": preflight_counts,
+            "path": str(out),
+            "no_target_activity": True,
+            "secret_values_redacted": True,
+            "plaintext_db_caveat": "Local SQLite/WAL/SHM remain plaintext while the runtime is live; use filesystem encryption/SQLCipher or sealed DB backups with runtimes closed for at-rest protection.",
+        })
+        self.store.audit(self.session_id, "closeout_reviewed", {"readiness": readiness, "counts": counts, "path": str(out)})
+        return ToolResult("ok", f"Closeout review {readiness}: {counts.get('fail', 0)} fail, {counts.get('warn', 0)} warn, {counts.get('pass', 0)} pass.", payload, {"markdown": str(out)})
+
     def export_pack(self, args: dict[str, Any]) -> ToolResult:
         export_dir = self.harness.store.root / "agent" / "exports"
         stamp = utc_now().replace(":", "").replace("+0000", "Z").replace("+00:00", "Z")
@@ -2132,6 +2283,133 @@ def _finding_review_markdown(finding: dict[str, Any], review: dict[str, Any]) ->
     lines += ["", "## Recommendations", ""]
     for item in review.get("recommendations", []) if isinstance(review.get("recommendations"), list) else []:
         lines.append(f"- {redact_secrets(str(item))}")
+    return redact_secrets("\n".join(lines) + "\n") or ""
+
+
+def _closeout_check(category: str, name: str, status: str, detail: str, recommendation: str = "") -> dict[str, Any]:
+    normalized = status.strip().lower().replace("warning", "warn")
+    if normalized not in {"pass", "warn", "fail", "info"}:
+        normalized = "info"
+    return _redacted_mapping({
+        "category": category,
+        "name": name,
+        "status": normalized,
+        "detail": detail,
+        "recommendation": recommendation,
+    })
+
+
+def _closeout_artifact_inventory(evidence_root: Path) -> dict[str, Any]:
+    root = evidence_root.resolve(strict=False)
+    files_seen = 0
+    bytes_seen = 0
+    skipped = 0
+    by_category: dict[str, int] = {}
+    for path in sorted(root.rglob("*")):
+        try:
+            resolved = path.resolve(strict=False)
+            rel = path.relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            skipped += 1
+            continue
+        if not _is_relative_to(resolved, root):
+            skipped += 1
+            continue
+        if not resolved.is_file():
+            continue
+        try:
+            stat_result = resolved.stat()
+        except OSError:
+            skipped += 1
+            continue
+        category = _artifact_category(rel)
+        by_category[category] = by_category.get(category, 0) + 1
+        files_seen += 1
+        bytes_seen += stat_result.st_size
+    return _redacted_mapping({"files_seen": files_seen, "bytes_seen": bytes_seen, "skipped": skipped, "by_category": dict(sorted(by_category.items()))})
+
+
+def _closeout_artifact_presence(evidence_root: Path) -> dict[str, Any]:
+    root = evidence_root.resolve(strict=False)
+    specs = {
+        "manifests": ("manifests", ("*.json",)),
+        "timelines": ("timelines", ("*.md",)),
+        "exports": ("exports", ("*.zip",)),
+        "briefings": ("briefings", ("*.md",)),
+        "finding_exports": ("findings", ("*.md",)),
+    }
+    presence: dict[str, Any] = {}
+    for key, (subdir, patterns) in specs.items():
+        base = (evidence_root / "agent" / subdir).resolve(strict=False)
+        paths: list[str] = []
+        if _is_relative_to(base, root) and base.exists():
+            for pattern in patterns:
+                for candidate in sorted(base.glob(pattern)):
+                    try:
+                        resolved = candidate.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        continue
+                    if not _is_relative_to(resolved, root) or not resolved.is_file():
+                        continue
+                    try:
+                        paths.append(candidate.relative_to(root).as_posix())
+                    except ValueError:
+                        paths.append(str(candidate))
+        presence[key] = {"count": len(paths), "paths": [redact_secrets(path) for path in paths[:10]]}
+    return _redacted_mapping(presence)
+
+
+def _closeout_review_markdown(
+    engagement_name: str,
+    readiness: str,
+    checks: list[dict[str, Any]],
+    counts: dict[str, int],
+    summary: dict[str, Any],
+    finding_reviews: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "# Phobos Closeout Review",
+        "",
+        f"Generated: {utc_now()}",
+        f"Engagement: {redact_secrets(engagement_name)}",
+        f"Readiness: `{redact_secrets(readiness)}`",
+        f"No target activity: `true`",
+        "",
+        "## Summary",
+        "",
+        "```json",
+        json.dumps(_redacted_mapping(summary), indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Check counts",
+        "",
+        "| Status | Count |",
+        "|---|---|",
+    ]
+    for key in ("fail", "warn", "pass", "info"):
+        lines.append(f"| {key} | {int(counts.get(key, 0))} |")
+    lines += ["", "## Closeout checks", "", "| Category | Check | Status | Detail | Recommendation |", "|---|---|---|---|---|"]
+    for check in checks:
+        lines.append("| " + " | ".join(_md_cell(value) for value in [check.get("category"), check.get("name"), check.get("status"), check.get("detail"), check.get("recommendation")]) + " |")
+    lines += ["", "## Finding readiness", "", "| ID | Severity | Status | Readiness | Blocking gaps | Advisory gaps | Title |", "|---|---|---|---|---|---|---|"]
+    if finding_reviews:
+        for item in finding_reviews:
+            lines.append("| " + " | ".join(_md_cell(value) for value in [item.get("id"), item.get("severity"), item.get("status"), item.get("readiness"), item.get("blocking_gaps"), item.get("advisory_gaps"), item.get("title")]) + " |")
+    else:
+        lines.append("| | | | | | | No findings recorded. |")
+    recommendations = [check.get("recommendation") for check in checks if check.get("status") in {"fail", "warn"} and check.get("recommendation")]
+    lines += ["", "## Next actions", ""]
+    if recommendations:
+        for item in recommendations[:12]:
+            lines.append(f"- {redact_secrets(str(item))}")
+    else:
+        lines.append("- No blocking closeout gaps identified; perform final operator/client wording review before delivery.")
+    lines += [
+        "",
+        "## Caveat",
+        "",
+        "- Local SQLite/WAL/SHM remain plaintext while the runtime is live. Sealed snapshots/backups are portable protection, not transparent live DB encryption.",
+    ]
     return redact_secrets("\n".join(lines) + "\n") or ""
 
 

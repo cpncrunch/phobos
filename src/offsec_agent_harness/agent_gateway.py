@@ -141,6 +141,11 @@ class AgentGateway:
                             args["include_agent"] = (query.get("include_agent") or [""])[0].strip().lower() not in {"0", "false", "no"}
                         _write_json(self, runtime.registry.run("evidence_manifest", args).to_dict())
                         return
+                    if path in {"/closeout", "/closeout-review"}:
+                        query = parse_qs(parsed.query)
+                        args = {"out": (query.get("out") or [""])[0]} if (query.get("out") or [""])[0] else {}
+                        _write_json(self, runtime.registry.run("closeout_review", args).to_dict())
+                        return
                     if path == "/tasks":
                         _write_json(self, runtime.registry.run("list_tasks", {"status": "all"}).to_dict())
                         return
@@ -271,6 +276,8 @@ def _gateway_paths() -> list[str]:
         "/timeline",
         "/manifest",
         "/evidence-manifest",
+        "/closeout",
+        "/closeout-review",
         "/lcm",
         "/tasks",
         "/findings",
@@ -324,6 +331,7 @@ def remote_client_html(default_base_url: str = "") -> str:
     <section><h2>Status</h2><pre id="status"></pre></section>
     <section><h2>Timeline</h2><pre id="timeline"></pre></section>
     <section><h2>Evidence Manifest</h2><pre id="manifest"></pre></section>
+    <section><h2>Closeout Review</h2><pre id="closeout"></pre></section>
     <section><h2>Findings</h2><pre id="findings"></pre></section>
     <section><h2>Tool Runs</h2><pre id="toolruns"></pre></section>
     <section><h2>Approvals</h2><pre id="approvals"></pre></section>
@@ -380,7 +388,7 @@ function show(id, data) {{ document.getElementById(id).textContent = JSON.string
 function err(e) {{ document.getElementById('errors').textContent = String(e); }}
 async function health() {{ try {{ show('errors', await api('/health')); }} catch(e) {{ err(e); }} }}
 async function loadAll() {{ try {{ document.getElementById('errors').textContent=''; await Promise.all([
-  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/timeline?limit=25&include_audit=false').then(d=>show('timeline',d)), api('/manifest?limit=50').then(d=>show('manifest',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
+  api('/status').then(d=>show('status',d)), api('/guardrails').then(d=>{{ show('guardrails',d); fillGuardrails(d); }}), api('/timeline?limit=25&include_audit=false').then(d=>show('timeline',d)), api('/manifest?limit=50').then(d=>show('manifest',d)), api('/closeout').then(d=>show('closeout',d)), api('/findings').then(d=>show('findings',d)), api('/tool-runs').then(d=>show('toolruns',d)), api('/approvals').then(d=>show('approvals',d)), api('/tasks').then(d=>show('tasks',d)), api('/processes').then(d=>show('processes',d))
 ]); }} catch(e) {{ err(e); }} }}
 function setLines(id, values) {{ document.getElementById(id).value = (values || []).join('\\n'); }}
 function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}

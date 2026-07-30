@@ -169,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                 "finding_review",
                 "evidence_timeline",
                 "evidence_manifest",
+                "closeout_review",
             ]
         )
         status = handle("status", "/status")
@@ -431,6 +432,25 @@ def main(argv: list[str] | None = None) -> int:
             and (not pack_symlink_created or any(item.get("reason") == "symlink target outside evidence root" for item in manifest.data.get("skipped", [])))
         )
 
+        closeout = runtime.registry.run("closeout_review", {"out": "smoke-closeout.md"})
+        cli_closeout_stdout = run_cmd("closeout-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "closeout", "--engagement", str(engagement_path), "--out", "smoke-cli-closeout.md"])
+        cli_closeout = json.loads(cli_closeout_stdout)
+        write("closeout-review.json", json.dumps(closeout.to_dict(), indent=2))
+        closeout_path = Path(closeout.artifacts.get("markdown", ""))
+        closeout_text = closeout_path.read_text(encoding="utf-8") if closeout_path.exists() else ""
+        checks["closeout_review_ok"] = (
+            closeout.status == "ok"
+            and closeout.data.get("readiness") == "blocked"
+            and closeout.data.get("summary", {}).get("pending_approvals", 0) >= 1
+            and closeout.data.get("no_target_activity") is True
+            and closeout.data.get("secret_values_redacted") is True
+            and "Phobos Closeout Review" in closeout_text
+            and cli_closeout.get("status") == "ok"
+            and cli_closeout.get("data", {}).get("readiness") == "blocked"
+            and "supersecret" not in json.dumps(closeout.to_dict()) + closeout_text + cli_closeout_stdout
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(closeout.to_dict()) + closeout_text
+        )
+
         sealed_missing = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_MISSING"})
         sealed = runtime.registry.run("sealed_export", {"passphrase_env": "PHOBOS_SMOKE_SEAL", "out": "smoke.sealed.json"})
         write("sealed-missing.json", json.dumps(sealed_missing.to_dict(), indent=2))
@@ -608,7 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         with urllib.request.urlopen(f"http://{host}:{port}/status", timeout=5) as response:
             gateway_status = json.loads(response.read().decode("utf-8"))
         gateway_gets: dict[str, dict[str, object]] = {}
-        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
+        for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"]:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
         message_req = urllib.request.Request(
@@ -667,9 +687,13 @@ def main(argv: list[str] | None = None) -> int:
         manifest_route: dict[str, object] = manifest_route_obj if isinstance(manifest_route_obj, dict) else {}
         manifest_data_obj = manifest_route.get("data")
         manifest_route_data: dict[str, object] = manifest_data_obj if isinstance(manifest_data_obj, dict) else {}
-        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
+        closeout_route_obj = gateway_gets.get("/closeout")
+        closeout_route: dict[str, object] = closeout_route_obj if isinstance(closeout_route_obj, dict) else {}
+        closeout_route_data_obj = closeout_route.get("data")
+        closeout_route_data: dict[str, object] = closeout_route_data_obj if isinstance(closeout_route_data_obj, dict) else {}
+        gateway_routes_present = all(bool(gateway_gets.get(route)) for route in ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/closeout", "/lcm", "/approvals", "/audit", "/tasks", "/findings", "/tool-runs", "/jobs", "/processes", "/delegations", "/media", "/auth", "/bridges", "/guardrails"])
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

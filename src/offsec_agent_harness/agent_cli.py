@@ -181,6 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_manifest.add_argument("--max-bytes", type=int, default=50_000_000)
     evidence_manifest.add_argument("--exclude-agent", action="store_true", help="Exclude agent-generated artifacts from the inventory")
 
+    closeout = sub.add_parser("closeout", help="Run a read-only closeout readiness review and write a redacted Markdown checklist")
+    closeout.add_argument("--engagement", required=True)
+    closeout.add_argument("--out", help="Optional Markdown output path under the engagement agent/closeout artifacts directory")
+
     export_pack = sub.add_parser("export-pack", help="Create a redacted engagement pack ZIP")
     export_pack.add_argument("--engagement", required=True)
     export_pack.add_argument("--out")
@@ -415,6 +419,11 @@ def main(argv: list[str] | None = None) -> int:
                 "max_bytes": args.max_bytes,
                 "include_agent": not args.exclude_agent,
             })
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand == "closeout":
+            tool_args = {"out": args.out} if args.out else {}
+            result = runtime.registry.run("closeout_review", tool_args)
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2
         if args.subcommand == "export-pack":

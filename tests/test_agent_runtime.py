@@ -272,6 +272,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("export_pack", {"out": str(Path(tmp) / "outside-pack.zip")}, Path(tmp) / "outside-pack.zip"),
                     ("sealed_export", {"passphrase_env": "PHOBOS_TEST_ARTIFACT_SEAL", "out": str(Path(tmp) / "outside-sealed.json")}, Path(tmp) / "outside-sealed.json"),
                     ("evidence_manifest", {"out": str(Path(tmp) / "outside-manifest.json")}, Path(tmp) / "outside-manifest.json"),
+                    ("closeout_review", {"out": str(Path(tmp) / "outside-closeout.md")}, Path(tmp) / "outside-closeout.md"),
                 ]
                 for tool, args, outside_path in escape_cases:
                     blocked = runtime.registry.run(tool, args)
@@ -410,6 +411,83 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(payload["status"], "ok")
                 self.assertTrue(payload["data"]["no_target_activity"])
                 self.assertFalse(payload["data"]["include_agent"])
+                self.assertNotIn("supersecret", json.dumps(payload))
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
+    def test_closeout_review_reports_ready_state_and_blocks_pending_approvals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self.make_runtime(tmp)
+            gateway = None
+            try:
+                evidence_root = runtime.registry.harness.store.root
+                proof = evidence_root / "reports" / "closeout-request-response.txt"
+                proof.parent.mkdir(parents=True, exist_ok=True)
+                proof.write_text("HTTP response proof token=supersecret; baseline negative control; read-only no state change.", encoding="utf-8")
+                run_id = runtime.store.create_tool_run(
+                    runtime.session_id,
+                    "httpx_probe",
+                    "https://app.example.test",
+                    "httpx -json https://app.example.test",
+                    "parsed",
+                    parsed={"summary": {"http_services": 1}},
+                    artifact_path=str(proof),
+                )
+                created = runtime.registry.run("create_finding", {
+                    "title": "Closeout-ready exposed management route",
+                    "severity": "Medium",
+                    "status": "confirmed",
+                    "description": "A scoped management route returned a replayable HTTP response, with baseline negative control evidence recorded.",
+                    "impact": "A scoped attacker could target administrative workflows based on the observed exposure without needing unsafe validation.",
+                    "recommendation": "Restrict management route access, require MFA, and monitor administrative access attempts.",
+                    "tool_run_ids": str(run_id),
+                    "evidence": "Read-only validation with no state change or cleanup required.",
+                })
+                self.assertEqual(created.status, "ok", created.to_dict())
+                self.assertEqual(runtime.registry.run("evidence_timeline", {"out": "unit-timeline.md"}).status, "ok")
+                self.assertEqual(runtime.registry.run("evidence_manifest", {"out": "unit-manifest.json"}).status, "ok")
+                self.assertEqual(runtime.registry.run("export_pack", {"out": "unit-pack.zip"}).status, "ok")
+
+                ready = runtime.registry.run("closeout_review", {"out": "unit-closeout.md"})
+                self.assertEqual(ready.status, "ok", ready.to_dict())
+                self.assertEqual(ready.data["readiness"], "ready", ready.to_dict())
+                self.assertTrue(ready.data["no_target_activity"])
+                markdown_path = Path(ready.artifacts["markdown"])
+                self.assertTrue(markdown_path.exists())
+                markdown = markdown_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Closeout Review", markdown)
+                self.assertIn("Local SQLite/WAL/SHM remain plaintext", markdown)
+                self.assertNotIn("supersecret", json.dumps(ready.to_dict()) + markdown)
+                self.assertIn("closeout_review", runtime.handle_message("/schemas name=closeout_review"))
+
+                queued = runtime.registry.run("run_command", {
+                    "target": "app.example.test",
+                    "type": "web",
+                    "purpose": "closeout pending approval token=supersecret",
+                    "command": "printf curl -X POST https://app.example.test/profile token=supersecret",
+                    "execute": True,
+                })
+                self.assertEqual(queued.status, "needs_approval", queued.to_dict())
+                blocked = runtime.registry.run("closeout_review", {})
+                self.assertEqual(blocked.status, "ok", blocked.to_dict())
+                self.assertEqual(blocked.data["readiness"], "blocked")
+                self.assertEqual(blocked.data["summary"]["pending_approvals"], 1)
+                blocked_markdown = Path(blocked.artifacts["markdown"]).read_text(encoding="utf-8")
+                self.assertNotIn("supersecret", json.dumps(blocked.to_dict()) + blocked_markdown)
+                slash = runtime.handle_message('/closeout out=slash-closeout.md')
+                self.assertIn("Closeout review blocked", slash)
+
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/closeout", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["data"]["readiness"], "blocked")
+                self.assertTrue(payload["data"]["no_target_activity"])
                 self.assertNotIn("supersecret", json.dumps(payload))
             finally:
                 if gateway is not None:
@@ -1294,6 +1372,16 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(manifest_json["status"], "ok")
             self.assertTrue(Path(manifest_json["artifacts"]["json"]).exists())
             self.assertTrue(Path(manifest_json["artifacts"]["markdown"]).exists())
+
+            closeout = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "closeout", "--engagement", str(engagement), "--out", "cli-closeout.md",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(closeout.returncode, 0, closeout.stderr)
+            closeout_json = json.loads(closeout.stdout)
+            self.assertEqual(closeout_json["status"], "ok")
+            self.assertTrue(closeout_json["data"]["no_target_activity"])
+            self.assertTrue(Path(closeout_json["artifacts"]["markdown"]).exists())
+            self.assertIn(closeout_json["data"]["readiness"], {"ready", "review", "blocked"})
 
             ui_client = tmp_path / "phobos-remote-ui.html"
             ui = subprocess.run([

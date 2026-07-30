@@ -11,8 +11,8 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
-- **Finding Markdown exporter + QA review** — renders confirmed finding JSON into report-ready Markdown and reviews stored finding records for blocking/advisory evidence gaps before operator/client delivery.
-- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
+- **Finding Markdown exporter + QA/closeout review** — renders confirmed finding JSON into report-ready Markdown and reviews stored finding records plus engagement closeout state for blocking/advisory evidence gaps before operator/client delivery.
+- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines/manifests/closeout reviews, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
 
@@ -260,6 +260,7 @@ agent/context-nodes/*.md             # LCM-style expandable context node summari
 agent/delegations/delegation-*/       # durable local pseudo-subagent task artifacts
 agent/preflight/*                     # read-only ROE/runtime readiness reports
 agent/manifests/*                     # read-only SHA-256 artifact inventories
+agent/closeout/*                      # read-only closeout readiness reviews
 agent/media/*                         # copied local media/artifact evidence with hashes
 agent/briefings/operator-briefing-*.md # redacted operator briefings
 agent/session-exports/*.json         # portable redacted session handoffs
@@ -279,9 +280,9 @@ python -m unittest discover -s tests -v
 python scripts/smoke_hermes_parity.py
 ```
 
-The unit suite and smoke include deterministic finding QA review coverage and read-only safety preflight coverage: `/finding-review` writes a redacted Markdown readiness review for findings, while `/preflight` checks ROE/runtime readiness, writes redacted Markdown, and performs no target activity.
+The unit suite and smoke include deterministic finding QA review, read-only safety preflight, evidence manifest, and closeout review coverage: `/finding-review` writes a redacted Markdown readiness review for findings, `/preflight` checks ROE/runtime readiness, `/manifest` inventories artifact metadata/hashes without file contents, and `/closeout` composes local approvals/tasks/findings/processes/tool-runs/artifacts into a redacted closeout readiness report. These review tools perform no target activity.
 
-Current verification: 40 tests pass, covering guardrails, CLI/profile/auth-status/preflight, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
+Current verification: 41 tests pass, covering guardrails, CLI/profile/auth-status/preflight/closeout, DB seal/unseal backup round-trips, Burp MCP client/artifacts, BloodHound path/ADCS import, CVE advisor, model adapter, finding exporter, deterministic finding QA review, safety preflight readiness reports, artifact output containment, lifecycle records, structured nmap/httpx/nuclei/ffuf wrappers, SQLite FTS recall, guarded auto-planning and bounded auto-loop, Hindsight aliases, LCM-style context nodes, isolated local delegation child sessions, local/remote-metadata bridge media handling, media artifacts, redacted evidence timelines, read-only evidence manifests, closeout readiness reviews, sealed portable snapshots, local skills, task boards, tool policy, operator briefings, handoff export/import, Discord/Slack/Telegram bridge dispatch, pack export, expanded gateway routes/tool calls, authenticated VPS remote UI, and the standalone Hermes-like agent runtime.
 
 ## Standalone Phobos Agent runtime
 
@@ -297,7 +298,7 @@ This turns the harness into a standalone agent-style application with:
 - local persistent memory and FTS-backed current/cross-session search;
 - schema-versioned SQLite state with `/status` health output; current runtime schema is v5;
 - context snapshots, explicit `/compact` summaries, LCM-style `/lcm-compact`/`/lcm-describe`/`/lcm-expand`/`/lcm-query` context nodes, and Hindsight-style `/hindsight-retain`/`/hindsight-recall`/`/hindsight-reflect` aliases over local memory/context;
-- tool registry, JSON-style schemas, plugin loading, local skill loading, audit log, and redacted evidence timeline;
+- tool registry, JSON-style schemas, plugin loading, local skill loading, audit log, redacted evidence timeline, SHA-256 manifest, and closeout readiness review;
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links, deterministic QA/readiness reviews, and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
@@ -313,8 +314,8 @@ This turns the harness into a standalone agent-style application with:
 - profile-aware local config/DB roots under `~/.phobos/profiles/<name>`;
 - auth/token environment status checks that never reveal secret values, plus `/preflight` readiness checks before opening operator sessions, enabling bridges, exposing a gateway, or handing off to another tester;
 - local media/artifact import and listing with SHA-256 metadata;
-- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
-- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
+- redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories, closeout readiness reviews, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
+- local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run/timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/closeout/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
 - Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
@@ -428,6 +429,12 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
 phobos-agent --db data/phobos-agent.db --config agent.config.json evidence-manifest \
   --engagement engagement.json \
   --out closeout-manifest.json
+
+phobos-agent --db data/phobos-agent.db --config agent.config.json closeout \
+  --engagement engagement.json \
+  --out closeout-review.md
+# Closeout reviews are read-only and report ready/review/blocked based only on
+# local ROE, approvals, tasks, findings, process state, and evidence metadata.
 
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --engagement engagement.json \
@@ -544,7 +551,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 40 tests
+Ran 41 tests
 OK
 ```
 
@@ -586,6 +593,7 @@ safety_preflight_ok=True
 media_artifacts_ok=True
 evidence_timeline_ok=True
 evidence_manifest_ok=True
+closeout_review_ok=True
 sealed_snapshot_roundtrip_ok=True
 db_seal_at_rest_roundtrip_ok=True
 redacted_exports_not_db_encryption_ok=True
@@ -603,7 +611,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=201
+artifact_count=208
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
