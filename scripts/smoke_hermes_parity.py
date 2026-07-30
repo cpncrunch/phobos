@@ -114,12 +114,14 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd("config-init", [sys.executable, "-m", "phobos_agent.agent_cli", "config-init", "--out", str(config_path)])
     cfg = AgentAppConfig.load(config_path)
     cfg.workspace_dir = str(workspace)
+    cfg.operator_name = "Caligo"
+    cfg.assistant_style = "direct, concise, practical, evidence-first"
     cfg.plugin_dirs = [str(REPO / "examples" / "plugins")]
     cfg.skill_dirs = [str(skill_root)]
     cfg.preload_skills = ["smoke-skill"]
     cfg.skill_bundles = {"smoke": ["smoke-skill"]}
     cfg.save(config_path)
-    checks["config_written"] = config_path.exists() and cfg.auto_execute_natural is False
+    checks["config_written"] = config_path.exists() and cfg.auto_execute_natural is False and cfg.operator_name == "Caligo"
 
     init_stdout = run_cmd(
         "agent-init",
@@ -176,6 +178,14 @@ def main(argv: list[str] | None = None) -> int:
         checks["schema_returned"] = "start_process" in schema and "execute" in schema
         plugin = handle("plugin-echo", "/tool name=example_echo value=plugin-ok")
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
+
+        natural_polish = handle("natural-polish", "What is the safest next step for a controlled IDOR?")
+        natural_execution = handle("natural-execution-polish", "Run nmap against app.example.test")
+        checks["natural_response_polish_ok"] = (
+            "Phobos Agent response" not in natural_polish
+            and "pentest assistant" in natural_polish
+            and "I didn’t run anything" in natural_execution
+        )
 
         auto_plan = handle("auto-plan", '/auto prompt="remember smoke-client: ACME parity"')
         auto_apply = handle("auto-apply", '/auto apply=true prompt="remember smoke-client: ACME parity"')
@@ -466,6 +476,12 @@ def main(argv: list[str] | None = None) -> int:
         write("bridge-media.json", json.dumps(bridge_media.to_dict(), indent=2))
         write("bridge-remote-metadata.json", json.dumps(bridge_remote_metadata.to_dict(), indent=2))
         write("bridge-approval-block.json", json.dumps(bridge_approval_block.to_dict(), indent=2))
+        checks["chat_response_polish_ok"] = (
+            "Phobos is up" in discord_bridge.response
+            and '"safety_mode": "non_destructive"' in discord_bridge.raw_response
+            and '"session_id"' not in discord_bridge.response
+            and discord_bridge.response != discord_bridge.raw_response
+        )
         checks["bridges_offline_ok"] = (
             discord_bridge.status == "handled"
             and discord_bridge.normalized_text == "/status"

@@ -27,7 +27,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
 - **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, granular guardrail/ROE policy editing, and views for schemas, findings, tool runs, LCM nodes, jobs, processes, delegations, media, auth status, and bridge config.
-- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge.
+- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default while raw runtime output is retained in local session/audit state.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args.
 
@@ -148,6 +148,8 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
 ```json
 {
   "workspace_dir": "agent-workspace",
+  "operator_name": "operator",
+  "assistant_style": "direct, concise, practical, evidence-first",
   "plugin_dirs": [],
   "max_context_messages": 12,
   "tool_timeout": 30,
@@ -160,9 +162,9 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json chat --engagem
   "preload_skills": [],
   "skill_bundles": {},
   "bridges": {
-    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000, "discord_thread_mode": "off", "discord_thread_name_prefix": "Phobos", "discord_thread_auto_archive_duration": 1440, "discord_thread_continue_without_trigger": true},
-    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000},
-    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000}
+    "discord": {"enabled": false, "token_env": "PHOBOS_DISCORD_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000, "discord_thread_mode": "off", "discord_thread_name_prefix": "Phobos", "discord_thread_auto_archive_duration": 1440, "discord_thread_continue_without_trigger": true, "response_polish": true},
+    "slack": {"enabled": false, "bot_token_env": "PHOBOS_SLACK_BOT_TOKEN", "app_token_env": "PHOBOS_SLACK_APP_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000, "response_polish": true},
+    "telegram": {"enabled": false, "token_env": "PHOBOS_TELEGRAM_TOKEN", "allowed_channel_ids": [], "allowed_user_ids": [], "command_prefix": "", "mention_required": false, "allow_all": false, "allow_approval_actions": false, "import_attachments": true, "max_attachment_bytes": 10000000, "response_polish": true}
   },
   "providers": [
     {
@@ -189,6 +191,8 @@ Runtime policy, local skills, and chat bridge allowlists are configured in the s
 
 ```json
 {
+  "operator_name": "Caligo",
+  "assistant_style": "direct, concise, practical, evidence-first",
   "blocked_tools": ["export_pack"],
   "confirm_tools": ["operator_briefing"],
   "skill_dirs": ["./skills"],
@@ -201,7 +205,8 @@ Runtime policy, local skills, and chat bridge allowlists are configured in the s
       "command_prefix": "!phobos",
       "discord_thread_mode": "per-message",
       "discord_thread_name_prefix": "Phobos",
-      "discord_thread_auto_archive_duration": 1440
+      "discord_thread_auto_archive_duration": 1440,
+      "response_polish": true
     },
     "telegram": {"allowed_channel_ids": ["-1001234567890"], "allowed_user_ids": ["123456789"]}
   }

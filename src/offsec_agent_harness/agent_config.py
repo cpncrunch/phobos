@@ -38,6 +38,8 @@ class AgentAppConfig:
     """
 
     workspace_dir: str = "agent-workspace"
+    operator_name: str = "operator"
+    assistant_style: str = "direct, concise, practical, evidence-first"
     plugin_dirs: list[str] = field(default_factory=list)
     max_context_messages: int = 12
     tool_timeout: int = 30
@@ -64,6 +66,8 @@ class AgentAppConfig:
             providers = [ModelProviderConfig()]
         return cls(
             workspace_dir=str(data.get("workspace_dir", "agent-workspace")),
+            operator_name=str(data.get("operator_name", "operator")),
+            assistant_style=str(data.get("assistant_style", "direct, concise, practical, evidence-first")),
             plugin_dirs=[str(p) for p in data.get("plugin_dirs", [])],
             max_context_messages=int(data.get("max_context_messages", 12)),
             tool_timeout=int(data.get("tool_timeout", 30)),
@@ -92,6 +96,8 @@ class AgentAppConfig:
             engagement_path=engagement_path,
             db_path=db_path,
             session_name=session_name,
+            operator_name=self.operator_name,
+            assistant_style=self.assistant_style,
             provider=first.provider,
             model=first.model,
             base_url=first.base_url,

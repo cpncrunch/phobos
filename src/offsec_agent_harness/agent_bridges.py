@@ -42,6 +42,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "discord_thread_name_prefix": "Phobos",
         "discord_thread_auto_archive_duration": 1440,
         "discord_thread_continue_without_trigger": True,
+        "response_polish": True,
     },
     "slack": {
         "enabled": False,
@@ -59,6 +60,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "max_response_chars": 3000,
         "max_message_chars": 4000,
         "poll_interval": 2.0,
+        "response_polish": True,
     },
     "telegram": {
         "enabled": False,
@@ -75,6 +77,7 @@ BRIDGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "max_response_chars": 3500,
         "max_message_chars": 4000,
         "poll_interval": 2.0,
+        "response_polish": True,
     },
 }
 
@@ -194,6 +197,7 @@ class BridgeDispatchResult:
     reason: str = ""
     normalized_text: str = ""
     response: str = ""
+    raw_response: str = ""
     chunks: list[str] = field(default_factory=list)
     attachments: list[dict[str, Any]] = field(default_factory=list)
 
@@ -248,16 +252,28 @@ def handle_bridge_message(
     if imported_attachments:
         metadata["attachments"] = _redact_value(imported_attachments)
     runtime.store.audit(runtime.session_id, "bridge_message_received", metadata)
+    raw_response = ""
     try:
-        response = runtime.handle_message(normalized)
+        raw_response = runtime.handle_message(normalized)
+        response = _polish_bridge_response(runtime, raw_response, normalized, config)
         status = "handled"
-        runtime.store.audit(runtime.session_id, "bridge_message_handled", message.audit_metadata() | {"response_preview": redact_secrets(response[:300])})
+        runtime.store.audit(
+            runtime.session_id,
+            "bridge_message_handled",
+            message.audit_metadata()
+            | {
+                "response_preview": redact_secrets(response[:300]),
+                "raw_response_preview": redact_secrets(raw_response[:300]),
+                "chat_rendered": response != raw_response,
+            },
+        )
     except Exception as exc:  # pragma: no cover - defensive runtime boundary
         response = f"Phobos bridge error: {exc}"
+        raw_response = response
         status = "error"
         runtime.store.audit(runtime.session_id, "bridge_message_error", message.audit_metadata() | {"error": str(exc)})
     chunks = chunk_text(response, config.max_response_chars)
-    return BridgeDispatchResult(status, reason=trigger_reason, normalized_text=normalized, response=response, chunks=chunks, attachments=imported_attachments)
+    return BridgeDispatchResult(status, reason=trigger_reason, normalized_text=normalized, response=response, raw_response=raw_response, chunks=chunks, attachments=imported_attachments)
 
 
 def _import_bridge_attachments(runtime: "OffSecAgentRuntime", message: BridgeMessage, config: BridgeConfig) -> list[dict[str, Any]]:
@@ -399,6 +415,20 @@ def chunk_text(text: str, limit: int = 1800) -> list[str]:
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     return chunks
+
+
+def _polish_bridge_response(runtime: "OffSecAgentRuntime", raw_response: str, normalized: str, config: BridgeConfig) -> str:
+    if config.extra.get("response_polish") is False:
+        return raw_response
+    renderer = getattr(runtime, "render_chat_response", None)
+    if not callable(renderer):
+        return raw_response
+    try:
+        polished = renderer(raw_response, message=normalized, platform=config.platform)
+    except Exception as exc:  # pragma: no cover - renderer failures should not break bridges
+        runtime.store.audit(runtime.session_id, "bridge_response_polish_error", {"platform": config.platform, "error": redact_secrets(str(exc))})
+        return raw_response
+    return polished if isinstance(polished, str) and polished.strip() else raw_response
 
 
 def bridge_doctor(platforms: list[str] | tuple[str, ...] | None = None, *, timeout: float = 15.0) -> dict[str, Any]:

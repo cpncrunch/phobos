@@ -93,7 +93,10 @@ class AgentRuntimeTests(unittest.TestCase):
             runtime, _ = self.make_runtime(tmp)
             try:
                 response = runtime.handle_message("What is the safest next step for a controlled IDOR?")
-                self.assertIn("Phobos Agent response", response)
+                self.assertNotIn("Phobos Agent response", response)
+                self.assertIn("pentest assistant", response)
+                execution_request = runtime.handle_message("Run nmap against app.example.test")
+                self.assertIn("I didn’t run anything", execution_request)
                 messages = runtime.store.recent_messages(runtime.session_id, limit=10)
                 self.assertEqual(messages[-1]["role"], "assistant")
             finally:
@@ -578,9 +581,21 @@ PORT    STATE SERVICE VERSION
                 )
                 self.assertEqual(handled.status, "handled", handled.to_dict())
                 self.assertEqual(handled.normalized_text, "/status")
-                self.assertIn('"safety_mode": "non_destructive"', handled.response)
+                self.assertIn("Phobos is up", handled.response)
+                self.assertIn("Safety: `non_destructive`", handled.response)
+                self.assertNotIn('"session_id"', handled.response)
+                self.assertIn('"safety_mode": "non_destructive"', handled.raw_response)
                 self.assertTrue(handled.chunks)
                 self.assertTrue(all(len(chunk) <= 240 for chunk in handled.chunks))
+
+                raw_config = BridgeConfig.from_dict("discord", {"allowed_channel_ids": ["C1"], "allowed_user_ids": ["U1"], "command_prefix": "!phobos", "response_polish": False})
+                raw_handled = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text="!phobos /status", channel_id="C1", user_id="U1", message_id="M1-raw"),
+                    raw_config,
+                )
+                self.assertIn('"safety_mode": "non_destructive"', raw_handled.response)
+                self.assertEqual(raw_handled.response, raw_handled.raw_response)
 
                 voice_note = Path(tmp) / "bridge-voice.ogg"
                 voice_note.write_bytes(b"OggS voice-note token=supersecret")
@@ -663,7 +678,8 @@ PORT    STATE SERVICE VERSION
                     bot_user_id="BOT1",
                 )
                 self.assertEqual(mentioned.status, "handled")
-                self.assertIn("Available tools", mentioned.response)
+                self.assertIn("Phobos tools are registered", mentioned.response)
+                self.assertIn("/schemas name=<tool>", mentioned.response)
 
                 inline_mention = handle_bridge_message(
                     runtime,
@@ -674,7 +690,8 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(inline_mention.status, "handled")
                 self.assertEqual(inline_mention.reason, "mentioned")
                 self.assertEqual(inline_mention.normalized_text, "/status")
-                self.assertIn('"safety_mode": "non_destructive"', inline_mention.response)
+                self.assertIn("Phobos is up", inline_mention.response)
+                self.assertIn('"safety_mode": "non_destructive"', inline_mention.raw_response)
 
                 literal_alias = handle_bridge_message(
                     runtime,
@@ -685,7 +702,8 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(literal_alias.status, "handled")
                 self.assertEqual(literal_alias.reason, "mentioned")
                 self.assertEqual(literal_alias.normalized_text, "/status")
-                self.assertIn('"safety_mode": "non_destructive"', literal_alias.response)
+                self.assertIn("Phobos is up", literal_alias.response)
+                self.assertIn('"safety_mode": "non_destructive"', literal_alias.raw_response)
 
                 trailing_alias = handle_bridge_message(
                     runtime,
@@ -695,7 +713,7 @@ PORT    STATE SERVICE VERSION
                 )
                 self.assertEqual(trailing_alias.status, "handled")
                 self.assertEqual(trailing_alias.normalized_text, "/tools")
-                self.assertIn("Available tools", trailing_alias.response)
+                self.assertIn("Phobos tools are registered", trailing_alias.response)
 
                 trailing_mention = handle_bridge_message(
                     runtime,
@@ -705,7 +723,7 @@ PORT    STATE SERVICE VERSION
                 )
                 self.assertEqual(trailing_mention.status, "handled")
                 self.assertEqual(trailing_mention.normalized_text, "/tools")
-                self.assertIn("Available tools", trailing_mention.response)
+                self.assertIn("Phobos tools are registered", trailing_mention.response)
 
                 thread_config = BridgeConfig.from_dict(
                     "discord",

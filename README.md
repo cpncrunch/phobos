@@ -296,6 +296,7 @@ This turns the harness into a standalone agent-style application with:
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable evidence artifacts; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with evidence/tool-run links and Markdown export;
 - guarded deterministic `/auto` planning plus optional model-assisted JSON planning and bounded `/auto-loop`;
+- a configurable Phobos assistant persona (`operator_name`, `assistant_style`) so natural-language replies sound like a concise pentest copilot instead of a raw harness log;
 - non-destructive-by-default command execution;
 - foreground and background process management, including `/wait`;
 - approval queue for confirm-level actions;
@@ -310,7 +311,7 @@ This turns the harness into a standalone agent-style application with:
 - operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
 - local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, finding/tool-run views, and routes for status/tools/schemas/sessions/context/LCM/tasks/findings/tool-runs/jobs/processes/approvals/delegations/media/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
-- Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
+- Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export;
 - interactive chat and single-message modes.
 
@@ -495,6 +496,8 @@ phobos-agent bridge-doctor --platform discord --platform slack --platform telegr
 # --discord-thread-mode per-message makes top-level requests behave like Hermes:
 # Phobos creates a new Discord thread for each top-level request and continues
 # replies there. The bot also needs Discord's Create Public Threads permission.
+# Bridge responses are chat-polished by default; add --no-response-polish if you
+# need raw runtime JSON/diagnostics in chat for debugging.
 export PHOBOS_DISCORD_TOKEN='...'
 phobos-agent --db data/phobos-agent.db --config agent.config.json discord \
   --engagement engagement.json \
@@ -535,6 +538,7 @@ db_schema_counts_ok=True
 local_skills_ok=True
 schema_returned=True
 plugin_loaded_and_executed=True
+natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
 workspace_roundtrip_and_escape_block=True
@@ -558,6 +562,7 @@ redacted_exports_not_db_encryption_ok=True
 operator_briefing_created=True
 session_export_import_roundtrip=True
 tool_policy_confirm_and_block=True
+chat_response_polish_ok=True
 bridges_offline_ok=True
 bridge_media_voice_ok=True
 gateway_ok=True
@@ -567,7 +572,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=160
+artifact_count=163
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

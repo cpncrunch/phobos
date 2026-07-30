@@ -174,6 +174,7 @@ def _add_bridge_args(parser: argparse.ArgumentParser, *, token: bool = False, sl
     parser.add_argument("--mention-required", action="store_true", help="Require a bot mention outside private messages")
     parser.add_argument("--max-response-chars", type=int, help="Per-message response chunk size")
     parser.add_argument("--max-message-chars", type=int, help="Maximum incoming message length to process")
+    parser.add_argument("--no-response-polish", action="store_true", help="Send raw runtime output instead of concise chat-polished bridge responses")
     if discord:
         parser.add_argument("--discord-thread-mode", choices=["off", "per-message", "hermes"], help="Discord-only: create a response thread for each top-level allowlisted message")
         parser.add_argument("--discord-thread-name-prefix", help="Discord-only: prefix for auto-created thread names")
@@ -458,6 +459,8 @@ def _bridge_config(args: argparse.Namespace, runtime_config: AgentRuntimeConfig,
         data["max_response_chars"] = args.max_response_chars
     if getattr(args, "max_message_chars", None):
         data["max_message_chars"] = args.max_message_chars
+    if getattr(args, "no_response_polish", False):
+        data["response_polish"] = False
     if getattr(args, "discord_thread_mode", None):
         data["discord_thread_mode"] = args.discord_thread_mode
     if getattr(args, "discord_thread_name_prefix", None):

@@ -13,6 +13,7 @@ import urllib.request
 
 
 ROLE_SYSTEM_PROMPTS = {
+    "assistant": "You are Phobos, a professional penetration-test assistant for authorized engagements. Speak naturally and directly. Help the operator turn vague findings into safe, evidence-backed next steps. Be concise by default, practical, and candid about uncertainty. Preserve ROE: never imply permission to exceed scope, never claim a tool ran unless the runtime/tool path actually ran it, and keep destructive, DoS, persistence, evasion, malware-like, or lockout-prone work blocked or approval-gated. Avoid boilerplate such as 'Phobos Agent response'.",
     "scope": "You are a scope and rules-of-engagement reviewer for authorized security testing. Identify scope ambiguity, prohibited actions, and stop conditions.",
     "safety": "You are a disruption-safety reviewer. Prefer non-destructive validation, no DoS, no persistence, no evasion, no avoidable lockouts, and evidence-first alternatives.",
     "evidence": "You are an evidence analyst. Extract what the artifact proves, confidence, missing evidence, and negative controls needed.",
@@ -46,6 +47,7 @@ class HeuristicAdapter(BaseModelAdapter):
     def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
         role = role if role in ROLE_SYSTEM_PROMPTS else "impact"
         sections = {
+            "assistant": ["I’d handle it like a pentest assistant:", "- Confirm the exact in-scope asset, objective, and evidence you already have.", "- Use the least-invasive check that proves impact.", "- Capture clean evidence and stop before destructive, DoS, persistence, evasion, or lockout-prone actions.", "- If you want Phobos to act, use an explicit slash command so ROE and approvals can evaluate it."],
             "scope": ["Scope / ROE Review", "- Confirm the target appears in the engagement scope before action.", "- Identify prohibited techniques and testing-window constraints.", "- Define stop conditions before state-changing or noisy validation."],
             "safety": ["Safety / Disruption Review", "- Prefer read-only or single-request validation.", "- Avoid destructive changes, denial-of-service conditions, persistence, evasion, and avoidable account lockouts.", "- Use controlled test objects and document cleanup."],
             "evidence": ["Evidence Review", "- Record exact asset, role/access level, timestamp, request/command, and observed result.", "- Add a negative control where feasible.", "- Mark unproven claims as missing evidence, not report findings."],
