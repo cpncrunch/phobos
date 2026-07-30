@@ -305,7 +305,7 @@ This turns the harness into a standalone agent-style application with:
 - a configurable Phobos assistant persona (`operator_name`, `assistant_style`) so natural-language replies sound like a concise pentest copilot instead of a raw harness log;
 - non-destructive-by-default command execution;
 - foreground and background process management, including `/wait`;
-- approval queue for confirm-level actions, with current-session lookup and replay enforced in both runtime and store helpers;
+- approval queue for confirm-level actions, with current-session lookup and replay enforced in both runtime and store helpers; approval args/results are redacted before SQLite storage, and approvals whose arguments were redacted are review-only until the operator re-submits fresh execution input;
 - runtime policy that can block or approval-gate arbitrary tools;
 - durable scheduled jobs runnable with `phobos-agent run-due`, plus session-bound redacted `/job-detail`, `/job-update`, `/job-enable`, and `/job-disable` controls so automation can be paused without losing audit history;
 - role-based subagent reviews and durable local delegation batches with session-bound detail views for per-task child sessions/artifacts;
@@ -583,6 +583,7 @@ workspace_roundtrip_and_escape_block=True
 workspace_symlink_escape_block=True
 guardrails_execution_approvals_blocks=True
 session_bound_approval_store_ok=True
+approval_storage_redaction_ok=True
 audit_redaction_ok=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
@@ -629,7 +630,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=233
+artifact_count=234
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

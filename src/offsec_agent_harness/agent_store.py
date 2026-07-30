@@ -830,9 +830,11 @@ class AgentStore:
         return [_finding_row(row) for row in rows]
 
     def create_approval(self, session_id: str, tool_name: str, args: dict[str, Any], decision: dict[str, Any]) -> int:
+        redacted_args = _redact_json_value(args)
+        redacted_decision = _redact_json_value(decision)
         cur = self.conn.execute(
             "INSERT INTO approvals(session_id, tool_name, args_json, decision_json, status, requested_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-            (session_id, tool_name, json.dumps(args, sort_keys=True), json.dumps(decision, sort_keys=True), utc_now()),
+            (session_id, tool_name, json.dumps(redacted_args, sort_keys=True), json.dumps(redacted_decision, sort_keys=True), utc_now()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -873,7 +875,8 @@ class AgentStore:
         return out
 
     def resolve_approval(self, approval_id: int, status: str, resolved_by: str, result: dict[str, Any] | None = None, session_id: str | None = None) -> bool:
-        values: list[Any] = [status, utc_now(), resolved_by, json.dumps(result or {}, sort_keys=True), approval_id]
+        redacted_result = _redact_json_value(result or {})
+        values: list[Any] = [status, utc_now(), resolved_by, json.dumps(redacted_result, sort_keys=True), approval_id]
         where = "id=?"
         if session_id is not None:
             where += " AND session_id=?"

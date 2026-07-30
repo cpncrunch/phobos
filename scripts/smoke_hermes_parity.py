@@ -254,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             approval_scope_runtime.close()
         approval_after_foreign_resolve = runtime.store.get_approval(1, session_id=runtime.session_id)
+        raw_approval_row = runtime.store.conn.execute("SELECT args_json, decision_json FROM approvals WHERE id=1").fetchone()
+        raw_approval_text = (raw_approval_row["args_json"] or "") + (raw_approval_row["decision_json"] or "") if raw_approval_row else ""
         approval_scope_results = {
             "owned_lookup_ok": bool(approval_store_owned),
             "foreign_lookup": approval_store_foreign,
@@ -261,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             "foreign_approve": approval_foreign_approve.to_dict(),
             "foreign_resolve": approval_foreign_resolve,
             "owner_status_after_foreign_resolve": (approval_after_foreign_resolve or {}).get("status"),
+            "raw_storage_redacted": "token=<REDACTED>" in raw_approval_text and "supersecret" not in raw_approval_text,
         }
         write("session-bound-approval-store.json", json.dumps(approval_scope_results, indent=2, sort_keys=True))
         destructive = handle("destructive-block", '/run target=app.example.test type=host purpose=blocked command="printf rm -rf /" execute=true')
@@ -286,6 +289,29 @@ def main(argv: list[str] | None = None) -> int:
             and (approval_after_foreign_resolve or {}).get("status") == "pending"
             and "not found in this session" in json.dumps(approval_scope_results)
             and "supersecret" not in json.dumps(approval_scope_results)
+        )
+        replay_probe = runtime.registry.run(
+            "run_command",
+            {"target": "app.example.test", "type": "web", "purpose": "redacted approval replay token=smoke-replay-secret", "command": "printf curl -X POST https://app.example.test/profile token=smoke-replay-secret", "execute": True},
+        )
+        replay_id = max(row["id"] for row in runtime.store.list_approvals(runtime.session_id, status="pending") if row["id"] != 1)
+        replay_result = runtime.registry.run("approve", {"id": replay_id})
+        replay_row = runtime.store.conn.execute("SELECT args_json, result_json, status FROM approvals WHERE id=?", (replay_id,)).fetchone()
+        replay_text = "".join(str(replay_row[key] or "") for key in ("args_json", "result_json", "status")) if replay_row else ""
+        approval_storage_results = {
+            "source_raw_args_redacted": "token=<REDACTED>" in raw_approval_text and "supersecret" not in raw_approval_text,
+            "replay_probe": replay_probe.to_dict(),
+            "replay_result": replay_result.to_dict(),
+            "replay_status": replay_row["status"] if replay_row else "missing",
+        }
+        write("approval-storage-redaction.json", json.dumps(approval_storage_results, indent=2, sort_keys=True))
+        checks["approval_storage_redaction_ok"] = (
+            replay_probe.status == "needs_approval"
+            and replay_result.status == "blocked"
+            and "blocked_redacted_args" in replay_text
+            and "token=<REDACTED>" in raw_approval_text + replay_text
+            and "supersecret" not in raw_approval_text + replay_text + json.dumps(approval_storage_results)
+            and "smoke-replay-secret" not in raw_approval_text + replay_text + json.dumps(approval_storage_results)
         )
         runtime.store.audit(
             runtime.session_id,

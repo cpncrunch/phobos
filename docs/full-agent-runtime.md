@@ -15,7 +15,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, and never bypass ROE or runtime tool policy.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles, auth status, and preflight:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report.
-- **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start. Approval lookup and resolution helpers accept the active `session_id`, so future gateway/CLI replay surfaces inherit the same ownership boundary instead of relying on caller-side filtering.
+- **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start. Approval args/results are redacted before SQLite storage; if redaction changed the queued arguments, replay is blocked so the operator can re-submit fresh execution input instead of running an altered command. Approval lookup and resolution helpers accept the active `session_id`, so future gateway/CLI replay surfaces inherit the same ownership boundary instead of relying on caller-side filtering.
 - **Runtime tool policy:** config/CLI and the authenticated gateway UI/API can block or approval-gate arbitrary tool names, independent of ROE guardrails.
 - **Non-destructive execution policy:** default `safety_mode` is `non_destructive`; routine active testing is allowed when in scope, while destructive/DoS/disruptive actions block and state-changing or lockout-sensitive actions queue for approval.
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
@@ -331,6 +331,8 @@ phobos-agent --db data/phobos-agent.db once --engagement engagement.json --messa
 # or, when ROE permits:
 phobos-agent --db data/phobos-agent.db once --engagement engagement.json --message '/approve id=1'
 ```
+
+Approval records redact secret-like arguments and resolution payloads before they are stored. If the queued arguments contain redacted placeholders, `/approve` treats the record as review-only and asks the operator to re-submit fresh execution input rather than replaying an altered command.
 
 Destructive and denial-of-service-like commands still block and are never executed, even if an approval is attempted later.
 
@@ -738,6 +740,7 @@ workspace_roundtrip_and_escape_block=True
 workspace_symlink_escape_block=True
 guardrails_execution_approvals_blocks=True
 session_bound_approval_store_ok=True
+approval_storage_redaction_ok=True
 structured_tool_wrappers_ok=True
 finding_lifecycle_ok=True
 finding_review_ok=True
@@ -782,7 +785,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=233
+artifact_count=234
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

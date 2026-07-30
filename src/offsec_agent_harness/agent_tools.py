@@ -337,6 +337,17 @@ class OffSecToolRegistry:
             return ToolResult("error", f"Approval {approval_id} not found in this session.")
         if approval["status"] != "pending":
             return ToolResult("error", f"Approval {approval_id} is already {approval['status']}.", {"approval": _redacted_mapping(approval)})
+        if _contains_redacted_marker(approval.get("args")):
+            result = {
+                "reason": "Approval arguments were redacted before SQLite storage; replay would execute altered input.",
+                "operator_action": "Review the redacted approval detail, then re-submit the action using environment variables or a fresh command if execution is still intended.",
+            }
+            self.store.resolve_approval(approval_id, "blocked_redacted_args", args.get("by", "operator"), result, session_id=self.session_id)
+            return ToolResult(
+                "blocked",
+                "Approval contains redacted arguments and cannot be replayed safely; re-submit the action if execution is still intended.",
+                {"approval_id": approval_id, **result},
+            )
         if approval["tool_name"] == "run_command":
             approved_args = dict(approval["args"])
             approved_args["_approved"] = True
@@ -3680,6 +3691,16 @@ def _safe_json(value: dict[str, Any]) -> dict[str, Any]:
     text = json.dumps(value, default=str)
     text = redact_secrets(text) or "{}"
     return json.loads(text)
+
+
+def _contains_redacted_marker(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_redacted_marker(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_redacted_marker(item) for item in value)
+    if isinstance(value, str):
+        return "<REDACTED>" in value
+    return False
 
 
 def _truthy_bool(value: Any, *, default: bool = False) -> bool:

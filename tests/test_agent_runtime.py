@@ -147,6 +147,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("token=<REDACTED>", approval_detail)
                 self.assertNotIn("supersecret", approvals + approval_detail)
                 self.assertIsNotNone(runtime.store.get_approval(1, session_id=runtime.session_id))
+                raw_approval = runtime.store.conn.execute("SELECT args_json, decision_json FROM approvals WHERE id=1").fetchone()
+                raw_approval_text = (raw_approval["args_json"] or "") + (raw_approval["decision_json"] or "")
+                self.assertIn("token=<REDACTED>", raw_approval_text)
+                self.assertNotIn("supersecret", raw_approval_text)
                 other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="other"))
                 try:
                     self.assertIsNone(runtime.store.get_approval(1, session_id=other_runtime.session_id))
@@ -160,11 +164,24 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("not found in this session", cross_approve)
                 finally:
                     other_runtime.close()
-                denied = runtime.handle_message('/deny id=1 reason="unit test"')
+                denied = runtime.handle_message('/deny id=1 reason="unit test token=supersecret"')
                 self.assertIn("denied", denied)
                 all_approvals = runtime.handle_message('/approvals status=all')
                 self.assertIn("denied", all_approvals)
                 self.assertNotIn("supersecret", all_approvals)
+                raw_denied = runtime.store.conn.execute("SELECT result_json FROM approvals WHERE id=1").fetchone()["result_json"]
+                self.assertIn("token=<REDACTED>", raw_denied)
+                self.assertNotIn("supersecret", raw_denied)
+
+                replay_probe = runtime.handle_message('/run target=app.example.test type=web purpose="controlled replay token=replaysecret" command="curl -X POST https://app.example.test/profile token=replaysecret" execute=true')
+                self.assertIn("needs_approval", replay_probe)
+                replay_id = max(row["id"] for row in runtime.store.list_approvals(runtime.session_id, status="pending"))
+                blocked_replay = runtime.handle_message(f"/approve id={replay_id}")
+                self.assertIn("cannot be replayed safely", blocked_replay)
+                replay_row = runtime.store.conn.execute("SELECT args_json, result_json, status FROM approvals WHERE id=?", (replay_id,)).fetchone()
+                replay_text = "".join(str(replay_row[key] or "") for key in ("args_json", "result_json", "status"))
+                self.assertIn("blocked_redacted_args", replay_text)
+                self.assertNotIn("replaysecret", replay_text)
 
                 job = runtime.handle_message('/job name=daily schedule=manual prompt="/recall query=ACME"')
                 self.assertIn("Scheduled job", job)
