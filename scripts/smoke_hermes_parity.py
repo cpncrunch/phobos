@@ -963,10 +963,26 @@ def main(argv: list[str] | None = None) -> int:
                 user_id="U-smoke",
                 message_id="43",
                 is_private=True,
-                attachments=[{"url": "https://example.invalid/proof.png", "mime_type": "image/png", "size": 123}],
+                attachments=[{"url": "https://example.invalid/proof.png", "mime_type": "image/png", "size": 123, "name": "token=supersecret-remote.png"}],
             ),
             BridgeConfig(platform="telegram", max_response_chars=300),
         )
+        bridge_oversized = root / "bridge-oversized.bin"
+        bridge_oversized.write_bytes(b"x" * 64)
+        media_count_before_oversized = len(runtime.store.list_media_artifacts(runtime.session_id, limit=200))
+        bridge_size_guard = handle_bridge_message(
+            runtime,
+            BridgeMessage(
+                platform="discord",
+                text="!phobos /status",
+                channel_id="C-smoke",
+                user_id="U-smoke",
+                message_id="M-too-large",
+                attachments=[{"local_path": str(bridge_oversized), "mime_type": "application/octet-stream", "name": "token=supersecret-too-large.bin"}],
+            ),
+            BridgeConfig(platform="discord", allowed_channel_ids=("C-smoke",), allowed_user_ids=("U-smoke",), command_prefix="!phobos", max_response_chars=300, max_attachment_bytes=8),
+        )
+        media_count_after_oversized = len(runtime.store.list_media_artifacts(runtime.session_id, limit=200))
         bridge_approval_block = handle_bridge_message(
             runtime,
             BridgeMessage(platform="discord", text="!phobos /approve id=1", channel_id="C-smoke", user_id="U-smoke", message_id="M-approve"),
@@ -978,6 +994,7 @@ def main(argv: list[str] | None = None) -> int:
         write("bridge-telegram.json", json.dumps(telegram_bridge.to_dict(), indent=2))
         write("bridge-media.json", json.dumps(bridge_media.to_dict(), indent=2))
         write("bridge-remote-metadata.json", json.dumps(bridge_remote_metadata.to_dict(), indent=2))
+        write("bridge-attachment-size-guard.json", json.dumps(bridge_size_guard.to_dict(), indent=2))
         write("bridge-approval-block.json", json.dumps(bridge_approval_block.to_dict(), indent=2))
         checks["chat_response_polish_ok"] = (
             "Phobos is up" in discord_bridge.response
@@ -1003,6 +1020,18 @@ def main(argv: list[str] | None = None) -> int:
             and bridge_remote_metadata.status == "handled"
             and bridge_remote_metadata.attachments
             and bridge_remote_metadata.attachments[0].get("status") == "metadata-recorded"
+            and "supersecret" not in json.dumps(bridge_remote_metadata.to_dict())
+        )
+        checks["bridge_attachment_size_guard_ok"] = (
+            bridge_size_guard.status == "blocked"
+            and bridge_size_guard.reason == "attachment-too-large"
+            and bridge_size_guard.attachments
+            and bridge_size_guard.attachments[0].get("status") == "skipped"
+            and bridge_size_guard.attachments[0].get("reason") == "attachment-too-large"
+            and bridge_size_guard.attachments[0].get("size") == 64
+            and media_count_after_oversized == media_count_before_oversized
+            and "no text command was executed" in bridge_size_guard.response
+            and "supersecret" not in json.dumps(bridge_size_guard.to_dict())
         )
 
         gateway = AgentGateway(runtime, port=0)

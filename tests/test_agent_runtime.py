@@ -1477,6 +1477,31 @@ PORT    STATE SERVICE VERSION
                 self.assertEqual(attachment_handled.attachments[0]["kind"], "audio")
                 self.assertIn("audio", runtime.handle_message("/media-list"))
 
+                media_count_before_oversize = len(runtime.store.list_media_artifacts(runtime.session_id, limit=100))
+                oversized_note = Path(tmp) / "bridge-oversized.bin"
+                oversized_note.write_bytes(b"x" * 64)
+                oversized_blocked = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(
+                        platform="discord",
+                        text="!phobos /status",
+                        channel_id="C1",
+                        user_id="U1",
+                        message_id="M-too-large",
+                        attachments=[{"local_path": str(oversized_note), "mime_type": "application/octet-stream", "name": "token=supersecret-too-large.bin"}],
+                    ),
+                    BridgeConfig(platform="discord", allowed_channel_ids=("C1",), allowed_user_ids=("U1",), command_prefix="!phobos", max_attachment_bytes=8),
+                )
+                self.assertEqual(oversized_blocked.status, "blocked", oversized_blocked.to_dict())
+                self.assertEqual(oversized_blocked.reason, "attachment-too-large")
+                self.assertEqual(oversized_blocked.normalized_text, "/status")
+                self.assertIn("no text command was executed", oversized_blocked.response)
+                self.assertEqual(oversized_blocked.attachments[0]["status"], "skipped")
+                self.assertEqual(oversized_blocked.attachments[0]["reason"], "attachment-too-large")
+                self.assertEqual(oversized_blocked.attachments[0]["size"], 64)
+                self.assertNotIn("supersecret", json.dumps(oversized_blocked.to_dict()))
+                self.assertEqual(len(runtime.store.list_media_artifacts(runtime.session_id, limit=100)), media_count_before_oversize)
+
                 attachment_only = handle_bridge_message(
                     runtime,
                     BridgeMessage(
@@ -1485,13 +1510,14 @@ PORT    STATE SERVICE VERSION
                         channel_id="PRIVATE1",
                         user_id="U3",
                         is_private=True,
-                        attachments=[{"url": "https://example.invalid/evidence.png", "mime_type": "image/png", "size": 123}],
+                        attachments=[{"url": "https://example.invalid/evidence.png", "mime_type": "image/png", "size": 123, "name": "token=supersecret-remote.png"}],
                     ),
                     BridgeConfig(platform="telegram"),
                 )
                 self.assertEqual(attachment_only.status, "handled")
                 self.assertEqual(attachment_only.reason, "attachments")
                 self.assertEqual(attachment_only.attachments[0]["status"], "metadata-recorded")
+                self.assertNotIn("supersecret", json.dumps(attachment_only.to_dict()))
 
                 ignored_bot = handle_bridge_message(
                     runtime,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -296,19 +297,25 @@ def _import_bridge_attachments(runtime: "OffSecAgentRuntime", message: BridgeMes
             "size": size,
         }
         if size and config.max_attachment_bytes and size > config.max_attachment_bytes:
-            imported.append(metadata | {"status": "skipped", "reason": "attachment-too-large"})
+            imported.append(_redact_attachment_item(metadata | {"status": "skipped", "reason": "attachment-too-large"}))
             continue
         local_path = str(attachment.get("local_path") or "").strip()
         if local_path:
+            actual_size = _local_attachment_size(local_path)
+            if actual_size is not None:
+                metadata["size"] = actual_size
+                if config.max_attachment_bytes and actual_size > config.max_attachment_bytes:
+                    imported.append(_redact_attachment_item(metadata | {"status": "skipped", "reason": "attachment-too-large", "source_kind": "local-file-size-check"}))
+                    continue
             result = runtime.registry.run("media_import", {"path": local_path, "kind": kind})
             item = metadata | {"status": result.status, "tool_message": result.message}
             if result.data.get("media"):
                 item["media"] = result.data["media"]
-            imported.append(_redact_value(item) if isinstance(_redact_value(item), dict) else item)
+            imported.append(_redact_attachment_item(item))
             continue
         source = str(attachment.get("url") or attachment.get("url_private_download") or attachment.get("file_id") or attachment.get("source") or "")
         if not source:
-            imported.append(metadata | {"status": "skipped", "reason": "no-local-path-or-source"})
+            imported.append(_redact_attachment_item(metadata | {"status": "skipped", "reason": "no-local-path-or-source"}))
             continue
         source_redacted = redact_secrets(source) or ""
         media_id = runtime.store.create_media_artifact(
@@ -321,12 +328,31 @@ def _import_bridge_attachments(runtime: "OffSecAgentRuntime", message: BridgeMes
             size,
             metadata | {"source_kind": "remote-metadata-only", "downloaded": False},
         )
-        imported.append(metadata | {"status": "metadata-recorded", "media_id": media_id, "source": source_redacted})
+        imported.append(_redact_attachment_item(metadata | {"status": "metadata-recorded", "media_id": media_id, "source": source_redacted}))
     return imported
 
 
 def _attachment_import_blocked(imported: list[dict[str, Any]]) -> bool:
     return any(item.get("status") == "skipped" and item.get("reason") == "attachment-too-large" for item in imported)
+
+
+def _redact_attachment_item(item: dict[str, Any]) -> dict[str, Any]:
+    redacted = _redact_value(item)
+    return redacted if isinstance(redacted, dict) else item
+
+
+def _local_attachment_size(local_path: str) -> int | None:
+    """Return actual local attachment size without reading file contents.
+
+    Bridge payloads may omit or under-report attachment size. Local bridge-test
+    imports still need to honor ``max_attachment_bytes`` before the message is
+    dispatched into the runtime, so resolve/stat the operator-supplied path when
+    available and fall back to the media_import error path when it is not.
+    """
+    try:
+        return Path(local_path).expanduser().resolve(strict=True).stat().st_size
+    except (OSError, RuntimeError):
+        return None
 
 
 def _int_value(value: Any, default: int = 0) -> int:

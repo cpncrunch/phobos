@@ -317,7 +317,7 @@ This turns the harness into a standalone agent-style application with:
 - redacted evidence timeline, read-only evidence manifests with SHA-256 artifact inventories plus manifest verification reports, closeout readiness reviews with local drill-down refs for pending approvals/tasks/processes/findings/artifacts, operator briefing, portable session handoff export/import, passphrase-env sealed snapshot export/import, and CLI `seal-db`/`unseal-db` sealed SQLite backup/restore;
 - local HTTP gateway with JSON endpoints, route discovery, local dashboard, granular guardrail editor, session-bound finding/tool-run/delegation/media/job detail, timeline/manifest/preflight/closeout views, and routes for status/tools/schemas/sessions/context/preflight/timeline/manifest/manifest-verify/closeout/LCM/tasks/findings/finding-detail/tool-runs/tool-run-detail/jobs/job-detail/processes/approvals/redacted approval detail/delegations/delegation-detail/media/media-detail/auth/bridges/guardrails/audit;
 - VPS-capable remote browser client (`phobos-agent ui-client` or `/ui-client`) plus bearer-token/CORS gateway mode; non-local binds refuse to start without `--token-env` unless explicitly forced with `--unsafe-no-auth`;
-- Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, safe local attachment import/remote metadata recording, and disabled-by-default remote approval actions;
+- Discord, Slack, and Telegram bridges with channel/user allowlists, env-var tokens, mass-ping neutralization, concise chat-polished responses, size-checked local attachment import, remote metadata-only recording, and disabled-by-default remote approval actions;
 - redacted engagement-pack ZIP export that skips symlinked evidence paths resolving outside the evidence root and constrains user-supplied artifact `out=` paths to their `agent/` artifact directories;
 - interactive chat and single-message modes.
 
@@ -500,8 +500,9 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
   --user-id <operator-user-id> \
   --message '!phobos /status'
 
-# Offline-test a local voice/media bridge attachment. Remote platform URLs are
-# recorded as redacted metadata only; Phobos does not blindly download them.
+# Offline-test a local voice/media bridge attachment. Local files are checked
+# against the bridge size limit before dispatch; blocked/imported attachment
+# metadata is redacted, and Phobos does not blindly download remote URLs.
 phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
   --engagement engagement.json \
   --platform discord \
@@ -624,6 +625,7 @@ tool_policy_confirm_and_block=True
 chat_response_polish_ok=True
 bridges_offline_ok=True
 bridge_media_voice_ok=True
+bridge_attachment_size_guard_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
 granular_guardrail_ui_ok=True
@@ -632,7 +634,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=236
+artifact_count=238
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

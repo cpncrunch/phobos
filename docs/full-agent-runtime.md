@@ -27,7 +27,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; `/media-list` lists it and `/media-get` returns session-bound metadata without reading file contents.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/timeline` creates a redacted Markdown evidence/action chronology; `/manifest` creates JSON/Markdown SHA-256 artifact inventories for chain-of-custody review; `/manifest-verify` writes JSON/Markdown verification reports comparing a prior manifest to current local artifacts; `/closeout` reviews local ROE/preflight, approvals, tasks, findings, process state, tool runs, and artifact presence into a ready/review/blocked Markdown checklist with redacted local refs such as `approval:<id>`, `task:<id>`, `process:<id>`, `finding:<id>`, `tool-run:<id>`, and `artifact:<relative-agent-path>`; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
 - **Local/VPS HTTP gateway:** `phobos-agent serve` exposes a simple web UI plus JSON endpoints on `127.0.0.1` by default. Remote/VPS binds require an environment-backed bearer token unless `--unsafe-no-auth` is explicitly supplied for isolated throwaway networks. The gateway includes route discovery, CORS support, a standalone `/ui-client` browser client, a validated `deploy-kit` template generator, granular guardrail/ROE policy editing, and views for schemas, preflight readiness, findings, tool runs, timelines, evidence manifests/verification, closeout reviews, LCM nodes, jobs, processes, delegations, delegation details, media metadata, auth status, and bridge config.
-- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, importing local bridge-test attachments, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default while raw runtime output is retained in local session/audit state.
+- **Messaging bridges:** `phobos-agent discord`, `phobos-agent slack`, and `phobos-agent telegram` connect the same runtime to allowlisted chat surfaces while keeping tokens in environment variables, neutralizing mass-ping text in responses, checking actual local bridge-test attachment size before dispatch, recording remote attachment metadata without blind downloads, and preserving ROE/tool-policy approvals. Remote `/approve` and `/deny` are disabled by default per bridge. Bridge responses are chat-polished by default with `--no-response-polish` available for raw diagnostics.
 - **Redacted engagement packs:** `/export-pack` and `phobos-agent export-pack` build a ZIP with redacted evidence, runtime state, and a manifest for closeout/review. Symlinked evidence paths are packaged only when their resolved target stays inside the evidence root; user-supplied artifact `out=` paths are likewise resolved before writing and must stay inside their specific `agent/` artifact directory.
 - **Evidence workspace:** all target-affecting decisions and outputs are written under the engagement evidence directory, with secret redaction applied to logged commands/tool args and audit event payloads before storage/display.
 
@@ -562,7 +562,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json bridge-test \
   --attachment-kind voice
 ```
 
-Local attachment paths are imported through the existing `media_import` tool. Remote-only platform attachment references are recorded as redacted metadata and are not downloaded automatically.
+Local attachment paths are checked against the bridge's `max_attachment_bytes` limit using filesystem metadata before any text command is dispatched, then imported through the existing `media_import` tool when allowed. Blocked/imported attachment metadata is redacted before display/audit, and remote-only platform attachment references are recorded as redacted metadata rather than downloaded automatically.
 
 Run live bridges:
 
@@ -779,6 +779,7 @@ tool_policy_confirm_and_block=True
 chat_response_polish_ok=True
 bridges_offline_ok=True
 bridge_media_voice_ok=True
+bridge_attachment_size_guard_ok=True
 gateway_ok=True
 gateway_full_api_ok=True
 granular_guardrail_ui_ok=True
@@ -787,7 +788,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=236
+artifact_count=238
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -822,6 +823,7 @@ auto-loop-recall.txt
 auto-plan.txt
 auto-recall.txt
 bridge-approval-block.json
+bridge-attachment-size-guard.json
 bridge-discord.json
 bridge-media.json
 bridge-remote-metadata.json
