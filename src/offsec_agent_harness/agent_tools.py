@@ -216,6 +216,7 @@ class OffSecToolRegistry:
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_manifest_verify", self.evidence_manifest_verify, _spec("evidence_manifest_verify", "Verify a prior evidence manifest against current local artifacts, reporting missing/changed/new files without target activity.", {"path": _string("Manifest JSON path under agent/manifests; defaults to latest evidence manifest."), "manifest": _string("Alias for path."), "max_bytes": {"type": "integer", "description": "Skip current files larger than this many bytes; default 50000000."}, "limit": {"type": "integer", "description": "Maximum new-artifact rows to include; default 1000."}, "detect_new": {"type": "boolean", "description": "Report artifacts not present in the source manifest; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("closeout_review", self.closeout_review, _spec("closeout_review", "Run a read-only engagement closeout readiness review across ROE, approvals, tasks, findings, processes, and evidence artifacts.", {"out": _string("Optional Markdown output path; relative paths go under agent/closeout.")}, []))
+        self.register_tool("resolve_local_ref", self.resolve_local_ref, _spec("resolve_local_ref", "Resolve a redacted local drill-down ref such as approval:1, task:1, finding:1, tool-run:1, media:1, context-node:1, or artifact:agent/path without target activity.", {"ref": _string("Local ref, e.g. task:1 or artifact:agent/preflight/report.md."), "kind": _string("Optional kind when id/path is supplied separately."), "id": {"type": "integer"}, "path": _string("Artifact path under the engagement evidence root."), "max_bytes": {"type": "integer", "description": "Maximum artifact bytes to hash; default 50000000."}}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
@@ -1252,6 +1253,99 @@ class OffSecToolRegistry:
         data = _redacted_mapping(media)
         data["no_file_content_read"] = True
         return ToolResult("ok", f"Media/artifact {media_id} returned.", {"media": data})
+
+    def resolve_local_ref(self, args: dict[str, Any]) -> ToolResult:
+        parsed = _parse_local_ref(args)
+        if parsed is None:
+            return ToolResult(
+                "error",
+                "resolve_local_ref requires ref=<kind:id|kind:path> or kind=... plus id/path.",
+                {"no_target_activity": True, "secret_values_redacted": True},
+            )
+        kind, value, display_ref = parsed
+        entity_handlers: dict[str, Callable[[dict[str, Any]], ToolResult]] = {
+            "approval": self.get_approval,
+            "task": self.get_task,
+            "process": self.get_process,
+            "finding": self.get_finding,
+            "tool-run": self.get_tool_run,
+            "job": self.get_job,
+            "delegation": self.get_delegation,
+            "media": self.media_get,
+            "memory": self.get_memory,
+            "context-node": self.context_describe,
+        }
+        if kind in entity_handlers:
+            ident = _coerce_int(value)
+            if ident is None:
+                return ToolResult("error", f"{kind} refs require an integer id.", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+            result = entity_handlers[kind]({"id": ident})
+            if result.status != "ok":
+                return ToolResult(result.status, f"{display_ref} not resolved: {result.message}", {"ref": display_ref, "kind": kind, "id": ident, "no_target_activity": True, "secret_values_redacted": True})
+            return ToolResult(
+                "ok",
+                f"Resolved {display_ref}.",
+                {
+                    "ref": display_ref,
+                    "kind": kind,
+                    "id": ident,
+                    "entity": _redacted_mapping(result.data),
+                    "no_target_activity": True,
+                    "secret_values_redacted": True,
+                },
+            )
+        if kind in {"artifact", "preflight", "manifest", "timeline", "closeout", "briefing", "export", "pack"}:
+            max_bytes = _coerce_int(args.get("max_bytes", 50_000_000))
+            if max_bytes is None:
+                return ToolResult("error", "max_bytes must be an integer.", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+            return self._resolve_artifact_ref(kind, value, display_ref, max_bytes=max_bytes)
+        return ToolResult("error", f"Unsupported local ref kind: {kind}", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+
+    def _resolve_artifact_ref(self, kind: str, path_value: str, display_ref: str, *, max_bytes: int = 50_000_000) -> ToolResult:
+        max_bytes = max(1, min(int(max_bytes), 500_000_000))
+        raw_rel = str(path_value or "").strip().replace("\\", "/")
+        if not raw_rel:
+            return ToolResult("error", "artifact refs require an evidence-root relative path.", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+        raw_parts = raw_rel.split("/")
+        if raw_rel.startswith("/") or re.match(r"^[A-Za-z]:", raw_rel) or ".." in raw_parts:
+            return ToolResult("blocked", "Artifact ref path is not evidence-root relative.", {"ref": redact_secrets(display_ref), "kind": kind, "path": redact_secrets(raw_rel), "no_target_activity": True, "secret_values_redacted": True})
+        rel = "/".join(part for part in raw_parts if part not in {"", "."})
+        if not rel:
+            return ToolResult("error", "artifact refs require a non-empty relative path.", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+        root = self.harness.store.root.resolve(strict=False)
+        candidate = (root / rel).resolve(strict=False)
+        if not _is_relative_to(candidate, root):
+            return ToolResult("blocked", "Artifact ref resolves outside the engagement evidence root.", {"ref": redact_secrets(display_ref), "kind": kind, "path": redact_secrets(rel), "no_target_activity": True, "secret_values_redacted": True})
+        exists = candidate.exists()
+        artifact: dict[str, Any] = {
+            "path": rel,
+            "kind": kind,
+            "exists": bool(exists),
+            "category": _artifact_category(rel),
+            "no_file_content_emitted": True,
+        }
+        if exists:
+            if candidate.is_dir():
+                artifact.update({"type": "directory"})
+            elif candidate.is_file():
+                stat_result = candidate.stat()
+                artifact.update({
+                    "type": "file",
+                    "bytes": stat_result.st_size,
+                    "mime_type": mimetypes.guess_type(rel)[0] or "application/octet-stream",
+                    "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
+                })
+                if stat_result.st_size <= max_bytes:
+                    artifact["sha256"] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                else:
+                    artifact["hash_skipped"] = f"larger than max_bytes ({max_bytes})"
+            else:
+                artifact.update({"type": "other"})
+        return ToolResult(
+            "ok",
+            f"Resolved {display_ref} as local artifact metadata.",
+            {"ref": display_ref, "kind": kind, "artifact": _redacted_mapping(artifact), "no_target_activity": True, "secret_values_redacted": True},
+        )
 
     def sealed_export(self, args: dict[str, Any]) -> ToolResult:
         passphrase_env = str(args.get("passphrase_env") or "").strip()
@@ -2691,6 +2785,64 @@ def _first_int_arg(args: dict[str, Any], *names: str) -> int | None:
         if parsed is not None:
             return parsed
     return None
+
+
+_LOCAL_REF_KIND_ALIASES = {
+    "approvals": "approval",
+    "tasks": "task",
+    "processes": "process",
+    "findings": "finding",
+    "tool_run": "tool-run",
+    "toolrun": "tool-run",
+    "tool-runs": "tool-run",
+    "toolruns": "tool-run",
+    "run": "tool-run",
+    "runs": "tool-run",
+    "jobs": "job",
+    "delegations": "delegation",
+    "media-artifact": "media",
+    "media_detail": "media",
+    "media-detail": "media",
+    "memory-entry": "memory",
+    "memories": "memory",
+    "context": "context-node",
+    "context_node": "context-node",
+    "context-node": "context-node",
+    "lcm": "context-node",
+    "node": "context-node",
+    "evidence": "artifact",
+    "artifact-path": "artifact",
+    "exports": "export",
+    "timelines": "timeline",
+    "manifests": "manifest",
+    "closeouts": "closeout",
+    "briefings": "briefing",
+}
+
+
+def _parse_local_ref(args: dict[str, Any]) -> tuple[str, str, str] | None:
+    raw_ref = str(args.get("ref") or args.get("local_ref") or args.get("query") or "").strip()
+    if not raw_ref and isinstance(args.get("_positional"), list) and args.get("_positional"):
+        raw_ref = str(args.get("_positional", [""])[0]).strip()
+    if raw_ref:
+        if ":" not in raw_ref:
+            return None
+        raw_kind, raw_value = raw_ref.split(":", 1)
+    else:
+        raw_kind = str(args.get("kind") or args.get("type") or "").strip()
+        if args.get("id") not in (None, ""):
+            raw_value = str(args.get("id"))
+        elif args.get("path") not in (None, ""):
+            raw_value = str(args.get("path"))
+        else:
+            raw_value = ""
+    kind = raw_kind.strip().lower().replace("_", "-")
+    kind = _LOCAL_REF_KIND_ALIASES.get(kind, kind)
+    value = str(raw_value or "").strip()
+    if not kind or not value:
+        return None
+    display_ref = redact_secrets(f"{kind}:{value}") or f"{kind}:{value}"
+    return kind, value, display_ref
 
 
 def _parse_id_list(value: Any) -> list[int]:

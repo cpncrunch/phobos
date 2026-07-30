@@ -377,6 +377,10 @@ class OffSecAgentRuntime:
             "closeout": "closeout_review",
             "closeout-review": "closeout_review",
             "closeout-readiness": "closeout_review",
+            "ref": "resolve_local_ref",
+            "detail": "resolve_local_ref",
+            "resolve-ref": "resolve_local_ref",
+            "local-ref": "resolve_local_ref",
             "status": "runtime_status",
             "export-pack": "export_pack",
             "pack": "export_pack",
@@ -945,6 +949,7 @@ HELP_TEXT = """Phobos Agent commands:
 /manifest limit=1000 max_bytes=50000000 include_agent=true out=<optional.json>
 /manifest-verify path=<manifest.json> out=<optional.json>
 /closeout out=<optional.md>
+/ref ref=<task:1|finding:1|tool-run:1|artifact:agent/path>
 /tasks status=all
 /task-detail id=<task-id>
 /task-add content=<task> status=pending

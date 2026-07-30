@@ -190,6 +190,25 @@ class AgentGateway:
                         args = {"out": (query.get("out") or [""])[0]} if (query.get("out") or [""])[0] else {}
                         _write_json(self, runtime.registry.run("closeout_review", args).to_dict())
                         return
+                    if path in {"/ref", "/detail", "/resolve-ref", "/local-ref"}:
+                        query = parse_qs(parsed.query)
+                        args: dict[str, Any] = {}
+                        ref_value = (query.get("ref") or query.get("local_ref") or query.get("query") or [""])[0]
+                        if ref_value:
+                            args["ref"] = ref_value
+                        if (query.get("kind") or [""])[0]:
+                            args["kind"] = (query.get("kind") or [""])[0]
+                        if (query.get("id") or [""])[0]:
+                            args["id"] = (query.get("id") or [""])[0]
+                        if (query.get("path") or [""])[0]:
+                            args["path"] = (query.get("path") or [""])[0]
+                        if (query.get("max_bytes") or [""])[0]:
+                            args["max_bytes"] = (query.get("max_bytes") or ["50000000"])[0]
+                        if not args:
+                            _write_json(self, {"error": "ref or kind+id/path is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("resolve_local_ref", args).to_dict())
+                        return
                     if path == "/tasks":
                         query = parse_qs(parsed.query)
                         args = {
@@ -390,6 +409,10 @@ def _gateway_paths() -> list[str]:
         "/evidence-manifest-verify",
         "/closeout",
         "/closeout-review",
+        "/ref",
+        "/detail",
+        "/resolve-ref",
+        "/local-ref",
         "/lcm",
         "/tasks",
         "/task",

@@ -79,6 +79,10 @@ def plan_agent_actions(prompt: str, *, allow_command_execution: bool = False) ->
     if forget_key:
         calls.append(PlannedToolCall("forget_memory", {"key": forget_key}, "Operator asked to delete a local memory entry."))
 
+    local_ref = _extract_local_ref(text)
+    if local_ref:
+        calls.append(PlannedToolCall("resolve_local_ref", {"ref": local_ref}, "Operator asked to inspect a local drill-down ref."))
+
     session_query = _extract_session_query(text)
     if session_query:
         calls.append(PlannedToolCall("search_session", {"query": session_query, "limit": 10}, "Operator asked to search session history."))
@@ -167,6 +171,18 @@ def _extract_forget_memory(text: str) -> str | None:
     if not key:
         return None
     return _slug_key(key)
+
+
+def _extract_local_ref(text: str) -> str | None:
+    match = re.search(
+        r"(?is)\b(?:show|inspect|resolve|open|get|detail|details?|drill\s*down)\s+(?:ref\s+|reference\s+)?(?P<ref>[a-z][a-z0-9_-]{1,32}:[^\s]+)\s*$",
+        text.strip(),
+    )
+    if match:
+        return match.group("ref").strip().strip('"\'')
+    if re.fullmatch(r"(?is)[a-z][a-z0-9_-]{1,32}:[^\s]+", text.strip()):
+        return text.strip()
+    return None
 
 
 def _extract_session_query(text: str) -> str | None:

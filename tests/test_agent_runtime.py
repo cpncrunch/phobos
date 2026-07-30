@@ -862,6 +862,7 @@ class AgentRuntimeTests(unittest.TestCase):
     def test_closeout_review_includes_redacted_local_drilldown_links(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _ = self.make_runtime(tmp)
+            gateway = None
             try:
                 evidence_root = runtime.registry.harness.store.root
                 proc_dir = evidence_root / "agent" / "processes"
@@ -928,11 +929,77 @@ class AgentRuntimeTests(unittest.TestCase):
                 markdown = Path(result.artifacts["markdown"]).read_text(encoding="utf-8")
                 self.assertIn("## Drill-down", markdown)
                 self.assertIn(f"approval:{approval_id}", markdown)
-                serialized = json.dumps(result.to_dict()) + markdown
+
+                resolver_artifact = evidence_root / "agent" / "manifests" / "resolver-proof.txt"
+                resolver_artifact.parent.mkdir(parents=True, exist_ok=True)
+                resolver_artifact.write_text("resolver artifact body token=supersecret", encoding="utf-8")
+                resolver_rel = resolver_artifact.relative_to(evidence_root).as_posix()
+                resolver_symlink = evidence_root / "agent" / "manifests" / "resolver-symlink.txt"
+                outside_resolver_target = Path(tmp) / "outside-resolver-target.txt"
+                outside_resolver_target.write_text("outside resolver symlink token=supersecret", encoding="utf-8")
+                symlink_blocked = None
+                try:
+                    if resolver_symlink.exists() or resolver_symlink.is_symlink():
+                        resolver_symlink.unlink()
+                    resolver_symlink.symlink_to(outside_resolver_target)
+                    symlink_rel = resolver_symlink.relative_to(evidence_root).as_posix()
+                    symlink_blocked = runtime.registry.run("resolve_local_ref", {"ref": f"artifact:{symlink_rel}"})
+                except (OSError, NotImplementedError) as exc:
+                    symlink_blocked = runtime.registry.run("resolve_local_ref", {"ref": "artifact:../symlink-unavailable.txt"})
+                    symlink_blocked.message = f"symlink unavailable: {exc}"
+                resolved_task = runtime.registry.run("resolve_local_ref", {"ref": f"task:{task_id}"})
+                resolved_finding = runtime.handle_message(f"/ref finding:{finding_id}")
+                resolved_artifact = runtime.registry.run("resolve_local_ref", {"ref": f"artifact:{resolver_rel}"})
+                invalid_max_bytes = runtime.registry.run("resolve_local_ref", {"ref": f"artifact:{resolver_rel}", "max_bytes": "not-an-int"})
+                blocked_artifact = runtime.registry.run("resolve_local_ref", {"ref": "artifact:../outside.txt"})
+                auto_ref = runtime.handle_message(f'/auto apply=true prompt="show task:{task_id}"')
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="ref-other"))
+                try:
+                    other_task_id = other_runtime.store.create_task(other_runtime.session_id, "foreign resolver task token=supersecret")
+                    cross_task = runtime.registry.run("resolve_local_ref", {"ref": f"task:{other_task_id}"})
+                finally:
+                    other_runtime.close()
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/ref?ref=task:{task_id}", timeout=5) as response:
+                    gateway_ref = json.loads(response.read().decode("utf-8"))
+                resolver_blob = json.dumps({
+                    "task": resolved_task.to_dict(),
+                    "finding": resolved_finding,
+                    "artifact": resolved_artifact.to_dict(),
+                    "invalid_max_bytes": invalid_max_bytes.to_dict(),
+                    "blocked_artifact": blocked_artifact.to_dict(),
+                    "symlink_blocked": symlink_blocked.to_dict(),
+                    "auto": auto_ref,
+                    "cross": cross_task.to_dict(),
+                    "gateway": gateway_ref,
+                }, sort_keys=True)
+                self.assertEqual(resolved_task.status, "ok", resolved_task.to_dict())
+                self.assertIn("token=<REDACTED>", resolver_blob)
+                self.assertIn("Resolved finding", resolved_finding)
+                self.assertEqual(resolved_artifact.status, "ok", resolved_artifact.to_dict())
+                self.assertEqual(resolved_artifact.data["artifact"]["sha256"], hashlib.sha256(b"resolver artifact body token=supersecret").hexdigest())
+                self.assertTrue(resolved_artifact.data["artifact"]["no_file_content_emitted"])
+                self.assertEqual(invalid_max_bytes.status, "error", invalid_max_bytes.to_dict())
+                self.assertEqual(blocked_artifact.status, "blocked", blocked_artifact.to_dict())
+                if resolver_symlink.is_symlink():
+                    self.assertEqual(symlink_blocked.status, "blocked", symlink_blocked.to_dict())
+                    self.assertIn("outside", symlink_blocked.message)
+                self.assertIn('"tool": "resolve_local_ref"', auto_ref)
+                self.assertEqual(cross_task.status, "error", cross_task.to_dict())
+                self.assertIn("not found in this session", cross_task.message)
+                self.assertEqual(gateway_ref["status"], "ok")
+                self.assertNotIn("foreign resolver task", resolver_blob)
+
+                serialized = json.dumps(result.to_dict()) + markdown + resolver_blob
                 self.assertNotIn("supersecret", serialized)
                 self.assertNotIn("curl -X POST", serialized)
                 self.assertTrue(result.data["no_target_activity"])
             finally:
+                if gateway is not None:
+                    gateway.shutdown()
                 runtime.close()
 
     def test_lcm_context_reflect_cross_session_delegation_and_wait(self):

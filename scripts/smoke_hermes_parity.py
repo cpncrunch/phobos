@@ -180,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence_manifest",
                 "evidence_manifest_verify",
                 "closeout_review",
+                "resolve_local_ref",
             ]
         )
         status = handle("status", "/status")
@@ -879,6 +880,36 @@ def main(argv: list[str] | None = None) -> int:
         checks["media_artifacts_ok"] = media_import.status == "ok" and media_list.data.get("media") and Path(media_import.artifacts.get("file", "")).exists()
         checks["media_detail_session_bound_ok"] = media_detail.status == "ok" and media_detail.data.get("media", {}).get("no_file_content_read") is True and cross_media_detail.status == "error" and "not found in this session" in cross_media_detail.message and "supersecret" not in json.dumps(cross_media_detail.to_dict())
 
+        preflight_rel = preflight_path.relative_to(runtime.registry.harness.store.root).as_posix() if preflight_path.exists() else "agent/preflight/missing.md"
+        local_ref_results = {
+            "task": runtime.registry.run("resolve_local_ref", {"ref": "task:1"}),
+            "process": runtime.registry.run("resolve_local_ref", {"ref": f"process:{process_id}"}),
+            "job": runtime.registry.run("resolve_local_ref", {"ref": f"job:{job_id}"}),
+            "finding": runtime.registry.run("resolve_local_ref", {"ref": f"finding:{finding_id}"}),
+            "tool_run": runtime.registry.run("resolve_local_ref", {"ref": f"tool-run:{nmap_structured.data['run_id']}"}),
+            "delegation": runtime.registry.run("resolve_local_ref", {"ref": f"delegation:{delegation_id}"}),
+            "media": runtime.registry.run("resolve_local_ref", {"ref": f"media:{media_id}"}),
+            "context": runtime.registry.run("resolve_local_ref", {"ref": f"context-node:{node_id}"}),
+            "preflight": runtime.registry.run("resolve_local_ref", {"ref": f"preflight:{preflight_rel}"}),
+            "cross_task": runtime.registry.run("resolve_local_ref", {"ref": f"task:{other_task_id}"}),
+            "blocked_artifact": runtime.registry.run("resolve_local_ref", {"ref": "artifact:../outside.txt"}),
+            "symlink_artifact": runtime.registry.run("resolve_local_ref", {"ref": "artifact:outside-pack-link.txt"}) if pack_symlink_created else runtime.registry.run("resolve_local_ref", {"ref": "artifact:agent/preflight/missing-symlink-check.txt"}),
+        }
+        local_ref_auto = handle("local-ref-auto", '/auto apply=true prompt="show task:1"')
+        local_ref_payload = {name: result.to_dict() for name, result in local_ref_results.items()} | {"auto": local_ref_auto}
+        write("local-ref-resolver.json", json.dumps(local_ref_payload, indent=2))
+        checks["local_ref_resolver_ok"] = (
+            all(local_ref_results[name].status == "ok" for name in ["task", "process", "job", "finding", "tool_run", "delegation", "media", "context", "preflight"])
+            and local_ref_results["preflight"].data.get("artifact", {}).get("no_file_content_emitted") is True
+            and local_ref_results["cross_task"].status == "error"
+            and "not found in this session" in local_ref_results["cross_task"].message
+            and local_ref_results["blocked_artifact"].status == "blocked"
+            and (not pack_symlink_created or local_ref_results["symlink_artifact"].status == "blocked")
+            and '"tool": "resolve_local_ref"' in local_ref_auto
+            and "supersecret" not in json.dumps(local_ref_payload)
+            and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(local_ref_payload)
+        )
+
         timeline = runtime.registry.run("evidence_timeline", {"limit": 300, "include_audit": True})
         write("evidence-timeline.json", json.dumps(timeline.to_dict(), indent=2))
         timeline_path = Path(timeline.artifacts.get("markdown", ""))
@@ -1199,7 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
         task_route = "/task?id=1"
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        ref_route = "/ref?ref=task:1"
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1272,13 +1304,16 @@ def main(argv: list[str] | None = None) -> int:
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
         task_route_payload = gateway_gets.get(task_route) or {}
         memory_route_payload = gateway_gets.get(memory_route) or {}
+        ref_route_payload = gateway_gets.get(ref_route) or {}
+        ref_route_data_obj = ref_route_payload.get("data") if isinstance(ref_route_payload, dict) else {}
+        ref_route_data = ref_route_data_obj if isinstance(ref_route_data_obj, dict) else {}
         job_route_payload = gateway_gets.get(job_route) or {}
         process_route_payload = gateway_gets.get(process_route) or {}
         delegation_route_payload = gateway_gets.get(delegation_route) or {}
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(memory_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"
