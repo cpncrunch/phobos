@@ -1191,17 +1191,19 @@ class AgentStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def get_audit(self, audit_id: int, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id is None:
+            row = self.conn.execute("SELECT * FROM audit_log WHERE id=?", (audit_id,)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM audit_log WHERE id=? AND session_id=?", (audit_id, session_id)).fetchone()
+        return _audit_row(row) if row else None
+
     def list_audit(self, session_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if session_id is None:
             rows = self.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM audit_log WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
-        out = []
-        for row in rows:
-            data = dict(row)
-            data["data"] = _redact_json_value(json.loads(data.pop("data_json") or "{}"))
-            out.append(data)
-        return out
+        return [_audit_row(row) for row in rows]
 
 
 def next_run_for_schedule(schedule: str) -> str:
@@ -1257,6 +1259,12 @@ def _redact_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return redact_secrets(str(value)) or ""
+
+
+def _audit_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["data"] = _redact_json_value(json.loads(data.pop("data_json") or "{}"))
+    return _redact_json_value(data)
 
 
 def _is_secret_audit_key(key: str) -> bool:

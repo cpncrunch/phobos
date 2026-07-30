@@ -79,7 +79,7 @@ class OffSecToolRegistry:
         self.blocked_tools = {name.strip() for name in blocked_tools if name.strip()}
         self.confirm_tools = {name.strip() for name in confirm_tools if name.strip()}
         self.runtime_metadata = runtime_metadata or {}
-        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "get_approval", "tool_schemas", "runtime_status", "audit_log", "auth_status", "safety_preflight", "guardrail_selftest"}
+        self._policy_bypass_tools = {"approve", "deny", "list_approvals", "get_approval", "tool_schemas", "runtime_status", "audit_log", "get_audit", "auth_status", "safety_preflight", "guardrail_selftest"}
         self.workspace_root = Path(workspace_dir) if workspace_dir else self.harness.store.root / "agent" / "workspace"
         if not self.workspace_root.is_absolute():
             self.workspace_root = (self.harness.store.root / self.workspace_root).resolve()
@@ -221,12 +221,13 @@ class OffSecToolRegistry:
         self.register_tool("get_approval", self.get_approval, _spec("get_approval", "Return one current-session approval with redacted arguments, decision, and replay result.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
+        self.register_tool("get_audit", self.get_audit, _spec("get_audit", "Return one current-session audit log entry with redacted payload metadata.", {"id": {"type": "integer"}, "audit_id": {"type": "integer"}}, ["id"]))
         self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_manifest_verify", self.evidence_manifest_verify, _spec("evidence_manifest_verify", "Verify a prior evidence manifest against current local artifacts, reporting missing/changed/new files without target activity.", {"path": _string("Manifest JSON path under agent/manifests; defaults to latest evidence manifest."), "manifest": _string("Alias for path."), "max_bytes": {"type": "integer", "description": "Skip current files larger than this many bytes; default 50000000."}, "limit": {"type": "integer", "description": "Maximum new-artifact rows to include; default 1000."}, "detect_new": {"type": "boolean", "description": "Report artifacts not present in the source manifest; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_secret_scan", self.evidence_secret_scan, _spec("evidence_secret_scan", "Read-only local evidence-root scan for secret-like material; emits redacted previews only and performs no target activity.", {"limit": {"type": "integer", "description": "Maximum finding rows to return/write; default 200."}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 2000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/secret-scans.")}, []))
         self.register_tool("closeout_review", self.closeout_review, _spec("closeout_review", "Run a read-only engagement closeout readiness review across ROE, approvals, tasks, findings, processes, and evidence artifacts.", {"out": _string("Optional Markdown output path; relative paths go under agent/closeout.")}, []))
-        self.register_tool("resolve_local_ref", self.resolve_local_ref, _spec("resolve_local_ref", "Resolve a redacted local drill-down ref such as approval:1, task:1, finding:1, tool-run:1, media:1, context-node:1, or artifact:agent/path without target activity.", {"ref": _string("Local ref, e.g. task:1 or artifact:agent/preflight/report.md."), "kind": _string("Optional kind when id/path is supplied separately."), "id": {"type": "integer"}, "path": _string("Artifact path under the engagement evidence root."), "max_bytes": {"type": "integer", "description": "Maximum artifact bytes to hash; default 50000000."}}, []))
+        self.register_tool("resolve_local_ref", self.resolve_local_ref, _spec("resolve_local_ref", "Resolve a redacted local drill-down ref such as approval:1, task:1, finding:1, tool-run:1, media:1, context-node:1, audit:1, or artifact:agent/path without target activity.", {"ref": _string("Local ref, e.g. task:1 or artifact:agent/preflight/report.md."), "kind": _string("Optional kind when id/path is supplied separately."), "id": {"type": "integer"}, "path": _string("Artifact path under the engagement evidence root."), "max_bytes": {"type": "integer", "description": "Maximum artifact bytes to hash; default 50000000."}}, []))
         self.register_tool("runtime_status", self.runtime_status, _spec("runtime_status", "Return runtime health, schema, workspace, tool, approval, job, and process counts.", {}))
         self.register_tool("export_pack", self.export_pack, _spec("export_pack", "Create a redacted engagement pack ZIP containing evidence, runtime state, and a manifest.", {"out": _string("Optional ZIP output path; relative paths are written under agent/exports.")}))
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
@@ -1539,6 +1540,7 @@ class OffSecToolRegistry:
             "delegation": self.get_delegation,
             "media": self.media_get,
             "memory": self.get_memory,
+            "audit": self.get_audit,
             "context-node": self.context_describe,
         }
         if kind in entity_handlers:
@@ -1696,7 +1698,20 @@ class OffSecToolRegistry:
 
     def audit_log(self, args: dict[str, Any]) -> ToolResult:
         rows = self.store.list_audit(self.session_id, limit=int(args.get("limit", 50)))
-        return ToolResult("ok", f"Found {len(rows)} audit entries.", {"audit": rows})
+        return ToolResult("ok", f"Found {len(rows)} audit entries.", {"audit": rows, "secret_values_redacted": True})
+
+    def get_audit(self, args: dict[str, Any]) -> ToolResult:
+        audit_id = _first_int_arg(args, "id", "audit_id")
+        if audit_id is None:
+            return ToolResult("error", "Audit id is required.", {"no_target_activity": True, "secret_values_redacted": True})
+        row = self.store.get_audit(audit_id, session_id=self.session_id)
+        if not row:
+            return ToolResult("error", f"Audit entry {audit_id} not found in this session.", {"no_target_activity": True, "secret_values_redacted": True})
+        return ToolResult(
+            "ok",
+            f"Audit entry {audit_id} returned.",
+            {"audit": _redacted_mapping(row), "no_target_activity": True, "secret_values_redacted": True},
+        )
 
     def runtime_status(self, args: dict[str, Any]) -> ToolResult:
         approvals = self.store.list_approvals(self.session_id, status="pending")
@@ -3207,6 +3222,10 @@ _LOCAL_REF_KIND_ALIASES = {
     "toolruns": "tool-run",
     "run": "tool-run",
     "runs": "tool-run",
+    "audits": "audit",
+    "audit-log": "audit",
+    "audit_event": "audit",
+    "audit-event": "audit",
     "jobs": "job",
     "delegations": "delegation",
     "media-artifact": "media",

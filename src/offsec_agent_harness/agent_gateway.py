@@ -169,7 +169,16 @@ class AgentGateway:
                         _write_json(self, runtime.registry.run("get_approval", {"id": approval_id}).to_dict())
                         return
                     if path == "/audit":
-                        _write_json(self, runtime.registry.run("audit_log", {"limit": 50}).to_dict())
+                        query = parse_qs(parsed.query)
+                        _write_json(self, runtime.registry.run("audit_log", {"limit": int((query.get("limit") or [50])[0])}).to_dict())
+                        return
+                    if path in {"/audit-detail", "/audit-event"}:
+                        query = parse_qs(parsed.query)
+                        audit_id = (query.get("id") or query.get("audit_id") or [""])[0]
+                        if not audit_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        _write_json(self, runtime.registry.run("get_audit", {"id": audit_id}).to_dict())
                         return
                     if path == "/timeline":
                         query = parse_qs(parsed.query)

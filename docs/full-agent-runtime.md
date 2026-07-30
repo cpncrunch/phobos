@@ -135,6 +135,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /import-session path=<handoff.json> merge_memories=false
 /export-pack out=<optional.zip>
 /audit limit=50
+/audit-detail id=<n>
 ```
 
 ## Start a standalone agent workspace
@@ -326,7 +327,7 @@ The scan is read-only and performs no target activity. It walks only files that 
 
 ## Local drill-down refs
 
-Closeout and timeline rows include redacted refs such as `task:1`, `process:1`, `finding:1`, `tool-run:1`, `delegation:1`, `media:1`, `context-node:1`, and `artifact:agent/closeout/review.md`. Resolve them with `/ref`, `/detail`, generic `resolve_local_ref`, or gateway `GET /ref?ref=...`:
+Closeout and timeline rows include redacted refs such as `task:1`, `process:1`, `finding:1`, `tool-run:1`, `delegation:1`, `media:1`, `context-node:1`, `audit:1`, and `artifact:agent/closeout/review.md`. Resolve them with `/ref`, `/detail`, generic `resolve_local_ref`, or gateway `GET /ref?ref=...`:
 
 ```bash
 phobos-agent --db data/phobos-agent.db --config agent.config.json once \
@@ -338,7 +339,7 @@ phobos-agent --db data/phobos-agent.db --config agent.config.json once \
   --message '/detail ref=artifact:agent/preflight/operator-preflight.md'
 ```
 
-Entity refs reuse the existing session-bound detail handlers, so foreign integer IDs return `not found in this session`. Artifact refs are evidence-root relative, block traversal/absolute/drive-letter/symlink escapes, emit path/category/type/size/MIME/mtime/SHA-256 metadata only, and never read or return file contents.
+Entity refs reuse the existing session-bound detail handlers, so foreign integer IDs return `not found in this session`. Audit refs return one redacted current-session audit event only, which makes `/timeline include_audit=true` drill-down rows actionable without exposing another local session. Artifact refs are evidence-root relative, block traversal/absolute/drive-letter/symlink escapes, emit path/category/type/size/MIME/mtime/SHA-256 metadata only, and never read or return file contents.
 
 ## Non-destructive policy examples
 

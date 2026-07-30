@@ -424,9 +424,16 @@ class AgentRuntimeTests(unittest.TestCase):
                         "items": ["password=hunter2"],
                     },
                 )
+                audit_id = runtime.store.conn.execute("SELECT id FROM audit_log WHERE event='secret_audit_probe'").fetchone()[0]
                 audit = runtime.handle_message('/audit limit=20')
+                audit_detail = runtime.handle_message(f"/audit-detail id={audit_id}")
+                audit_ref = runtime.registry.run("resolve_local_ref", {"ref": f"audit:{audit_id}"})
                 self.assertIn("tool_call", audit)
                 self.assertIn("secret_audit_probe", audit)
+                self.assertIn("Audit entry", audit_detail)
+                self.assertEqual(audit_ref.status, "ok", audit_ref.to_dict())
+                self.assertTrue(audit_ref.data["no_target_activity"])
+                self.assertEqual(audit_ref.data["entity"]["audit"]["id"], audit_id)
                 self.assertNotIn("leaky-audit-token", audit)
                 self.assertNotIn("leaky-audit-key-only", audit)
                 self.assertNotIn("leaky-client-secret", audit)
@@ -435,6 +442,21 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn("leaky-session-token", audit)
                 self.assertNotIn("leaky-audit-bearer", audit)
                 self.assertNotIn("hunter2", audit)
+                self.assertNotIn("leaky-audit-token", audit_detail + json.dumps(audit_ref.to_dict()))
+                other_runtime = OffSecAgentRuntime(AgentRuntimeConfig(engagement_path=runtime.config.engagement_path, db_path=runtime.config.db_path, session_name="foreign-audit"))
+                try:
+                    foreign_audit_id = other_runtime.store.audit(other_runtime.session_id, "foreign_audit_probe", {"token": "foreign-audit-secret"})
+                    self.assertIsNone(runtime.store.get_audit(foreign_audit_id, session_id=runtime.session_id))
+                    cross_detail = runtime.registry.run("get_audit", {"id": foreign_audit_id})
+                    cross_ref = runtime.registry.run("resolve_local_ref", {"ref": f"audit:{foreign_audit_id}"})
+                    owner_detail = other_runtime.registry.run("get_audit", {"id": foreign_audit_id})
+                    self.assertEqual(cross_detail.status, "error")
+                    self.assertEqual(cross_ref.status, "error")
+                    self.assertIn("not found in this session", cross_detail.message)
+                    self.assertEqual(owner_detail.status, "ok")
+                    self.assertNotIn("foreign-audit-secret", json.dumps({"cross": cross_detail.to_dict(), "ref": cross_ref.to_dict(), "owner": owner_detail.to_dict()}))
+                finally:
+                    other_runtime.close()
                 raw_audit = runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE event='secret_audit_probe'").fetchone()[0]
                 self.assertNotIn("leaky-audit-token", raw_audit)
                 self.assertNotIn("leaky-audit-key-only", raw_audit)
@@ -1780,6 +1802,16 @@ PORT    STATE SERVICE VERSION
                     remote_status = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
                 self.assertEqual(remote_status["status"], "ok")
+                audit_id = runtime.store.audit(runtime.session_id, "gateway_audit_detail", {"token": "gateway-audit-secret"})
+                audit_detail_req = urllib.request.Request(
+                    f"http://{host}:{port}/audit-detail?id={audit_id}",
+                    headers={"Authorization": "Bearer unit-token"},
+                )
+                with urllib.request.urlopen(audit_detail_req, timeout=5) as response:
+                    audit_detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(audit_detail["status"], "ok")
+                self.assertEqual(audit_detail["data"]["audit"]["id"], audit_id)
+                self.assertNotIn("gateway-audit-secret", json.dumps(audit_detail))
                 with urllib.request.urlopen(f"http://{host}:{port}/ui-client", timeout=5) as response:
                     ui_html = response.read().decode("utf-8")
                 self.assertIn("Phobos Agent Remote Client", ui_html)

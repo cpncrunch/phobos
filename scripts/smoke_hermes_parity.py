@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence_secret_scan",
                 "closeout_review",
                 "resolve_local_ref",
+                "get_audit",
             ]
         )
         status = handle("status", "/status")
@@ -321,12 +322,14 @@ def main(argv: list[str] | None = None) -> int:
         storage_media_src.write_text("storage media content token=storage-media-content", encoding="utf-8")
         storage_media = runtime.registry.run("media_import", {"path": str(storage_media_src)})
         storage_media_id = int(storage_media.data.get("media", {}).get("id", 0)) if storage_media.data.get("media") else 0
+        storage_audit_id = runtime.store.audit(runtime.session_id, "storage_audit_probe", {"token": "storage-audit-secret", "nested": {"authorization": "Bearer storage-audit-bearer"}})
         storage_raw = {
             "message": dict(runtime.store.conn.execute("SELECT content, metadata_json FROM messages WHERE id=?", (storage_message_id,)).fetchone()),
             "memories": [dict(row) for row in runtime.store.conn.execute("SELECT key, value, tags FROM memories").fetchall()],
             "summary": dict(runtime.store.conn.execute("SELECT summary FROM context_summaries WHERE id=?", (storage_summary_id,)).fetchone()),
             "node": dict(runtime.store.conn.execute("SELECT title, summary, source_json, metadata_json FROM context_nodes WHERE id=?", (storage_node_id,)).fetchone()),
             "media": dict(runtime.store.conn.execute("SELECT source_path, artifact_path, metadata_json FROM media_artifacts WHERE id=?", (storage_media_id,)).fetchone()),
+            "audit": dict(runtime.store.conn.execute("SELECT data_json FROM audit_log WHERE id=?", (storage_audit_id,)).fetchone()),
         }
         storage_views = {
             "memory_result": storage_memory.to_dict(),
@@ -334,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             "recall": runtime.registry.run("recall", {"query": "client-token"}).to_dict(),
             "context": runtime.registry.run("context_expand", {"id": storage_node_id}).to_dict(),
             "media": runtime.registry.run("media_get", {"id": storage_media_id}).to_dict(),
+            "audit": runtime.registry.run("get_audit", {"id": storage_audit_id}).to_dict(),
         }
         storage_blob = json.dumps({"raw": storage_raw, "views": storage_views}, sort_keys=True)
         storage_leaks = [
@@ -349,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             "storage-node-source",
             "storage-node-metadata",
             "storage-media-name",
+            "storage-audit-secret",
+            "storage-audit-bearer",
         ]
         checks["message_memory_context_media_storage_redaction_ok"] = (
             storage_memory.status == "ok"
@@ -995,6 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
             "task": runtime.registry.run("resolve_local_ref", {"ref": "task:1"}),
             "process": runtime.registry.run("resolve_local_ref", {"ref": f"process:{process_id}"}),
             "job": runtime.registry.run("resolve_local_ref", {"ref": f"job:{job_id}"}),
+            "audit": runtime.registry.run("resolve_local_ref", {"ref": f"audit:{storage_audit_id}"}),
             "finding": runtime.registry.run("resolve_local_ref", {"ref": f"finding:{finding_id}"}),
             "tool_run": runtime.registry.run("resolve_local_ref", {"ref": f"tool-run:{nmap_structured.data['run_id']}"}),
             "delegation": runtime.registry.run("resolve_local_ref", {"ref": f"delegation:{delegation_id}"}),
@@ -1009,7 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
         local_ref_payload = {name: result.to_dict() for name, result in local_ref_results.items()} | {"auto": local_ref_auto}
         write("local-ref-resolver.json", json.dumps(local_ref_payload, indent=2))
         checks["local_ref_resolver_ok"] = (
-            all(local_ref_results[name].status == "ok" for name in ["task", "process", "job", "finding", "tool_run", "delegation", "media", "context", "preflight"])
+            all(local_ref_results[name].status == "ok" for name in ["task", "process", "job", "audit", "finding", "tool_run", "delegation", "media", "context", "preflight"])
             and local_ref_results["preflight"].data.get("artifact", {}).get("no_file_content_emitted") is True
             and local_ref_results["cross_task"].status == "error"
             and "not found in this session" in local_ref_results["cross_task"].message
@@ -1018,6 +1025,29 @@ def main(argv: list[str] | None = None) -> int:
             and '"tool": "resolve_local_ref"' in local_ref_auto
             and "supersecret" not in json.dumps(local_ref_payload)
             and "OUTSIDE_PACK_SYMLINK_SENTINEL" not in json.dumps(local_ref_payload)
+        )
+
+        audit_scope_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="audit-scope-foreign"))
+        try:
+            foreign_audit_id = audit_scope_runtime.store.audit(audit_scope_runtime.session_id, "foreign_audit_probe", {"token": "foreign-audit-secret"})
+            audit_detail = runtime.registry.run("get_audit", {"id": storage_audit_id})
+            audit_slash = handle("audit-detail", f"/audit-detail id={storage_audit_id}")
+            audit_ref = runtime.registry.run("resolve_local_ref", {"ref": f"audit:{storage_audit_id}"})
+            audit_cross = runtime.registry.run("get_audit", {"id": foreign_audit_id})
+            audit_owner = audit_scope_runtime.registry.run("get_audit", {"id": foreign_audit_id})
+        finally:
+            audit_scope_runtime.close()
+        audit_detail_payload = {"detail": audit_detail.to_dict(), "slash": audit_slash, "ref": audit_ref.to_dict(), "cross": audit_cross.to_dict(), "owner": audit_owner.to_dict()}
+        write("audit-detail.json", json.dumps(audit_detail_payload, indent=2, sort_keys=True))
+        checks["audit_detail_session_bound_redacted_ok"] = (
+            audit_detail.status == "ok"
+            and audit_ref.status == "ok"
+            and audit_cross.status == "error"
+            and audit_owner.status == "ok"
+            and "not found in this session" in json.dumps(audit_detail_payload)
+            and "storage-audit-secret" not in json.dumps(audit_detail_payload)
+            and "storage-audit-bearer" not in json.dumps(audit_detail_payload)
+            and "foreign-audit-secret" not in json.dumps(audit_detail_payload)
         )
 
         timeline = runtime.registry.run("evidence_timeline", {"limit": 300, "include_audit": True})
@@ -1369,7 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
         ref_route = "/ref?ref=task:1"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/guardrail-test?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/finding-bundle?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/guardrail-test?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit?limit=25", "/audit-detail?id=%s" % storage_audit_id, "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/finding-bundle?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1458,9 +1488,13 @@ def main(argv: list[str] | None = None) -> int:
         process_route_payload = gateway_gets.get(process_route) or {}
         delegation_route_payload = gateway_gets.get(delegation_route) or {}
         media_route_payload = gateway_gets.get(media_detail_route) or {}
+        audit_route_payload = gateway_gets.get("/audit-detail?id=%s" % storage_audit_id) or {}
+        audit_route_data_obj = audit_route_payload.get("data") if isinstance(audit_route_payload, dict) else {}
+        audit_route_data = audit_route_data_obj if isinstance(audit_route_data_obj, dict) else {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
         checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and guardrail_route_data.get("no_target_activity") is True and guardrail_route_data.get("readiness") == "ready" and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(guardrail_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_audit_detail_route_ok"] = audit_route_payload.get("status") == "ok" and audit_route_data.get("no_target_activity") is True and "storage-audit-secret" not in json.dumps(audit_route_payload) and "storage-audit-bearer" not in json.dumps(audit_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"
