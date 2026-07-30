@@ -617,6 +617,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
                 escape_cases = [
                     ("finding_review", {"id": finding_id, "out": str(Path(tmp) / "outside-review.md")}, Path(tmp) / "outside-review.md"),
+                    ("finding_bundle", {"id": finding_id, "out": str(Path(tmp) / "outside-finding-bundle.zip")}, Path(tmp) / "outside-finding-bundle.zip"),
                     ("operator_briefing", {"out": str(Path(tmp) / "outside-briefing.md")}, Path(tmp) / "outside-briefing.md"),
                     ("export_session", {"out": str(Path(tmp) / "outside-handoff.json")}, Path(tmp) / "outside-handoff.json"),
                     ("export_pack", {"out": str(Path(tmp) / "outside-pack.zip")}, Path(tmp) / "outside-pack.zip"),
@@ -1631,6 +1632,7 @@ PORT    STATE SERVICE VERSION
                     self.assertIn("not found in this session", runtime.registry.run("update_finding", {"id": other_finding_id, "status": "confirmed"}).message)
                     self.assertIn("not found in this session", runtime.registry.run("finding_export", {"id": other_finding_id}).message)
                     self.assertIn("not found in this session", runtime.registry.run("finding_review", {"id": other_finding_id}).message)
+                    self.assertIn("not found in this session", runtime.registry.run("finding_bundle", {"id": other_finding_id}).message)
                     cross_link = runtime.registry.run("create_finding", {"title": "Cross-session link probe", "tool_run_ids": str(other_run_id)})
                     self.assertEqual(cross_link.status, "ok", cross_link.to_dict())
                     self.assertEqual(cross_link.data["finding"].get("evidence"), [])
@@ -1639,7 +1641,27 @@ PORT    STATE SERVICE VERSION
                 finally:
                     other_runtime.close()
 
-                updated = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Gateway screenshot captured", "append_evidence": True})
+                outside_bundle_secret = Path(tmp) / "outside-finding-bundle-sentinel.txt"
+                outside_bundle_secret.write_text("OUTSIDE_FINDING_BUNDLE_SENTINEL", encoding="utf-8")
+                bundle_escape_link = runtime.registry.harness.store.root / "reports" / "bundle-outside-link.txt"
+                bundle_escape_link.parent.mkdir(parents=True, exist_ok=True)
+                if hasattr(os, "symlink"):
+                    try:
+                        bundle_escape_link.symlink_to(outside_bundle_secret)
+                    except OSError:
+                        bundle_escape_link.write_text("local fallback evidence", encoding="utf-8")
+                else:
+                    bundle_escape_link.write_text("local fallback evidence", encoding="utf-8")
+
+                updated = runtime.registry.run("update_finding", {
+                    "id": finding_id,
+                    "status": "confirmed",
+                    "evidence": [
+                        {"type": "note", "value": "Gateway screenshot captured token=supersecret"},
+                        {"type": "artifact", "artifact_path": str(bundle_escape_link)},
+                    ],
+                    "append_evidence": True,
+                })
                 self.assertEqual(updated.data["finding"]["status"], "confirmed")
                 exported = runtime.registry.run("finding_export", {"id": finding_id})
                 self.assertEqual(exported.status, "ok", exported.to_dict())
@@ -1654,6 +1676,23 @@ PORT    STATE SERVICE VERSION
                 self.assertIn("Phobos Finding Review", review_markdown)
                 self.assertIn("Negative control", review_markdown)
                 self.assertNotIn("supersecret", review_markdown)
+                bundled = runtime.registry.run("finding_bundle", {"id": finding_id, "out": "unit-finding-bundle.zip"})
+                self.assertEqual(bundled.status, "ok", bundled.to_dict())
+                self.assertTrue(bundled.data["no_target_activity"])
+                self.assertFalse(bundled.data["raw_file_contents_emitted"])
+                bundle_path = Path(bundled.artifacts["zip"])
+                self.assertTrue(bundle_path.exists())
+                with zipfile.ZipFile(bundle_path) as archive:
+                    names = set(archive.namelist())
+                    self.assertTrue({"BUNDLE_README.md", "MANIFEST.json", "finding/finding.md", "finding/review.md", "finding/finding.json"}.issubset(names))
+                    self.assertTrue(any(name.startswith("evidence/agent/tool-runs/") for name in names), names)
+                    manifest = json.loads(archive.read("MANIFEST.json").decode("utf-8"))
+                    self.assertTrue(any("outside evidence root" in str(item.get("reason", "")) for item in manifest.get("skipped", [])), manifest)
+                    zipped_blob = b"\n".join(archive.read(name) for name in names if not name.endswith("/"))
+                self.assertNotIn(b"supersecret", zipped_blob)
+                self.assertNotIn(b"OUTSIDE_FINDING_BUNDLE_SENTINEL", zipped_blob)
+                self.assertIn("finding_bundle", runtime.handle_message('/schemas name=finding_bundle'))
+                self.assertIn("Finding #", runtime.handle_message(f'/finding-bundle id={finding_id} out=slash-finding-bundle.zip'))
                 weak = runtime.registry.run("create_finding", {"title": "Version-only candidate", "severity": "High"})
                 weak_review = runtime.registry.run("finding_review", {"id": weak.data["finding"]["id"]})
                 self.assertEqual(weak_review.status, "ok", weak_review.to_dict())
@@ -1705,6 +1744,14 @@ PORT    STATE SERVICE VERSION
                     finding_detail = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(finding_detail["status"], "ok")
                 self.assertEqual(finding_detail["data"]["finding"]["id"], finding_id)
+                finding_bundle_req = urllib.request.Request(
+                    f"http://{host}:{port}/finding-bundle?id={finding_id}&out=gateway-finding-bundle.zip",
+                    headers={"Authorization": "Bearer unit-token"},
+                )
+                with urllib.request.urlopen(finding_bundle_req, timeout=5) as response:
+                    finding_bundle = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(finding_bundle["status"], "ok")
+                self.assertTrue(Path(finding_bundle["artifacts"]["zip"]).exists())
                 tool_run_detail_req = urllib.request.Request(
                     f"http://{host}:{port}/tool-run?id={nmap_run_id}",
                     headers={"Authorization": "Bearer unit-token"},

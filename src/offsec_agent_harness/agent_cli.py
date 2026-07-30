@@ -207,6 +207,13 @@ def build_parser() -> argparse.ArgumentParser:
     closeout.add_argument("--engagement", required=True)
     closeout.add_argument("--out", help="Optional Markdown output path under the engagement agent/closeout artifacts directory")
 
+    for finding_bundle_cmd in ("finding-bundle", "finding-package"):
+        finding_bundle = sub.add_parser(finding_bundle_cmd, help="Create a redacted ZIP bundle for one stored finding and its linked text evidence")
+        finding_bundle.add_argument("--engagement", required=True)
+        finding_bundle.add_argument("--id", type=int, required=True, help="Stored finding id in the current session")
+        finding_bundle.add_argument("--out", help="Optional ZIP output path under the engagement agent/findings artifact directory")
+        finding_bundle.add_argument("--max-bytes", type=int, default=2_000_000, help="Skip linked evidence files larger than this many bytes")
+
     export_pack = sub.add_parser("export-pack", help="Create a redacted engagement pack ZIP")
     export_pack.add_argument("--engagement", required=True)
     export_pack.add_argument("--out")
@@ -465,6 +472,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.subcommand == "closeout":
             tool_args = {"out": args.out} if args.out else {}
             result = runtime.registry.run("closeout_review", tool_args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.status == "ok" else 2
+        if args.subcommand in {"finding-bundle", "finding-package"}:
+            result = runtime.registry.run("finding_bundle", {"id": args.id, "out": args.out or "", "max_bytes": args.max_bytes})
             print(json.dumps(result.to_dict(), indent=2))
             return 0 if result.status == "ok" else 2
         if args.subcommand == "export-pack":

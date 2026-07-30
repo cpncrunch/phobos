@@ -177,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 "list_findings",
                 "finding_export",
                 "finding_review",
+                "finding_bundle",
                 "evidence_timeline",
                 "evidence_manifest",
                 "evidence_manifest_verify",
@@ -536,19 +537,60 @@ def main(argv: list[str] | None = None) -> int:
             "tags": "web,exposure",
         })
         finding_id = int(created_finding.data["finding"]["id"])
-        updated_finding = runtime.registry.run("update_finding", {"id": finding_id, "status": "confirmed", "evidence": "Smoke UI screenshot evidence", "append_evidence": True})
+        outside_finding_bundle = root / "outside-finding-bundle-sentinel.txt"
+        outside_finding_bundle.write_text("OUTSIDE_FINDING_BUNDLE_SENTINEL", encoding="utf-8")
+        bundle_escape_link = runtime.registry.harness.store.root / "reports" / "smoke-bundle-outside-link.txt"
+        bundle_escape_link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            bundle_escape_link.symlink_to(outside_finding_bundle)
+        except (OSError, NotImplementedError):
+            bundle_escape_link.write_text("local fallback smoke bundle evidence", encoding="utf-8")
+        updated_finding = runtime.registry.run("update_finding", {
+            "id": finding_id,
+            "status": "confirmed",
+            "evidence": [
+                {"type": "note", "value": "Smoke UI screenshot evidence token=supersecret"},
+                {"type": "artifact", "artifact_path": str(bundle_escape_link)},
+            ],
+            "append_evidence": True,
+        })
         listed_findings = runtime.registry.run("list_findings", {"status": "all"})
         exported_finding = runtime.registry.run("finding_export", {"id": finding_id})
         reviewed_finding = runtime.registry.run("finding_review", {"id": finding_id})
+        bundled_finding = runtime.registry.run("finding_bundle", {"id": finding_id, "out": "smoke-finding-bundle.zip"})
+        cli_bundle_stdout = run_cmd("finding-bundle-cli", [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(db_path), "--config", str(config_path), "--session", "smoke", "finding-bundle", "--engagement", str(engagement_path), "--id", str(finding_id), "--out", "smoke-cli-finding-bundle.zip"])
+        cli_bundle = json.loads(cli_bundle_stdout)
         write("finding-create.json", json.dumps(created_finding.to_dict(), indent=2))
         write("finding-update.json", json.dumps(updated_finding.to_dict(), indent=2))
         write("findings.json", json.dumps(listed_findings.to_dict(), indent=2))
         write("finding-export.json", json.dumps(exported_finding.to_dict(), indent=2))
         write("finding-review.json", json.dumps(reviewed_finding.to_dict(), indent=2))
+        write("finding-bundle.json", json.dumps(bundled_finding.to_dict(), indent=2))
         finding_markdown = Path(exported_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if exported_finding.artifacts.get("markdown") else ""
         finding_review_markdown = Path(reviewed_finding.artifacts.get("markdown", "")).read_text(encoding="utf-8") if reviewed_finding.artifacts.get("markdown") else ""
+        finding_bundle_path = Path(bundled_finding.artifacts.get("zip", ""))
+        finding_bundle_names: set[str] = set()
+        finding_bundle_blob = b""
+        finding_bundle_manifest = {}
+        if finding_bundle_path.exists():
+            with zipfile.ZipFile(finding_bundle_path) as archive:
+                finding_bundle_names = set(archive.namelist())
+                finding_bundle_blob = b"\n".join(archive.read(name) for name in finding_bundle_names if not name.endswith("/"))
+                finding_bundle_manifest = json.loads(archive.read("MANIFEST.json").decode("utf-8"))
         checks["finding_lifecycle_ok"] = created_finding.status == "ok" and updated_finding.data["finding"]["status"] == "confirmed" and "Exposed administrative interface" in json.dumps(listed_findings.to_dict()) and "Tool run" in finding_markdown
         checks["finding_review_ok"] = reviewed_finding.status == "ok" and reviewed_finding.data["review"]["readiness"] in {"ready_with_advisories", "ready_for_operator_review"} and "Phobos Finding Review" in finding_review_markdown and "supersecret" not in json.dumps(reviewed_finding.to_dict()) and "supersecret" not in finding_review_markdown
+        checks["finding_evidence_bundle_ok"] = (
+            bundled_finding.status == "ok"
+            and cli_bundle.get("status") == "ok"
+            and bundled_finding.data.get("no_target_activity") is True
+            and bundled_finding.data.get("raw_file_contents_emitted") is False
+            and {"BUNDLE_README.md", "MANIFEST.json", "finding/finding.md", "finding/review.md", "finding/finding.json"}.issubset(finding_bundle_names)
+            and any(name.startswith("evidence/agent/tool-runs/") for name in finding_bundle_names)
+            and any("outside evidence root" in str(item.get("reason", "")) for item in finding_bundle_manifest.get("skipped", []) if isinstance(item, dict))
+            and b"supersecret" not in finding_bundle_blob
+            and b"OUTSIDE_FINDING_BUNDLE_SENTINEL" not in finding_bundle_blob
+            and "supersecret" not in cli_bundle_stdout
+        )
         current_tool_detail = runtime.registry.run("get_tool_run", {"id": nmap_structured.data["run_id"]})
         current_finding_detail = runtime.registry.run("get_finding", {"id": finding_id})
         other_detail_runtime = PhobosAgentRuntime(AgentRuntimeConfig(engagement_path=str(engagement_path), db_path=str(db_path), session_name="other-detail-smoke"))
@@ -562,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             cross_update = runtime.registry.run("update_finding", {"id": other_finding_id, "status": "confirmed"})
             cross_export = runtime.registry.run("finding_export", {"id": other_finding_id})
             cross_review = runtime.registry.run("finding_review", {"id": other_finding_id})
+            cross_bundle = runtime.registry.run("finding_bundle", {"id": other_finding_id})
             cross_link_probe = runtime.registry.run("create_finding", {"title": "Cross-session link probe", "tool_run_ids": str(other_run_id)})
             reverse_tool_detail = other_detail_runtime.registry.run("get_tool_run", {"id": nmap_structured.data["run_id"]})
             reverse_finding_detail = other_detail_runtime.registry.run("get_finding", {"id": finding_id})
@@ -573,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cross_update": cross_update.to_dict(),
                 "cross_export": cross_export.to_dict(),
                 "cross_review": cross_review.to_dict(),
+                "cross_bundle": cross_bundle.to_dict(),
                 "cross_link_probe": cross_link_probe.to_dict(),
                 "reverse_tool_detail": reverse_tool_detail.to_dict(),
                 "reverse_finding_detail": reverse_finding_detail.to_dict(),
@@ -588,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
             and cross_update.status == "error"
             and cross_export.status == "error"
             and cross_review.status == "error"
+            and cross_bundle.status == "error"
             and "not found in this session" in json.dumps(session_bound_detail)
             and (cross_link_probe.data.get("finding", {}).get("evidence") == [])
             and reverse_tool_detail.status == "error"
@@ -640,16 +685,21 @@ def main(argv: list[str] | None = None) -> int:
         checks["finding_tool_run_storage_redaction_ok"] = "storage-smoke-secret" not in storage_blob and "<REDACTED>" in storage_blob
 
         outside_artifact = root / "outside-artifact-output.md"
+        outside_bundle_artifact = root / "outside-finding-bundle.zip"
         artifact_escape = runtime.registry.run("finding_review", {"id": finding_id, "out": str(outside_artifact)})
+        bundle_artifact_escape = runtime.registry.run("finding_bundle", {"id": finding_id, "out": str(outside_bundle_artifact)})
         scoped_briefing = runtime.registry.run("operator_briefing", {"out": "containment-briefing.md"})
-        write("artifact-output-escape.json", json.dumps(artifact_escape.to_dict(), indent=2))
+        write("artifact-output-escape.json", json.dumps({"finding_review": artifact_escape.to_dict(), "finding_bundle": bundle_artifact_escape.to_dict()}, indent=2))
         write("artifact-output-scoped.json", json.dumps(scoped_briefing.to_dict(), indent=2))
         briefing_dir = (runtime.registry.harness.store.root / "agent" / "briefings").resolve()
         scoped_path = Path(scoped_briefing.artifacts.get("markdown", "")).resolve() if scoped_briefing.artifacts.get("markdown") else Path("/")
         checks["artifact_output_containment_ok"] = (
             artifact_escape.status == "error"
             and "escapes" in artifact_escape.message
+            and bundle_artifact_escape.status == "error"
+            and "escapes" in bundle_artifact_escape.message
             and not outside_artifact.exists()
+            and not outside_bundle_artifact.exists()
             and scoped_briefing.status == "ok"
             and os.path.commonpath([str(briefing_dir), str(scoped_path)]) == str(briefing_dir)
         )
@@ -1296,7 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
         process_route = f"/process?id={process_id}"
         memory_route = f"/memory?id={storage_memory.data['id']}"
         ref_route = "/ref?ref=task:1"
-        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
+        gateway_route_matrix = ["/routes", "/tools", "/schemas?name=start_process", "/scope-check?target=app.example.test", "/sessions", "/context", "/memories?query=smoke-client", memory_route, "/memory-detail?id=%s" % storage_memory.data["id"], "/preflight", "/timeline?limit=25&include_audit=false", "/manifest?limit=50&include_agent=false", "/manifest-verify?path=smoke-manifest.json&detect_new=false", "/secret-scan?limit=50", "/closeout", ref_route, "/detail?ref=finding:%s" % finding_id, "/lcm", "/approvals", "/approval?id=1", "/audit", "/tasks", task_route, "/task-detail?id=1", "/findings", finding_route, "/finding-detail?id=%s" % finding_id, "/finding-bundle?id=%s" % finding_id, "/tool-runs", tool_run_route, "/tool-run-detail?run_id=%s" % nmap_structured.data["run_id"], "/jobs", job_route, "/job-detail?id=%s" % job_id, "/processes", process_route, "/process-detail?id=%s" % process_id, "/delegations", delegation_route, "/media", media_detail_route, "/auth", "/bridges", "/guardrails"]
         for route in gateway_route_matrix:
             with urllib.request.urlopen(f"http://{host}:{port}{route}", timeout=5) as response:
                 gateway_gets[route] = json.loads(response.read().decode("utf-8"))
@@ -1370,6 +1420,7 @@ def main(argv: list[str] | None = None) -> int:
         closeout_route_data: dict[str, object] = closeout_route_data_obj if isinstance(closeout_route_data_obj, dict) else {}
         approval_route = gateway_gets.get("/approval?id=1") or {}
         finding_route_payload = gateway_gets.get(finding_route) or {}
+        finding_bundle_route_payload = gateway_gets.get("/finding-bundle?id=%s" % finding_id) or {}
         tool_run_route_payload = gateway_gets.get(tool_run_route) or {}
         task_route_payload = gateway_gets.get(task_route) or {}
         memory_route_payload = gateway_gets.get(memory_route) or {}
@@ -1382,7 +1433,7 @@ def main(argv: list[str] | None = None) -> int:
         media_route_payload = gateway_gets.get(media_detail_route) or {}
         gateway_routes_present = all(bool(gateway_gets.get(route)) for route in gateway_route_matrix)
         checks["gateway_ok"] = "Phobos Agent Gateway" in dashboard and "Granular Guardrails" in dashboard and health.get("ok") is True and gateway_status.get("status") == "ok" and gateway_tool["result"]["data"]["echo"] == "via-gateway"
-        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
+        checks["gateway_full_api_ok"] = gateway_routes_present and preflight_route_data.get("no_target_activity") is True and manifest_route_data.get("no_target_activity") is True and manifest_verify_route_data.get("verification_status") == "verified" and secret_scan_route_data.get("review_status") == "review" and secret_scan_route_data.get("no_target_activity") is True and closeout_route_data.get("no_target_activity") is True and '"safety_mode": "non_destructive"' in gateway_message.get("response", "") and isinstance(gateway_run_due.get("jobs_run"), list) and (approval_route or {}).get("status") == "ok" and memory_route_payload.get("status") == "ok" and ref_route_payload.get("status") == "ok" and ref_route_data.get("no_target_activity") is True and finding_route_payload.get("status") == "ok" and finding_bundle_route_payload.get("status") == "ok" and tool_run_route_payload.get("status") == "ok" and task_route_payload.get("status") == "ok" and job_route_payload.get("status") == "ok" and process_route_payload.get("status") == "ok" and delegation_route_payload.get("status") == "ok" and media_route_payload.get("status") == "ok" and "supersecret" not in json.dumps(approval_route) + json.dumps(manifest_verify_route) + json.dumps(secret_scan_route) + json.dumps(memory_route_payload) + json.dumps(ref_route_payload) + json.dumps(finding_route_payload) + json.dumps(finding_bundle_route_payload) + json.dumps(tool_run_route_payload) + json.dumps(task_route_payload) + json.dumps(job_route_payload) + json.dumps(process_route_payload) + json.dumps(delegation_route_payload) + json.dumps(media_route_payload)
         checks["granular_guardrail_ui_ok"] = (
             (gateway_gets.get("/guardrails") or {}).get("engagement", {}).get("safety_mode") == "non_destructive"
             and gateway_guardrail_update.get("status") == "updated"

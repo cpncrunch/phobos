@@ -172,6 +172,7 @@ class OffSecToolRegistry:
         self.register_tool("get_finding", self.get_finding, _spec("get_finding", "Get one finding lifecycle record by id.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("finding_export", self.finding_export, _spec("finding_export", "Export a stored finding lifecycle record to report-ready Markdown.", {"id": {"type": "integer"}, "out": _string("Optional output path; relative paths go under agent/findings.")}, ["id"]))
         self.register_tool("finding_review", self.finding_review, _spec("finding_review", "Deterministically review a stored finding for report-readiness gaps without executing target actions.", {"id": {"type": "integer"}, "out": _string("Optional Markdown output path; relative paths go under agent/findings.")}, ["id"]))
+        self.register_tool("finding_bundle", self.finding_bundle, _spec("finding_bundle", "Create a redacted ZIP bundle for one stored finding with report draft, QA review, linked text evidence, and a manifest; no target activity.", {"id": {"type": "integer"}, "out": _string("Optional ZIP output path; relative paths go under agent/findings."), "max_bytes": {"type": "integer", "description": "Skip linked evidence files larger than this many bytes; default 2000000."}}, ["id"]))
         self.register_tool("remember", self.remember, _spec("remember", "Store local agent memory in SQLite.", {"key": _string("Memory key."), "value": _string("Memory value."), "tags": _string("Optional comma tags.")}, ["key", "value"]))
         self.register_tool("recall", self.recall, _spec("recall", "Search local agent memory.", {"query": _string("Memory search query."), "limit": {"type": "integer"}}, ["query"]))
         self.register_tool("list_memories", self.list_memories, _spec("list_memories", "List redacted local agent memory keys/values for hygiene review.", {"query": _string("Optional memory search query."), "limit": {"type": "integer"}}, []))
@@ -683,19 +684,7 @@ class OffSecToolRegistry:
         finding = self.store.get_finding(finding_id, session_id=self.session_id)
         if not finding:
             return ToolResult("error", "Finding not found in this session.")
-        evidence_lines = _finding_evidence_lines(finding.get("evidence") or [])
-        affected_assets = sorted({str(item.get("target")) for item in finding.get("evidence", []) if isinstance(item, dict) and item.get("target")})
-        report = FindingInput(
-            title=finding["title"],
-            severity=finding["severity"],
-            impact=finding.get("impact") or "Impact should be finalized during QA based on confirmed evidence.",
-            description=finding.get("description") or "",
-            supporting_evidence=evidence_lines,
-            affected_assets=affected_assets,
-            recommendation=finding.get("recommendation") or "",
-            confirmed=finding.get("status") in {"confirmed", "accepted-risk", "resolved"},
-            limitations=[] if finding.get("status") == "confirmed" else [f"Current lifecycle status is {finding.get('status')}; validate evidence before client delivery."],
-        )
+        report = _finding_report_input(finding)
         out = _scoped_artifact_output_path(
             self.harness.store.root,
             "findings",
@@ -728,6 +717,107 @@ class OffSecToolRegistry:
         out.write_text(markdown, encoding="utf-8")
         self.store.audit(self.session_id, "finding_reviewed", {"id": finding["id"], "readiness": review["readiness"], "blocking_gaps": len(review["blocking_gaps"]), "advisory_gaps": len(review["advisory_gaps"])})
         return ToolResult("ok", f"Finding #{finding['id']} review: {review['readiness']}.", {"finding": _redacted_mapping(finding), "review": review}, {"markdown": str(out)})
+
+    def finding_bundle(self, args: dict[str, Any]) -> ToolResult:
+        """Package one finding's report draft, QA review, and linked text evidence."""
+
+        finding_id = _first_int_arg(args, "id", "finding_id")
+        if finding_id is None:
+            return ToolResult("error", "id is required.")
+        finding = self.store.get_finding(finding_id, session_id=self.session_id)
+        if not finding:
+            return ToolResult("error", "Finding not found in this session.")
+        try:
+            max_bytes = max(1, min(int(args.get("max_bytes", 2_000_000)), 50_000_000))
+            out = _scoped_artifact_output_path(
+                self.harness.store.root,
+                "findings",
+                str(args.get("out") or "").strip(),
+                f"finding-{finding['id']}-bundle-{safe_report_filename(finding['title'])}.zip",
+                suffix=".zip",
+            )
+        except (TypeError, ValueError) as exc:
+            return ToolResult("error", f"finding_bundle input rejected: {exc}")
+
+        evidence_root = self.harness.store.root.resolve(strict=False)
+        review = self._build_finding_review(finding)
+        report = _finding_report_input(finding)
+        finding_markdown = FindingMarkdownExporter().render_finding(report)
+        review_markdown = _finding_review_markdown(finding, review)
+        manifest: dict[str, Any] = {
+            "created_at": utc_now(),
+            "session_id": self.session_id,
+            "engagement": redact_secrets(self.roe.name),
+            "finding_id": finding["id"],
+            "finding_title": redact_secrets(str(finding.get("title") or "")),
+            "max_bytes": max_bytes,
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+            "secret_values_redacted": True,
+            "redaction": "Text artifacts are passed through the Phobos secret redactor before packaging; binary/oversized/out-of-root files are skipped.",
+            "files": [],
+            "skipped": [],
+        }
+        out.parent.mkdir(parents=True, exist_ok=True)
+        seen_resolved: set[Path] = set()
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            _zip_text(archive, "BUNDLE_README.md", _finding_bundle_readme(self.roe.name, finding["id"], finding.get("title") or ""))
+            _zip_json(archive, "finding/finding.json", {"finding": _redacted_mapping(finding), "review": review})
+            _zip_text(archive, "finding/finding.md", finding_markdown)
+            _zip_text(archive, "finding/review.md", review_markdown)
+            manifest["files"].extend([
+                _zip_manifest_entry("BUNDLE_README.md", "generated", _finding_bundle_readme(self.roe.name, finding["id"], finding.get("title") or "")),
+                _zip_manifest_entry("finding/finding.json", "generated", json.dumps({"finding": _redacted_mapping(finding), "review": review}, indent=2, sort_keys=True)),
+                _zip_manifest_entry("finding/finding.md", "generated", finding_markdown),
+                _zip_manifest_entry("finding/review.md", "generated", review_markdown),
+            ])
+            for path_value, source in self._finding_bundle_artifact_candidates(finding):
+                result = _zip_redacted_evidence_artifact(
+                    archive,
+                    evidence_root,
+                    path_value,
+                    source,
+                    max_bytes=max_bytes,
+                    seen_resolved=seen_resolved,
+                    skip_path=out,
+                )
+                if result.get("archive_path"):
+                    manifest["files"].append(result)
+                else:
+                    manifest["skipped"].append(result)
+            _zip_json(archive, "MANIFEST.json", manifest)
+        self.store.audit(self.session_id, "finding_bundle_exported", {"id": finding["id"], "path": str(out), "files": len(manifest["files"]), "skipped": len(manifest["skipped"])})
+        payload = _redacted_mapping({
+            "finding": finding,
+            "review": review,
+            "bundle": str(out),
+            "manifest": manifest,
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+            "secret_values_redacted": True,
+        })
+        return ToolResult("ok", f"Finding #{finding['id']} evidence bundle exported: {out}", payload, {"zip": str(out)})
+
+    def _finding_bundle_artifact_candidates(self, finding: dict[str, Any]) -> list[tuple[str, str]]:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+        candidates: list[tuple[str, str]] = []
+
+        def add(path_value: Any, source: str) -> None:
+            text = str(path_value or "").strip()
+            if text:
+                candidates.append((text, redact_secrets(source) or source))
+
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_run" and item.get("id"):
+                run_id = _coerce_int(item.get("id"))
+                run = self.store.get_tool_run(run_id, session_id=self.session_id) if run_id is not None else None
+                if run:
+                    add(run.get("artifact_path"), f"tool_run:{run['id']}")
+            for key in ("artifact_path", "path", "file"):
+                add(item.get(key), f"finding_evidence:{key}")
+        return candidates
 
     def _build_finding_review(self, finding: dict[str, Any]) -> dict[str, Any]:
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
@@ -3090,6 +3180,108 @@ def _finding_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         else:
             lines.append(redact_secrets(json.dumps(item, sort_keys=True)))
     return lines
+
+
+def _finding_report_input(finding: dict[str, Any]) -> FindingInput:
+    raw_evidence = finding.get("evidence")
+    evidence: list[dict[str, Any]] = [item for item in raw_evidence if isinstance(item, dict)] if isinstance(raw_evidence, list) else []
+    evidence_lines = _finding_evidence_lines(evidence)
+    affected_assets = sorted({str(item.get("target")) for item in evidence if item.get("target")})
+    status = str(finding.get("status") or "draft")
+    return FindingInput(
+        title=str(finding.get("title") or "Untitled Finding"),
+        severity=str(finding.get("severity") or "Informational"),
+        impact=str(finding.get("impact") or "Impact should be finalized during QA based on confirmed evidence."),
+        description=str(finding.get("description") or ""),
+        supporting_evidence=evidence_lines,
+        affected_assets=affected_assets,
+        recommendation=str(finding.get("recommendation") or ""),
+        confirmed=status in {"confirmed", "accepted-risk", "resolved"},
+        limitations=[] if status == "confirmed" else [f"Current lifecycle status is {status}; validate evidence before client delivery."],
+    )
+
+
+def _finding_bundle_readme(engagement_name: str, finding_id: Any, finding_title: str) -> str:
+    return f"""# Phobos Finding Evidence Bundle
+
+Engagement: {redact_secrets(str(engagement_name))}
+Finding: #{finding_id} {redact_secrets(str(finding_title))}
+
+This ZIP was generated locally from Phobos session state for operator QA and handoff.
+No target activity was performed while creating it. Generated finding/review files and
+linked text evidence are redacted before packaging; binary, oversized, missing, and
+out-of-evidence-root artifacts are omitted and listed in `MANIFEST.json`.
+
+Contents:
+
+- `finding/finding.md` — report-style finding draft.
+- `finding/review.md` — deterministic readiness/QA checklist.
+- `finding/finding.json` — redacted finding and review metadata.
+- `evidence/` — redacted linked text evidence artifacts when safe to include.
+- `MANIFEST.json` — metadata, redacted paths, byte counts, and SHA-256 hashes of packaged content.
+"""
+
+
+def _zip_manifest_entry(archive_path: str, source: str, text: str) -> dict[str, Any]:
+    redacted = redact_secrets(text) or ""
+    encoded = redacted.encode("utf-8")
+    return _redacted_mapping({
+        "archive_path": archive_path,
+        "source": source,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    })
+
+
+def _zip_redacted_evidence_artifact(
+    archive: zipfile.ZipFile,
+    evidence_root: Path,
+    path_value: str,
+    source: str,
+    *,
+    max_bytes: int,
+    seen_resolved: set[Path],
+    skip_path: Path | None = None,
+) -> dict[str, Any]:
+    text_suffixes = {".json", ".jsonl", ".md", ".txt", ".log", ".http", ".csv", ".yaml", ".yml"}
+    display_source = redact_secrets(source) or source
+    display_path = redact_secrets(path_value) or path_value
+    try:
+        candidate = Path(path_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = evidence_root / candidate
+        resolved = candidate.resolve(strict=False)
+        if not _is_relative_to(resolved, evidence_root):
+            return {"source": display_source, "path": display_path, "reason": "artifact path resolves outside evidence root"}
+        if skip_path is not None and resolved == skip_path.resolve(strict=False):
+            return {"source": display_source, "path": display_path, "reason": "output bundle skipped"}
+        if not resolved.exists():
+            return {"source": display_source, "path": display_path, "reason": "artifact missing"}
+        if not resolved.is_file():
+            return {"source": display_source, "path": display_path, "reason": "artifact is not a regular file"}
+        if resolved in seen_resolved:
+            return {"source": display_source, "path": display_path, "reason": "duplicate artifact"}
+        size = resolved.stat().st_size
+        if size > max_bytes:
+            return {"source": display_source, "path": display_path, "bytes": size, "reason": f"larger than max_bytes={max_bytes}"}
+        if resolved.suffix.lower() not in text_suffixes:
+            return {"source": display_source, "path": display_path, "bytes": size, "reason": "non-text artifact omitted from redacted finding bundle"}
+        raw = resolved.read_text(encoding="utf-8", errors="replace")
+        redacted = redact_secrets(raw) or ""
+        rel = resolved.relative_to(evidence_root).as_posix()
+        arcname = f"evidence/{rel}"
+        archive.writestr(arcname, redacted)
+        seen_resolved.add(resolved)
+        encoded = redacted.encode("utf-8")
+        return _redacted_mapping({
+            "archive_path": arcname,
+            "source": display_source,
+            "source_path": rel,
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        })
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"source": display_source, "path": display_path, "reason": f"artifact could not be safely packaged: {exc}"}
 
 
 def _scoped_artifact_output_path(evidence_root: Path, subdir: str, out_arg: str, default_name: str, *, suffix: str | None = None) -> Path:

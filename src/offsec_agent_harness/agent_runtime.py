@@ -301,6 +301,8 @@ class OffSecAgentRuntime:
             "finding-export": "finding_export",
             "finding-review": "finding_review",
             "finding-qa": "finding_review",
+            "finding-bundle": "finding_bundle",
+            "finding-package": "finding_bundle",
             "remember": "remember",
             "recall": "recall",
             "memories": "list_memories",
@@ -656,7 +658,7 @@ def _render_tools_chat(runtime: OffSecAgentRuntime) -> str:
         "- `/status` — engagement, scope, approvals, tasks, findings.",
         "- `/nmap target=<host> ports=80,443 execute=false` — safe service-enum wrapper.",
         "- `/httpx url=<url> execute=false` / `/nuclei url=<url> template=<path> execute=false` — web evidence wrappers.",
-        "- `/finding-create ...`, `/finding-review id=<id>`, and `/findings status=all` — finding lifecycle and QA.",
+        "- `/finding-create ...`, `/finding-review id=<id>`, `/finding-bundle id=<id>`, and `/findings status=all` — finding lifecycle, QA, and handoff packaging.",
         "- `/timeline`, `/manifest`, and `/closeout` — redacted chronology, SHA-256 inventory, and closeout readiness review for handoff/report reconstruction.",
         "- `/briefing` — operator handoff with tasks, approvals, evidence, and context.",
         "- `/approvals` — pending confirm-gated actions.",
@@ -932,6 +934,7 @@ HELP_TEXT = """Phobos Agent commands:
 /finding-get id=<finding-id>
 /finding-export id=<finding-id> out=<optional.md>
 /finding-review id=<finding-id> out=<optional.md>
+/finding-bundle id=<finding-id> out=<optional.zip>
 /subagents prompt=<task> roles=scope,safety,evidence,impact,cve,report
 /delegate prompt=<task> roles=scope,safety,report
 /delegations limit=20

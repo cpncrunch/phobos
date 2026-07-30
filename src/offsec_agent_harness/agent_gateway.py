@@ -256,6 +256,23 @@ class AgentGateway:
                             return
                         _write_json(self, runtime.registry.run("get_finding", {"id": finding_id}).to_dict())
                         return
+                    if path in {"/finding-bundle", "/finding-package"}:
+                        query = parse_qs(parsed.query)
+                        finding_id = (query.get("id") or query.get("finding_id") or [""])[0]
+                        if not finding_id:
+                            _write_json(self, {"error": "id is required"}, status=400)
+                            return
+                        args: dict[str, Any] = {"id": finding_id}
+                        if (query.get("out") or [""])[0]:
+                            args["out"] = (query.get("out") or [""])[0]
+                        if (query.get("max_bytes") or [""])[0]:
+                            try:
+                                args["max_bytes"] = int((query.get("max_bytes") or [2000000])[0])
+                            except ValueError:
+                                _write_json(self, {"error": "max_bytes must be an integer"}, status=400)
+                                return
+                        _write_json(self, runtime.registry.run("finding_bundle", args).to_dict())
+                        return
                     if path == "/tool-runs":
                         query = parse_qs(parsed.query)
                         args: dict[str, Any] = {"limit": int((query.get("limit") or [50])[0])}
@@ -443,6 +460,8 @@ def _gateway_paths() -> list[str]:
         "/task-detail",
         "/findings",
         "/finding-detail",
+        "/finding-bundle",
+        "/finding-package",
         "/tool-runs",
         "/tool-run",
         "/tool-run-detail",
