@@ -89,6 +89,38 @@ class SmokeFallbackToolPlanAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response without tool plan")
 
 
+class SmokeToolCallContextAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-context"
+
+    def __init__(self):
+        self.contexts: list[str] = []
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.contexts.append(context)
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        saw_context = "planning-context-smoke" in context and "app.example.test" in context
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "smoke native planner used bounded runtime context",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-context-smoke", "value": "planner saw redacted runtime context" if saw_context else "planner context missing"},
+                        "reason": "safe local memory proves model planner received runtime context",
+                    }
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-context-smoke", "native_tool_calls": False, "native_tool_call_count": 0, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeToolCallAllowedExecutionAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-allowed-execution"
 
@@ -1165,6 +1197,78 @@ def main(argv: list[str] | None = None) -> int:
             and "No registry results were recorded" in native_plan_transcript
             and "auto_plan_preview" in plan_audit_events
             and "native-plan-secret" not in native_plan + native_plan_transcript + json.dumps(plan_audit_events)
+        )
+
+        native_context_adapter = SmokeToolCallContextAdapter()
+        native_context_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-context.db"),
+                session_name="native-tool-context-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=native_context_adapter,
+        )
+        try:
+            native_context_message_id = native_context_runtime.store.append_message(
+                native_context_runtime.session_id,
+                "user",
+                "prior planning-context-smoke note token=context-smoke-message-secret",
+            )
+            native_context_runtime.registry.run(
+                "remember",
+                {"key": "planning-context-smoke", "value": "memory detail token=context-smoke-memory-secret", "tags": "native-context"},
+            )
+            native_context_runtime.registry.run(
+                "add_task",
+                {"content": "follow planning-context-smoke task token=context-smoke-task-secret", "status": "pending"},
+            )
+            native_context_runtime.store.create_context_summary(
+                native_context_runtime.session_id,
+                native_context_message_id,
+                native_context_message_id,
+                "summary includes planning-context-smoke token=context-smoke-summary-secret",
+            )
+            native_context_plan = native_context_runtime.handle_message('/auto model=true prompt="use runtime context for native planning smoke"')
+            native_context_plan_payload = json.loads(native_context_plan.split("\n", 1)[1])
+            native_context_apply = native_context_runtime.handle_message('/auto apply=true model=true prompt="use runtime context for native planning smoke"')
+            native_context_apply_payload = json.loads(native_context_apply.split("\n", 1)[1])
+            native_context_recall = native_context_runtime.handle_message('/recall query=native-context-smoke')
+            native_context_text = native_context_adapter.contexts[-1] if native_context_adapter.contexts else ""
+            write("native-tool-context-handoff.json", redact_secrets(json.dumps({
+                "plan": native_context_plan_payload,
+                "apply": native_context_apply_payload,
+                "context_excerpt": native_context_text[:3000],
+                "seen_tool_names": native_context_adapter.seen_tool_names,
+                "recall": native_context_recall,
+            }, indent=2, sort_keys=True)) or "{}")
+        finally:
+            native_context_runtime.close()
+        native_context_metadata = native_context_plan_payload.get("metadata", {}) if isinstance(native_context_plan_payload.get("metadata"), dict) else {}
+        native_context_blob = json.dumps({
+            "plan": native_context_plan_payload,
+            "apply": native_context_apply_payload,
+            "context": native_context_text,
+            "recall": native_context_recall,
+        }, sort_keys=True)
+        native_context_leaks = [
+            "context-smoke-message-secret",
+            "context-smoke-memory-secret",
+            "context-smoke-task-secret",
+            "context-smoke-summary-secret",
+        ]
+        checks["native_tool_call_context_handoff_ok"] = (
+            native_context_plan_payload.get("mode") == "plan_only"
+            and native_context_metadata.get("context_provided") is True
+            and int(native_context_metadata.get("context_chars", 0) or 0) > 100
+            and "planning-context-smoke" in native_context_text
+            and "app.example.test" in native_context_text
+            and "approval_control_tools_omitted_from_model_specs" in native_context_text
+            and "approve" not in native_context_adapter.seen_tool_names
+            and "deny" not in native_context_adapter.seen_tool_names
+            and [item.get("result", {}).get("status") for item in native_context_apply_payload.get("results", [])] == ["ok"]
+            and "planner saw redacted runtime context" in native_context_recall
+            and all(leak not in native_context_blob for leak in native_context_leaks)
         )
 
         native_fallback_marker = root / "native-fallback-should-not-run.txt"

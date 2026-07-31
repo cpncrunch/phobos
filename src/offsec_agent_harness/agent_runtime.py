@@ -605,9 +605,76 @@ class OffSecAgentRuntime:
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         return validated_model
 
+    def _model_tool_plan_context(self, prompt: str) -> str:
+        """Build bounded, redacted runtime context for model/native tool-call planning.
+
+        Tool schemas are passed separately to adapters.  This context gives a
+        native planner enough local state to choose useful next tool calls while
+        preserving the same safety boundary: no dispatch, approval queueing, or
+        target activity happens while this context is assembled.
+        """
+
+        try:
+            memories = self.store.recall(prompt, limit=5) if prompt.strip() else []
+        except Exception:
+            memories = []
+        try:
+            recent_messages = self.store.recent_messages(self.session_id, limit=min(max(int(self.config.max_context_messages), 1), 12))
+        except Exception:
+            recent_messages = []
+        try:
+            latest_summary = self.store.latest_context_summary(self.session_id)
+        except Exception:
+            latest_summary = None
+        try:
+            tasks = self.store.list_tasks(self.session_id, status="all", limit=12)
+        except Exception:
+            tasks = []
+        try:
+            pending_approvals = self.store.list_approvals(self.session_id, status="pending", limit=12)
+        except Exception:
+            pending_approvals = []
+        context_payload: dict[str, Any] = {
+            "purpose": (
+                "Bounded Phobos runtime context for model tool planning. Tool specs are supplied separately. "
+                "Do not claim execution; Phobos revalidates schemas, runtime policy, ROE, and approvals when a plan is applied."
+            ),
+            "engagement": {
+                "name": self.roe.name,
+                "authorized": self.roe.authorized,
+                "in_scope_targets": list(self.roe.in_scope_targets),
+                "allowed_techniques": list(self.roe.allowed_techniques),
+                "prohibited_techniques": list(self.roe.prohibited_techniques),
+                "testing_window": self.roe.testing_window,
+                "stop_conditions": list(self.roe.stop_conditions),
+                "safety_mode": self.roe.safety_mode,
+                "notes": self.roe.notes,
+            },
+            "runtime_policy": {
+                "blocked_tools": sorted(self.registry.blocked_tools),
+                "confirm_tools": sorted(self.registry.confirm_tools),
+                "approval_control_tools_omitted_from_model_specs": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
+                "command_execution_requires_operator_execute_true": True,
+            },
+            "latest_context_summary": latest_summary or {},
+            "recent_messages": recent_messages,
+            "relevant_memories": memories,
+            "tasks": tasks,
+            "pending_approvals": pending_approvals,
+            "loaded_skills": [
+                {"name": skill.name, "description": skill.description}
+                for skill in sorted(self.loaded_skills.values(), key=lambda item: item.name)
+            ],
+        }
+        text = json.dumps(_redact_runtime_value(context_payload), indent=2, sort_keys=True, default=str)
+        if len(text) > 12000:
+            text = text[:12000] + "\n...[model tool-plan context truncated]"
+        return "Phobos model tool-call planning context:\n" + text
+
     def _plan_actions_with_model(self, prompt: str, *, allow_command_execution: bool) -> AgentPlan:
         specs = [spec.to_dict() for spec in self.registry.specs() if spec.name not in _MODEL_PLANNER_APPROVAL_ACTION_TOOLS]
-        response = self.adapter.generate_tool_plan(prompt, specs, allow_command_execution=allow_command_execution)
+        context = self._model_tool_plan_context(prompt)
+        response = self.adapter.generate_tool_plan(prompt, specs, allow_command_execution=allow_command_execution, context=context)
         parsed = _extract_json_object(response.content)
         calls: list[PlannedToolCall] = []
         rejected: list[dict[str, Any]] = []
@@ -639,13 +706,15 @@ class OffSecAgentRuntime:
                 tool_args["execute"] = False
                 warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
             calls.append(PlannedToolCall(tool=tool, args=tool_args, reason=str(item.get("reason") or "Model planner selected this tool.")))
+        metadata = _model_plan_metadata(response)
+        metadata.update({"context_provided": bool(context), "context_chars": len(context)})
         return AgentPlan(
             prompt=prompt,
             summary=str(parsed.get("summary") or f"Model planned {len(calls)} tool call(s)."),
             tool_calls=calls,
             warnings=warnings,
             rejected_tool_calls=rejected,
-            metadata=_model_plan_metadata(response),
+            metadata=metadata,
         )
 
     def _execute_auto_loop(self, prompt: str, *, steps: int, execute: bool, use_model: bool) -> str:

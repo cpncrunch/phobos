@@ -254,6 +254,41 @@ class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolPlanContextAdapter(BaseModelAdapter):
+    provider = "fake-tool-plan-context"
+
+    def __init__(self):
+        self.contexts: list[str] = []
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.contexts.append(context)
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        saw_runtime_context = "planning-context-marker" in context and "app.example.test" in context
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "fake model used bounded runtime context for tool planning",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {
+                            "key": "native-context-handoff",
+                            "value": "model saw redacted runtime context" if saw_runtime_context else "model context missing",
+                        },
+                        "reason": "safe local memory proves planner context was delivered",
+                    }
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-context-tool-model", "native_tool_calls": False, "native_tool_call_count": 0, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def make_runtime(self, tmp: str) -> tuple[OffSecAgentRuntime, Path]:
         tmp_path = Path(tmp)
@@ -2560,6 +2595,77 @@ class AgentRuntimeTests(unittest.TestCase):
                 raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT data_json FROM audit_log").fetchall())
                 self.assertNotIn('"tool": "approve"', raw_audit)
                 self.assertNotIn('"tool": "deny"', raw_audit)
+            finally:
+                runtime.close()
+
+    def test_model_tool_planner_receives_bounded_redacted_runtime_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Context Handoff",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+                notes="ROE note token=context-roe-secret",
+            ).save(engagement)
+            adapter = FakeToolPlanContextAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-context",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                message_id = runtime.store.append_message(runtime.session_id, "user", "prior planning-context-marker note token=context-message-secret")
+                runtime.registry.run(
+                    "remember",
+                    {"key": "planning-context-marker", "value": "memory detail token=context-memory-secret", "tags": "native-context"},
+                )
+                runtime.registry.run(
+                    "add_task",
+                    {"content": "follow up planning-context-marker task token=context-task-secret", "status": "pending"},
+                )
+                runtime.store.create_context_summary(
+                    runtime.session_id,
+                    message_id,
+                    message_id,
+                    "summary includes planning-context-marker token=context-summary-secret",
+                )
+
+                planned = runtime.handle_message('/auto model=true prompt="use runtime context for native planning"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(payload["mode"], "plan_only")
+                self.assertEqual(payload["tool_calls"][0]["tool"], "remember")
+                metadata = payload.get("metadata", {})
+                self.assertTrue(metadata.get("context_provided"), metadata)
+                self.assertGreater(metadata.get("context_chars", 0), 100)
+                self.assertTrue(adapter.contexts)
+                context = adapter.contexts[-1]
+                self.assertIn("Phobos model tool-call planning context", context)
+                self.assertIn("planning-context-marker", context)
+                self.assertIn("app.example.test", context)
+                self.assertIn("approval_control_tools_omitted_from_model_specs", context)
+                self.assertNotIn("approve", adapter.seen_tool_names)
+                self.assertNotIn("deny", adapter.seen_tool_names)
+                for leaked in [
+                    "context-roe-secret",
+                    "context-message-secret",
+                    "context-memory-secret",
+                    "context-task-secret",
+                    "context-summary-secret",
+                ]:
+                    self.assertNotIn(leaked, context)
+                    self.assertNotIn(leaked, json.dumps(payload))
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="use runtime context for native planning"')
+                applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(applied_payload["results"][0]["result"]["status"], "ok")
+                recalled = runtime.handle_message('/recall query=native-context-handoff')
+                self.assertIn("model saw redacted runtime context", recalled)
             finally:
                 runtime.close()
 
