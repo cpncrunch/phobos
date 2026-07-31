@@ -1894,6 +1894,13 @@ class OffSecToolRegistry:
         media = self.store.list_media_artifacts(self.session_id, limit=100)
         tool_runs = self.store.list_tool_runs(self.session_id, limit=100)
         findings = self.store.list_findings(self.session_id, status="all", limit=100)
+        native_tool_calling = self.runtime_metadata.get("native_tool_calling") if isinstance(self.runtime_metadata, dict) else {}
+        native_tool_calling = dict(native_tool_calling) if isinstance(native_tool_calling, dict) else {}
+        native_tool_calling.update({
+            "transcript_counts": _auto_transcript_status_counts(self.harness.store.root),
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+        })
         data = {
             "session_id": self.session_id,
             "engagement": self.roe.to_dict(),
@@ -1912,6 +1919,7 @@ class OffSecToolRegistry:
             "open_findings": len([finding for finding in findings if finding["status"] not in {"resolved", "accepted-risk", "false-positive"}]),
             "processes": len(processes),
             "policy": {"blocked_tools": sorted(self.blocked_tools), "confirm_tools": sorted(self.confirm_tools)},
+            "native_tool_calling": _redacted_mapping(native_tool_calling),
             "evidence_root": str(self.harness.store.root),
         }
         return ToolResult("ok", "Runtime status assembled.", data)
@@ -3416,6 +3424,30 @@ def _auto_transcript_kind_from_path(path: Path, evidence_root: Path | None = Non
     if "/auto-loops/" in f"/{rel}" or Path(rel).name.startswith("auto-loop-"):
         return "loop"
     return "unknown"
+
+
+def _auto_transcript_status_counts(evidence_root: Path) -> dict[str, Any]:
+    """Count native transcript artifacts for /status without opening payloads."""
+
+    root = evidence_root.resolve(strict=False)
+    counts: dict[str, int] = {"plan": 0, "loop": 0}
+    skipped: dict[str, int] = {"plan": 0, "loop": 0}
+    for kind, directory in _auto_transcript_directories(evidence_root).items():
+        if kind not in counts:
+            continue
+        if not _is_relative_to(directory, root) or not directory.exists():
+            continue
+        for candidate in directory.glob("*.json"):
+            try:
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError):
+                skipped[kind] += 1
+                continue
+            if not _is_relative_to(resolved, directory) or resolved.suffix.lower() != ".json" or not resolved.is_file():
+                skipped[kind] += 1
+                continue
+            counts[kind] += 1
+    return {"plan": counts["plan"], "loop": counts["loop"], "skipped": skipped}
 
 
 def _auto_transcript_entries(evidence_root: Path, *, kind: str = "all", limit: int = 50) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

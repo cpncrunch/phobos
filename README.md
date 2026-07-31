@@ -305,6 +305,7 @@ This turns the harness into a standalone agent-style application with:
 - ROE-gated structured wrappers for `nmap`, `httpx`, `nuclei`, and `ffuf` that can either execute with explicit `execute=true` or parse captured output into durable, session-bound evidence artifacts; native model-planned scanner-wrapper calls are forced back to `execute=false` unless the operator supplied `/auto execute=true`; structured tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage; `nuclei_scan` requires an explicit operator-selected template path when executing so it never runs the broad default template set accidentally;
 - finding lifecycle records (`draft`, `needs-evidence`, `confirmed`, `resolved`, `accepted-risk`, `false-positive`) with session-bound evidence/tool-run links, deterministic QA/readiness reviews, Markdown export, per-finding evidence ZIP bundles, and field/evidence redaction before SQLite storage;
 - guarded deterministic `/auto` planning plus optional model-assisted planning that accepts either JSON content plans or OpenAI-compatible provider-native `tool_calls`/legacy `function_call` payloads through the configured provider fallback chain, plus bounded `/auto-loop`; native `apply`/`model`/`execute` slash flags parse explicit boolean values safely and reject ambiguous booleans or malformed step counts before planning/dispatch; model-proposed tool calls receive bounded redacted runtime context, are registry-name and JSON-schema validated before plan display or dispatch, include runtime-policy annotations for `confirm_tools`/`blocked_tools`, and use read-only guardrail previews for target-affecting calls before apply; approval-control tools are hidden from model specs and rejected if returned; confirm-gated native plans remain non-executed until direct `/approve` replay; one-shot plans and loops write redacted JSON/Markdown transcripts under `agent/auto-plans` and `agent/auto-loops`, feed redacted non-terminal results back between bounded steps, respect a terminal no-tool model response after feedback instead of re-planning deterministically from the original prompt, stop immediately on approval/block terminal results, and render chat/gateway summaries from the execution ledger instead of inferring that a tool or command ran;
+- `/status` includes a read-only native tool-calling safety contract: model-planning flags, max-step budget, plan-only/execute-required defaults, approval-control tools hidden from model specs, execution-capable/target-affecting tool classes, and local transcript counts without reading target systems or raw transcript contents;
 - a configurable Phobos assistant persona (`operator_name`, `assistant_style`) so natural-language replies sound like a concise pentest copilot instead of a raw harness log;
 - non-destructive-by-default command execution;
 - foreground and background process management, including `/wait`;
@@ -640,9 +641,10 @@ native_tool_call_plan_transcript_ok=True
 native_tool_call_context_handoff_ok=True
 native_tool_call_fallback_chain_ok=True
 native_tool_call_allowed_execution_ok=True
-native_tool_call_scanner_execute_boundary_ok=True
 native_tool_call_apply_transcript_ok=True
+native_tool_call_scanner_execute_boundary_ok=True
 native_tool_call_slash_flag_safety_ok=True
+native_tool_call_status_contract_ok=True
 native_openai_tool_call_adapter_ok=True
 native_provider_tool_call_edge_cases_ok=True
 native_tool_call_guardrail_approval_ok=True
@@ -650,8 +652,8 @@ native_tool_call_loop_approval_stop_ok=True
 native_tool_call_operator_approval_replay_ok=True
 native_tool_call_approval_action_guard_ok=True
 native_tool_call_runtime_policy_ok=True
-native_tool_call_feedback_loop_ok=True
 native_tool_call_terminal_no_tool_stop_ok=True
+native_tool_call_feedback_loop_ok=True
 native_tool_call_cumulative_feedback_ok=True
 native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
@@ -724,7 +726,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=425
+artifact_count=440
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

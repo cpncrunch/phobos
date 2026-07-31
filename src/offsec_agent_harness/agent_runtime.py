@@ -1017,6 +1017,17 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
         "base_url": _redact_url_userinfo(config.base_url or ""),
         "model_providers": providers,
         "bridges": bridges,
+        "native_tool_calling": {
+            "model_planning_enabled": bool(config.auto_model_planning),
+            "natural_auto_execute_enabled": bool(config.auto_execute_natural),
+            "max_auto_steps": int(config.max_auto_steps),
+            "plan_only_default": True,
+            "execution_requires_operator_execute_true": True,
+            "approval_control_tools_hidden_from_model": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
+            "execution_capable_tools": sorted(_EXECUTION_CAPABLE_TOOLS),
+            "target_affecting_tools": sorted(_TARGET_AFFECTING_PLANNED_TOOLS),
+            "transcript_dirs": ["agent/auto-plans", "agent/auto-loops"],
+        },
     }
 
 

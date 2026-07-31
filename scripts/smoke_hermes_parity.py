@@ -1612,6 +1612,7 @@ def main(argv: list[str] | None = None) -> int:
             native_flag_loop_payload = json.loads(native_flag_loop.split("\n", 1)[1])
             native_flag_dry_ledger = native_flag_dry_payload.get("execution_ledger", []) if isinstance(native_flag_dry_payload.get("execution_ledger"), list) else []
             native_flag_loop_ledger = native_flag_loop_payload.get("execution_ledger", []) if isinstance(native_flag_loop_payload.get("execution_ledger"), list) else []
+            native_flag_status = native_flag_runtime.registry.run("runtime_status", {}).to_dict()
             write("native-tool-slash-flag-safety.json", json.dumps({
                 "invalid_apply": native_flag_invalid_apply,
                 "invalid_execute": native_flag_invalid_execute,
@@ -1619,6 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
                 "invalid_steps": native_flag_invalid_steps,
                 "dry": native_flag_dry_payload,
                 "loop": native_flag_loop_payload,
+                "status": native_flag_status,
                 "marker_exists": native_flag_marker.exists(),
             }, indent=2, sort_keys=True))
         finally:
@@ -1638,6 +1640,24 @@ def main(argv: list[str] | None = None) -> int:
             and native_flag_loop_ledger[0].get("actual_command_or_process_activity") is False
             and not native_flag_marker.exists()
             and "native-flag-secret" not in native_flag_dry + native_flag_loop
+        )
+        native_status_data = native_flag_status.get("data", {}).get("native_tool_calling", {}) if isinstance(native_flag_status, dict) else {}
+        native_status_counts = native_status_data.get("transcript_counts", {}) if isinstance(native_status_data, dict) else {}
+        checks["native_tool_call_status_contract_ok"] = (
+            native_flag_status.get("status") == "ok"
+            and native_status_data.get("model_planning_enabled") is True
+            and native_status_data.get("natural_auto_execute_enabled") is False
+            and native_status_data.get("plan_only_default") is True
+            and native_status_data.get("execution_requires_operator_execute_true") is True
+            and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
+            and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
+            and "run_command" in native_status_data.get("execution_capable_tools", [])
+            and "nmap_scan" in native_status_data.get("target_affecting_tools", [])
+            and int(native_status_counts.get("plan", 0) or 0) >= 1
+            and int(native_status_counts.get("loop", 0) or 0) >= 1
+            and native_status_data.get("no_target_activity") is True
+            and native_status_data.get("raw_file_contents_emitted") is False
+            and "native-flag-secret" not in json.dumps(native_flag_status)
         )
 
         native_openai_captured = {}

@@ -3392,6 +3392,25 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("execution_counts", transcript_detail.get("data", {}).get("summary", {}))
                 self.assertNotIn("loop-secret", json.dumps(transcript_index) + json.dumps(transcript_detail))
 
+                runtime_status = runtime.registry.run("runtime_status", {})
+                self.assertEqual(runtime_status.status, "ok", runtime_status.to_dict())
+                native_status = runtime_status.data.get("native_tool_calling", {})
+                self.assertTrue(native_status.get("model_planning_enabled"), native_status)
+                self.assertFalse(native_status.get("natural_auto_execute_enabled"), native_status)
+                self.assertTrue(native_status.get("plan_only_default"), native_status)
+                self.assertTrue(native_status.get("execution_requires_operator_execute_true"), native_status)
+                self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
+                self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
+                self.assertIn("run_command", native_status.get("execution_capable_tools", []))
+                self.assertIn("nmap_scan", native_status.get("target_affecting_tools", []))
+                transcript_counts = native_status.get("transcript_counts", {})
+                self.assertGreaterEqual(transcript_counts.get("plan", 0), 1)
+                self.assertGreaterEqual(transcript_counts.get("loop", 0), 1)
+                self.assertTrue(native_status.get("no_target_activity"))
+                self.assertFalse(native_status.get("raw_file_contents_emitted"))
+                self.assertIn('"native_tool_calling"', runtime.handle_message('/status'))
+                self.assertNotIn("loop-secret", json.dumps(runtime_status.to_dict()))
+
                 invalid_req = urllib.request.Request(
                     f"http://{host}:{port}/auto-loop",
                     data=json.dumps({"prompt": "bad steps", "steps": "1.5"}).encode("utf-8"),
