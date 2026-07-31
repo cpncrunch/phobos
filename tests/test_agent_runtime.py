@@ -18,7 +18,7 @@ from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfi
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse, OpenAICompatibleAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter
 
 
 class FakePlannerAdapter(BaseModelAdapter):
@@ -68,6 +68,54 @@ class FakeToolCallValidationAdapter(BaseModelAdapter):
                 }),
             )
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
+class FakeFailingToolPlanAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-primary-fails"
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        raise RuntimeError("primary native tool planner failed token=fallback-secret")
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        raise RuntimeError("generate() should not be used for fallback tool planning")
+
+
+class FakeFallbackToolPlanAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-fallback"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+        self.seen_tool_names: list[str] = []
+        self.allow_seen: bool | None = None
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        self.allow_seen = allow_command_execution
+        command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('fallback-should-not-run', encoding='utf-8')\""
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "fallback provider produced native tool-call plan",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "fallback-native", "value": "fallback chain selected native tool plan"},
+                        "reason": "safe local memory proves fallback tool planning succeeded",
+                    },
+                    {
+                        "tool": "run_command",
+                        "args": {"target": "app.example.test", "purpose": "fallback native dry-run", "command": command, "execute": True},
+                        "reason": "command execution still requires explicit operator execute=true after fallback planning",
+                    },
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-fallback-tool-model", "native_tool_calls": True, "native_tool_call_count": 2, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response without tool plan")
 
 
 class FakeToolCallAllowedExecutionAdapter(BaseModelAdapter):
@@ -2207,6 +2255,60 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn("approve", tool_names)
                 self.assertNotIn("deny", tool_names)
                 self.assertFalse(dry_run_marker.exists())
+            finally:
+                runtime.close()
+
+    def test_model_tool_call_planning_uses_provider_fallback_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Tool Fallback",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "fallback-should-not-run.txt"
+            fallback_adapter = FakeFallbackToolPlanAdapter(marker)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-tool-fallback",
+                    auto_model_planning=True,
+                ),
+                adapter=FallbackModelAdapter([FakeFailingToolPlanAdapter(), fallback_adapter]),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="fallback native tool planning token=fallback-secret"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                metadata = payload.get("metadata", {})
+                self.assertEqual(payload["mode"], "plan_only")
+                self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                self.assertEqual(payload["tool_calls"][1]["args"]["execute"], False)
+                self.assertEqual(metadata.get("provider"), "fallback:fake-tool-call-fallback")
+                self.assertEqual(metadata.get("selected_provider"), "fake-tool-call-fallback")
+                self.assertTrue(metadata.get("tool_plan_fallback"))
+                self.assertTrue(metadata.get("native_tool_calls"))
+                self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                self.assertEqual(len(metadata.get("fallback_attempts", [])), 1)
+                self.assertIn("token=<REDACTED>", json.dumps(metadata.get("fallback_attempts")))
+                self.assertNotIn("fallback-secret", planned)
+                self.assertFalse(fallback_adapter.allow_seen)
+                self.assertIn("remember", fallback_adapter.seen_tool_names)
+                self.assertNotIn("approve", fallback_adapter.seen_tool_names)
+                self.assertNotIn("deny", fallback_adapter.seen_tool_names)
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="fallback native tool planning token=fallback-secret"')
+                applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(applied_payload["mode"], "applied")
+                self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                self.assertEqual(applied_payload.get("metadata", {}).get("provider"), "fallback:fake-tool-call-fallback")
+                self.assertFalse(marker.exists())
+                recall = runtime.handle_message('/recall query=fallback-native')
+                self.assertIn("fallback chain selected native tool plan", recall)
+                self.assertNotIn("fallback-secret", applied + recall)
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
             finally:
                 runtime.close()
 

@@ -22,7 +22,7 @@ if str(SRC) not in sys.path:
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse, OpenAICompatibleAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter
 import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
 
@@ -47,6 +47,46 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
                 }),
             )
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
+class SmokeFailingToolPlanAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-primary-fails"
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        raise RuntimeError("primary smoke tool planner failed token=fallback-smoke-secret")
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        raise RuntimeError("generate() should not be used for native tool-call fallback smoke")
+
+
+class SmokeFallbackToolPlanAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-fallback"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+        self.seen_tool_names: list[str] = []
+        self.allow_seen: bool | None = None
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        self.allow_seen = allow_command_execution
+        command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('fallback-smoke-should-not-run', encoding='utf-8')\""
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "smoke fallback provider produced a native tool-call plan",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-fallback-smoke", "value": "native fallback chain selected tool planning"}, "reason": "prove fallback tool planning used the provider contract"},
+                    {"tool": "run_command", "args": {"target": "app.example.test", "purpose": "native fallback dry-run smoke", "command": command, "execute": True}, "reason": "fallback-planned command must still dry-run without operator execute=true"},
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-fallback-smoke", "native_tool_calls": True, "native_tool_call_count": 2, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response without tool plan")
 
 
 class SmokeToolCallAllowedExecutionAdapter(BaseModelAdapter):
@@ -1125,6 +1165,61 @@ def main(argv: list[str] | None = None) -> int:
             and "No registry results were recorded" in native_plan_transcript
             and "auto_plan_preview" in plan_audit_events
             and "native-plan-secret" not in native_plan + native_plan_transcript + json.dumps(plan_audit_events)
+        )
+
+        native_fallback_marker = root / "native-fallback-should-not-run.txt"
+        native_fallback_success = SmokeFallbackToolPlanAdapter(native_fallback_marker)
+        native_fallback_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-fallback.db"),
+                session_name="native-tool-fallback-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=FallbackModelAdapter([SmokeFailingToolPlanAdapter(), native_fallback_success]),
+        )
+        try:
+            native_fallback_plan = native_fallback_runtime.handle_message('/auto model=true prompt="native fallback tool planning token=fallback-smoke-secret"')
+            native_fallback_plan_payload = json.loads(native_fallback_plan.split("\n", 1)[1])
+            native_fallback_apply = native_fallback_runtime.handle_message('/auto apply=true model=true prompt="native fallback tool planning token=fallback-smoke-secret"')
+            native_fallback_apply_payload = json.loads(native_fallback_apply.split("\n", 1)[1])
+            native_fallback_recall = native_fallback_runtime.handle_message('/recall query=native-fallback-smoke')
+            write("native-tool-fallback-chain.json", json.dumps({
+                "plan": native_fallback_plan_payload,
+                "apply": native_fallback_apply_payload,
+                "seen_tool_names": native_fallback_success.seen_tool_names,
+                "allow_seen": native_fallback_success.allow_seen,
+                "marker_exists": native_fallback_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_fallback_runtime.close()
+        native_fallback_metadata = native_fallback_plan_payload.get("metadata", {}) if isinstance(native_fallback_plan_payload.get("metadata"), dict) else {}
+        native_fallback_blob = json.dumps({
+            "plan": native_fallback_plan_payload,
+            "apply": native_fallback_apply_payload,
+            "recall": native_fallback_recall,
+            "seen": native_fallback_success.seen_tool_names,
+        }, sort_keys=True)
+        native_fallback_calls = native_fallback_plan_payload.get("tool_calls", []) if isinstance(native_fallback_plan_payload.get("tool_calls"), list) else []
+        checks["native_tool_call_fallback_chain_ok"] = (
+            native_fallback_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_fallback_calls] == ["remember", "run_command"]
+            and len(native_fallback_calls) >= 2
+            and native_fallback_calls[1].get("args", {}).get("execute") is False
+            and native_fallback_metadata.get("provider") == "fallback:smoke-tool-call-fallback"
+            and native_fallback_metadata.get("selected_provider") == "smoke-tool-call-fallback"
+            and native_fallback_metadata.get("tool_plan_fallback") is True
+            and native_fallback_metadata.get("native_tool_calls") is True
+            and len(native_fallback_metadata.get("fallback_attempts", [])) == 1
+            and "token=<REDACTED>" in json.dumps(native_fallback_metadata.get("fallback_attempts"))
+            and [item.get("result", {}).get("status") for item in native_fallback_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and "native fallback chain selected tool planning" in native_fallback_recall
+            and native_fallback_success.allow_seen is False
+            and "remember" in native_fallback_success.seen_tool_names
+            and "approve" not in native_fallback_success.seen_tool_names
+            and "deny" not in native_fallback_success.seen_tool_names
+            and not native_fallback_marker.exists()
+            and "fallback-smoke-secret" not in native_fallback_blob
         )
 
         native_allowed_marker = root / "native-allowed-execution-ran.txt"

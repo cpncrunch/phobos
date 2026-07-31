@@ -24,15 +24,19 @@ class AgentPlan:
     tool_calls: list[PlannedToolCall] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     rejected_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "prompt": self.prompt,
             "summary": self.summary,
             "tool_calls": [call.to_dict() for call in self.tool_calls],
             "warnings": self.warnings,
             "rejected_tool_calls": self.rejected_tool_calls,
         }
+        if self.metadata:
+            data["metadata"] = self.metadata
+        return data
 
 
 COMMANDISH_PREFIXES = ("assess", "evaluate", "check", "run", "execute", "start", "background")

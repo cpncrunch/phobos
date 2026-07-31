@@ -571,7 +571,14 @@ class OffSecAgentRuntime:
                     warnings.append(f"Planned tool {tool} will be blocked by guardrails if applied.")
             validation_payload.update({"status": "ok", "schema_validated": True, "runtime_policy": runtime_policy})
             validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload))
-        return AgentPlan(prompt=plan.prompt, summary=plan.summary, tool_calls=validated_calls, warnings=warnings, rejected_tool_calls=rejected)
+        return AgentPlan(
+            prompt=plan.prompt,
+            summary=plan.summary,
+            tool_calls=validated_calls,
+            warnings=warnings,
+            rejected_tool_calls=rejected,
+            metadata=dict(plan.metadata or {}),
+        )
 
     def _plan_actions(self, prompt: str, *, allow_command_execution: bool, use_model: bool) -> AgentPlan:
         deterministic = plan_agent_actions(prompt, allow_command_execution=allow_command_execution)
@@ -580,18 +587,21 @@ class OffSecAgentRuntime:
         try:
             model_plan = self._plan_actions_with_model(prompt, allow_command_execution=allow_command_execution)
         except Exception as exc:
-            deterministic.warnings.append(f"Model planner failed; deterministic planner used: {exc}")
+            safe_error = redact_secrets(str(exc)) or exc.__class__.__name__
+            deterministic.warnings.append(f"Model planner failed; deterministic planner used: {safe_error}")
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         if not model_plan.tool_calls:
             if deterministic.tool_calls:
                 deterministic.warnings.extend(model_plan.warnings)
                 deterministic.rejected_tool_calls.extend(model_plan.rejected_tool_calls)
+                deterministic.metadata = _merge_plan_metadata(deterministic.metadata, model_plan.metadata)
                 return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
             return self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
         validated_model = self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
         if not validated_model.tool_calls and deterministic.tool_calls:
             deterministic.warnings.extend(validated_model.warnings)
             deterministic.rejected_tool_calls.extend(validated_model.rejected_tool_calls)
+            deterministic.metadata = _merge_plan_metadata(deterministic.metadata, validated_model.metadata)
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         return validated_model
 
@@ -635,6 +645,7 @@ class OffSecAgentRuntime:
             tool_calls=calls,
             warnings=warnings,
             rejected_tool_calls=rejected,
+            metadata=_model_plan_metadata(response),
         )
 
     def _execute_auto_loop(self, prompt: str, *, steps: int, execute: bool, use_model: bool) -> str:
@@ -747,6 +758,49 @@ def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecTool
         }
     except Exception as exc:  # defensive preview boundary; execution path still revalidates
         return {"status": "error", "error": redact_secrets(str(exc)) or "guardrail preview failed"}
+
+
+def _model_plan_metadata(response: Any) -> dict[str, Any]:
+    """Return redacted model-planner metadata safe for auto transcripts.
+
+    This intentionally whitelists provider/fallback/native-tool-call metadata
+    rather than embedding an adapter's arbitrary raw response.  Base URLs,
+    request headers, prompt bodies, and provider payloads stay out of transcripts.
+    """
+
+    raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
+    metadata: dict[str, Any] = {"planner": "model", "provider": str(getattr(response, "provider", ""))}
+    for key in (
+        "selected_provider",
+        "tool_plan_fallback",
+        "native_tool_calls",
+        "native_tool_call_count",
+        "rejected_native_tool_call_count",
+        "model",
+    ):
+        if key in raw:
+            metadata[key] = raw.get(key)
+    attempts = raw.get("fallback_attempts")
+    if isinstance(attempts, list):
+        safe_attempts = []
+        for item in attempts[:8]:
+            if not isinstance(item, dict):
+                continue
+            safe_attempts.append({
+                "provider": str(item.get("provider") or ""),
+                "error": redact_secrets(str(item.get("error") or "")) or "",
+            })
+        metadata["fallback_attempts"] = safe_attempts
+    return _redact_runtime_value(metadata)
+
+
+def _merge_plan_metadata(base: dict[str, Any] | None, extra: dict[str, Any] | None) -> dict[str, Any]:
+    if not base:
+        return dict(extra or {})
+    merged = dict(base)
+    if extra:
+        merged["model_planner"] = dict(extra)
+    return merged
 
 
 

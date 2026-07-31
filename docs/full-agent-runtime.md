@@ -12,7 +12,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. Tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle records:** `/finding-create`, `/finding-update`, `/finding-get`, `/findings`, `/finding-export`, `/finding-review`, and `/finding-bundle` persist, review, export, and package candidate/reportable findings. Scanner-imported evidence stays candidate/non-reportable until the operator moves a finding to `confirmed`, `resolved`, or `accepted-risk`. Finding fields and evidence refs are redacted before SQLite storage; finding bundles include only redacted generated files plus safely linked text evidence.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
-- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted planning accepts either JSON content plans from adapters or OpenAI-compatible provider-native `tool_calls`, and `/auto-loop` remains bounded, registry-filtered, schema-validated before plan display/dispatch/approval queueing, and never bypasses ROE or runtime tool policy. Native `apply`/`model`/`execute` slash flags parse explicit `on`/`off`/`true`/`false` values safely and reject ambiguous booleans or malformed step counts before planning/dispatch. Target-affecting model-proposed calls include read-only guardrail preview metadata (`allow`/`confirm`/`block`) before apply; apply still re-runs the normal guardrails and queues or blocks as required. Approval-control tools (`approve`/`deny`) are omitted from model tool specs and rejected if a provider returns them anyway, so queued confirmations require explicit direct operator commands rather than autonomous model replay. Invalid model-proposed calls are omitted from execution and surfaced in a redacted `rejected_tool_calls` transcript field. Plan-only `/auto` previews write redacted JSON/Markdown transcripts under `agent/auto-plans` with `no_tools_executed=true`, while applied one-shot `/auto` plans use the same transcript directory and chat summaries report execution-ledger counts instead of inferring execution from planned tool names. Applied plans and model auto-loops include a redacted `execution_ledger` that explicitly separates actual command/process activity from dry-runs, approval queues, blocks, handler errors, and local-only tool completions; explicitly allowed execution is claimable only when the registry returns an executed/started result. Model auto-loops feed redacted tool results back into the next planning step, stop with explicit reasons such as `no_tool_calls`, `duplicate_plan`, or `max_steps`, audit the loop, and write redacted JSON/Markdown transcripts under `agent/auto-loops`.
+- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted planning accepts either JSON content plans from adapters or OpenAI-compatible provider-native `tool_calls` through the configured provider fallback chain, and `/auto-loop` remains bounded, registry-filtered, schema-validated before plan display/dispatch/approval queueing, and never bypasses ROE or runtime tool policy. Native `apply`/`model`/`execute` slash flags parse explicit `on`/`off`/`true`/`false` values safely and reject ambiguous booleans or malformed step counts before planning/dispatch. Target-affecting model-proposed calls include read-only guardrail preview metadata (`allow`/`confirm`/`block`) before apply; apply still re-runs the normal guardrails and queues or blocks as required. Approval-control tools (`approve`/`deny`) are omitted from model tool specs and rejected if a provider returns them anyway, so queued confirmations require explicit direct operator commands rather than autonomous model replay. Invalid model-proposed calls are omitted from execution and surfaced in a redacted `rejected_tool_calls` transcript field. Plan-only `/auto` previews write redacted JSON/Markdown transcripts under `agent/auto-plans` with `no_tools_executed=true`, while applied one-shot `/auto` plans use the same transcript directory and chat summaries report execution-ledger counts instead of inferring execution from planned tool names. Applied plans and model auto-loops include a redacted `execution_ledger` that explicitly separates actual command/process activity from dry-runs, approval queues, blocks, handler errors, and local-only tool completions; explicitly allowed execution is claimable only when the registry returns an executed/started result. Model auto-loops feed redacted tool results back into the next planning step, stop with explicit reasons such as `no_tool_calls`, `duplicate_plan`, or `max_steps`, audit the loop, and write redacted JSON/Markdown transcripts under `agent/auto-loops`; `/auto-transcripts`, `/auto-transcript`, and `auto-transcript:` local refs expose metadata-only transcript index/detail views without raw file contents.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles, auth status, preflight, and guardrail self-tests:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report; `/guardrail-test` writes a redacted Markdown simulation report under `agent/guardrails/`.
 - **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start. Approval args/results are redacted before SQLite storage; if redaction changed the queued arguments, replay is blocked so the operator can re-submit fresh execution input instead of running an altered command. Approval lookup and resolution helpers accept the active `session_id`, so future gateway/CLI replay surfaces inherit the same ownership boundary instead of relying on caller-side filtering.
@@ -22,7 +22,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, `/process-detail`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts and redacted current-session drill-down views.
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; redacted session-bound detail/update/enable/disable controls; run via `phobos-agent run-due` or external cron.
 - **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail/completion paths, per-task artifacts, and child session records by default. Delegation prompts, task specs, results, and artifact metadata are redacted before SQLite storage.
-- **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order.
+- **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order for both natural responses and native/JSON tool-call planning, preserving fallback attempt metadata in redacted auto transcripts.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; stored/displayed paths and original names are redacted, `/media-list` lists metadata, and `/media-get` returns session-bound metadata without reading file contents.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/guardrail-test` writes redacted synthetic guardrail simulation reports under `agent/guardrails/`; `/timeline` creates a redacted Markdown evidence/action chronology; `/manifest` creates JSON/Markdown SHA-256 artifact inventories for chain-of-custody review; `/manifest-verify` writes JSON/Markdown verification reports comparing a prior manifest to current local artifacts; `/secret-scan` writes redacted JSON/Markdown evidence hygiene reports under `agent/secret-scans/`; `/closeout` reviews local ROE/preflight, approvals, tasks, findings, process state, tool runs, and artifact presence into a ready/review/blocked Markdown checklist with redacted local refs such as `approval:<id>`, `task:<id>`, `process:<id>`, `finding:<id>`, `tool-run:<id>`, and `artifact:<relative-agent-path>`; `/ref` resolves those refs using existing current-session detail handlers or evidence-root artifact metadata, never file contents; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
@@ -40,6 +40,8 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 /tool name=<tool_name> key=value ...
 /auto prompt=<natural request> apply=false execute=false model=false
 /auto-loop prompt=<goal> steps=5 execute=false model=false
+/auto-transcripts kind=plan|loop|all limit=50
+/auto-transcript path=agent/auto-loops/<file>.json max_ledger=20
 /plugins
 /skills
 /skill name=<skill-name>
@@ -698,7 +700,11 @@ GET  /media-artifact?id=<media-id>
 GET  /auth
 GET  /bridges
 GET  /guardrails
+GET  /auto-transcripts?kind=all&limit=50
+GET  /auto-transcript?path=agent/auto-loops/<file>.json&max_ledger=20
 GET  /audit
+POST /auto      {"prompt": "...", "apply": false, "execute": false, "model": false}
+POST /auto-loop {"prompt": "...", "steps": 5, "execute": false, "model": false}
 POST /message   {"message": "/tools"}
 POST /tool      {"name": "tool_name", "args": {}}
 POST /finding   {"title": "Finding title", "severity": "Medium", "description": "..."}
@@ -763,7 +769,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 65 tests
+Ran 66 tests
 OK
 ```
 
@@ -810,6 +816,7 @@ auto_memory_recall=True
 auto_loop_ok=True
 native_tool_call_plan_validation_ok=True
 native_tool_call_plan_transcript_ok=True
+native_tool_call_fallback_chain_ok=True
 native_tool_call_allowed_execution_ok=True
 native_tool_call_apply_transcript_ok=True
 native_tool_call_slash_flag_safety_ok=True
@@ -817,6 +824,7 @@ native_openai_tool_call_adapter_ok=True
 native_tool_call_guardrail_approval_ok=True
 native_tool_call_approval_action_guard_ok=True
 native_tool_call_feedback_loop_ok=True
+native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
 native_tool_call_gateway_chat_ok=True
 memory_hygiene_forget_ok=True
@@ -887,7 +895,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=385
+artifact_count=393
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

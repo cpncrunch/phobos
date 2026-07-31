@@ -12,6 +12,8 @@ import tempfile
 import urllib.error
 import urllib.request
 
+from .models import redact_secrets
+
 
 ROLE_SYSTEM_PROMPTS = {
     "assistant": "You are Phobos, a professional penetration-test assistant for authorized engagements. Speak naturally and directly. Help the operator turn vague findings into safe, evidence-backed next steps. Be concise by default, practical, and candid about uncertainty. Preserve ROE: never imply permission to exceed scope, never claim a tool ran unless the runtime/tool path actually ran it, and keep destructive, DoS, persistence, evasion, malware-like, or lockout-prone work blocked or approval-gated. Avoid boilerplate such as 'Phobos Agent response'.",
@@ -227,8 +229,48 @@ class FallbackModelAdapter(BaseModelAdapter):
                     raw=raw,
                 )
             except Exception as exc:  # pragma: no cover - provider failures depend on operator config
-                attempts.append({"provider": getattr(adapter, "provider", adapter.__class__.__name__), "error": str(exc)[:500]})
+                attempts.append({"provider": getattr(adapter, "provider", adapter.__class__.__name__), "error": _safe_error(exc)})
         raise RuntimeError("All model providers failed: " + json.dumps(attempts))
+
+    def generate_tool_plan(
+        self,
+        prompt: str,
+        tool_specs: list[dict[str, Any]],
+        *,
+        allow_command_execution: bool = False,
+        context: str = "",
+    ) -> ModelResponse:
+        """Try provider-native/JSON tool planning through each configured provider.
+
+        Tool planning must preserve the same fallback behavior as normal chat
+        generation.  Calling ``generate(...)`` here would bypass adapters that
+        implement provider-native tool calls, so each provider gets the full
+        ``generate_tool_plan(...)`` contract and the runtime still validates the
+        returned tool names, schemas, runtime policy, and ROE before dispatch.
+        """
+
+        attempts: list[dict[str, str]] = []
+        for adapter in self.adapters:
+            try:
+                response = adapter.generate_tool_plan(
+                    prompt,
+                    tool_specs,
+                    allow_command_execution=allow_command_execution,
+                    context=context,
+                )
+                raw = dict(response.raw or {})
+                raw["fallback_attempts"] = attempts
+                raw["selected_provider"] = response.provider
+                raw["tool_plan_fallback"] = True
+                return ModelResponse(
+                    provider=response.provider if len(self.adapters) == 1 else f"fallback:{response.provider}",
+                    role=response.role,
+                    content=response.content,
+                    raw=raw,
+                )
+            except Exception as exc:  # pragma: no cover - provider failures depend on operator config
+                attempts.append({"provider": getattr(adapter, "provider", adapter.__class__.__name__), "error": _safe_error(exc)})
+        raise RuntimeError("All model tool planners failed: " + json.dumps(attempts))
 
 
 def build_fallback_adapter(provider_configs: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> BaseModelAdapter:
@@ -271,6 +313,10 @@ def _is_local_base_url(base_url: str) -> bool:
 
 def _truncate(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[:limit] + "\n...[truncated]"
+
+
+def _safe_error(exc: Exception) -> str:
+    return (redact_secrets(str(exc)) or exc.__class__.__name__)[:500]
 
 
 def _tool_plan_prompt(prompt: str, tool_specs: list[dict[str, Any]], *, allow_command_execution: bool) -> str:
