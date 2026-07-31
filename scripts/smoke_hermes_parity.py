@@ -47,6 +47,33 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-feedback"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        if "Stored memory" in prompt:
+            payload = {"summary": "smoke feedback loop complete", "tool_calls": [], "warnings": []}
+        elif "Workspace file not found" in prompt:
+            payload = {
+                "summary": "smoke feedback recovered from a tool error",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-feedback-recovered", "value": "native feedback loop recovered"}, "reason": "record recovery after previous tool error"}
+                ],
+                "warnings": [],
+            }
+        else:
+            payload = {
+                "summary": "smoke first step deliberately returns a safe local tool error",
+                "tool_calls": [
+                    {"tool": "workspace_read", "args": {"path": "missing-native-feedback-smoke.txt"}, "reason": "exercise result feedback without target activity"}
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a harmless local Hermes-like parity smoke test for phobos-agent.")
     parser.add_argument("--out-root", default="demo-phobos-parity", help="Output directory to recreate under the repository root.")
@@ -972,6 +999,41 @@ def main(argv: list[str] | None = None) -> int:
             and native_apply_payload.get("mode") == "applied"
             and "dry_run" in [item.get("result", {}).get("status") for item in native_apply_payload.get("results", [])]
             and not pending_native_approvals_after_apply
+        )
+
+        feedback_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-tool-feedback-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallFeedbackAdapter(),
+        )
+        try:
+            feedback_loop = feedback_runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback smoke token=feedback-smoke-secret"')
+            feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
+            feedback_recall = feedback_runtime.handle_message('/recall query=native-feedback-recovered')
+            feedback_artifacts = feedback_payload.get("artifacts", {}) if isinstance(feedback_payload.get("artifacts"), dict) else {}
+            feedback_json_path = Path(feedback_artifacts.get("json", ""))
+            feedback_md_path = Path(feedback_artifacts.get("markdown", ""))
+            feedback_transcript = ""
+            if feedback_json_path.is_file():
+                feedback_transcript += feedback_json_path.read_text(encoding="utf-8")
+            if feedback_md_path.is_file():
+                feedback_transcript += feedback_md_path.read_text(encoding="utf-8")
+            write("native-tool-feedback-loop.txt", feedback_loop)
+            write("native-tool-feedback-transcript.txt", feedback_transcript)
+        finally:
+            feedback_runtime.close()
+        checks["native_tool_call_feedback_loop_ok"] = (
+            feedback_payload.get("stop_reason") == "no_tool_calls"
+            and feedback_payload.get("steps_executed") == 2
+            and feedback_payload.get("transcript_artifact_written") is True
+            and [item.get("result", {}).get("status") for step in feedback_payload.get("steps", []) for item in step.get("results", [])][:2] == ["error", "ok"]
+            and "native feedback loop recovered" in feedback_recall
+            and "Workspace file not found" in feedback_transcript
+            and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
         )
         hygiene_memory = runtime.registry.run("remember", {"key": "smoke-forget", "value": "Temporary memory hygiene marker token=supersecret", "tags": "hygiene"})
         hygiene_id = int(hygiene_memory.data.get("id", 0))

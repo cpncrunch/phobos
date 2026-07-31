@@ -10,7 +10,7 @@ import shlex
 from .agent_planner import AgentPlan, PlannedToolCall, plan_agent_actions
 from .agent_plugins import load_plugins
 from .agent_skills import LocalSkill, discover_skills, load_skill, render_loaded_skills
-from .agent_store import AgentStore
+from .agent_store import AgentStore, utc_now
 from .agent_tools import OffSecToolRegistry, ToolResult
 from .agent_bridges import BridgeConfig
 from .model_adapters import BaseModelAdapter, build_adapter, build_fallback_adapter
@@ -537,13 +537,16 @@ class OffSecAgentRuntime:
         current_prompt = prompt
         loop_results: list[dict[str, Any]] = []
         seen: set[str] = set()
+        stop_reason = "max_steps"
         for step in range(1, steps + 1):
             plan = self._plan_actions(current_prompt, allow_command_execution=execute, use_model=use_model)
             if not plan.tool_calls:
+                stop_reason = "no_tool_calls"
                 loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
                 break
             signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
             if all(signature in seen for signature in signatures):
+                stop_reason = "duplicate_plan"
                 loop_results.append(_redact_runtime_value({"step": step, "mode": "stopped_duplicate_plan", "plan": plan.to_dict()}))
                 break
             for signature in signatures:
@@ -554,9 +557,41 @@ class OffSecAgentRuntime:
                 step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict()}))
             loop_results.append(_redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results}))
             if not use_model:
+                stop_reason = "deterministic_plan_applied"
                 break
             current_prompt = prompt + "\n\nPrevious Phobos tool results:\n" + json.dumps(step_results, indent=2)[:8000] + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
-        return "Auto loop completed:\n" + json.dumps(_redact_runtime_value({"prompt": prompt, "steps_requested": steps, "execute": execute, "model": use_model, "steps": loop_results}), indent=2)[:12000]
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "steps_requested": steps,
+            "steps_executed": sum(1 for item in loop_results if item.get("mode") == "applied"),
+            "stop_reason": stop_reason,
+            "execute": execute,
+            "model": use_model,
+            "transcript_artifact_written": False,
+            "secret_values_redacted": True,
+            "steps": loop_results,
+        }
+        try:
+            artifacts = _write_auto_loop_artifacts(self.registry.harness.store.root, payload)
+            payload["artifacts"] = artifacts
+            payload["transcript_artifact_written"] = True
+        except Exception as exc:  # artifact failure should be visible but should not misreport tool results
+            payload["artifact_error"] = redact_secrets(str(exc)) or "auto-loop artifact write failed"
+        self.store.audit(
+            self.session_id,
+            "auto_loop",
+            {
+                "prompt_preview": prompt[:200],
+                "steps_requested": steps,
+                "steps_executed": payload["steps_executed"],
+                "stop_reason": stop_reason,
+                "execute": execute,
+                "model": use_model,
+                "artifacts": payload.get("artifacts", {}),
+                "transcript_artifact_written": payload.get("transcript_artifact_written", False),
+            },
+        )
+        return "Auto loop completed:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:12000]
 
     def _load_skill(self, name: str) -> LocalSkill:
         skill = load_skill(name, self.config.skill_dirs)
@@ -936,6 +971,98 @@ def _redact_runtime_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_redact_runtime_value(item) for item in value]
     return value
+
+
+def _write_auto_loop_artifacts(evidence_root: Path, payload: dict[str, Any]) -> dict[str, str]:
+    """Persist a redacted native tool-calling loop transcript under evidence/agent."""
+
+    root = evidence_root.resolve(strict=False)
+    out_dir = (evidence_root / "agent" / "auto-loops").resolve(strict=False)
+    if not _runtime_path_is_relative_to(out_dir, root):
+        raise ValueError("auto-loop artifact directory escapes the engagement evidence root")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+    json_path = out_dir / f"auto-loop-{stamp}.json"
+    markdown_path = out_dir / f"auto-loop-{stamp}.md"
+    artifacts = {"json": str(json_path), "markdown": str(markdown_path)}
+    redacted_payload = _redact_runtime_value({**payload, "artifacts": artifacts})
+    json_path.write_text(json.dumps(redacted_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    markdown_path.write_text(_auto_loop_markdown(redacted_payload), encoding="utf-8")
+    return artifacts
+
+
+def _auto_loop_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Phobos Native Tool-Calling Auto Loop",
+        "",
+        f"Generated: {utc_now()}",
+        f"Stop reason: `{payload.get('stop_reason', 'unknown')}`",
+        f"Steps executed: {payload.get('steps_executed', 0)} / {payload.get('steps_requested', 0)}",
+        f"Model planning: `{payload.get('model', False)}`",
+        f"Command execution enabled for loop: `{payload.get('execute', False)}`",
+        "Secret-like values redacted: `true`",
+        "",
+        "## Operator prompt",
+        "",
+        str(payload.get("prompt") or ""),
+        "",
+        "## Step transcript",
+        "",
+    ]
+    raw_steps = payload.get("steps")
+    steps: list[Any] = raw_steps if isinstance(raw_steps, list) else []
+    if not steps:
+        lines.append("- No steps were recorded.")
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        lines.extend([f"### Step {step.get('step', '?')} — {step.get('mode', 'unknown')}", ""])
+        raw_plan = step.get("plan")
+        plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
+        summary = str(plan.get("summary") or "").strip()
+        if summary:
+            lines.extend([f"Plan summary: {summary}", ""])
+        raw_calls = plan.get("tool_calls")
+        calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
+        if calls:
+            lines.append("Planned calls:")
+            for call in calls:
+                if isinstance(call, dict):
+                    raw_validation = call.get("validation")
+                    validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
+                    lines.append(
+                        f"- `{call.get('tool')}` — {call.get('reason', 'planned step')} "
+                        f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')})"
+                    )
+            lines.append("")
+        raw_rejected = plan.get("rejected_tool_calls")
+        rejected: list[Any] = raw_rejected if isinstance(raw_rejected, list) else []
+        if rejected:
+            lines.append("Rejected calls:")
+            for item in rejected:
+                if isinstance(item, dict):
+                    lines.append(f"- `{item.get('tool')}` — {item.get('reason')}")
+            lines.append("")
+        raw_results = step.get("results")
+        results: list[Any] = raw_results if isinstance(raw_results, list) else []
+        if results:
+            lines.append("Tool results:")
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                raw_result = item.get("result")
+                result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+                lines.append(f"- `{item.get('tool')}` -> `{result.get('status', 'unknown')}`: {result.get('message', '')}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _runtime_path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _format_result(result: ToolResult) -> str:

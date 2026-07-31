@@ -12,7 +12,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. Tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage. `nuclei_scan` requires an explicit operator-selected template path for execution so default template sets are never invoked accidentally.
 - **Finding lifecycle records:** `/finding-create`, `/finding-update`, `/finding-get`, `/findings`, `/finding-export`, `/finding-review`, and `/finding-bundle` persist, review, export, and package candidate/reportable findings. Scanner-imported evidence stays candidate/non-reportable until the operator moves a finding to `confirmed`, `resolved`, or `accepted-risk`. Finding fields and evidence refs are redacted before SQLite storage; finding bundles include only redacted generated files plus safely linked text evidence.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
-- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, schema-validated before plan display/dispatch/approval queueing, and never bypass ROE or runtime tool policy. Invalid model-proposed calls are omitted from execution and surfaced in a redacted `rejected_tool_calls` transcript field.
+- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; optional model-assisted JSON planning and `/auto-loop` are bounded, registry-filtered, schema-validated before plan display/dispatch/approval queueing, and never bypass ROE or runtime tool policy. Invalid model-proposed calls are omitted from execution and surfaced in a redacted `rejected_tool_calls` transcript field. Model auto-loops feed redacted tool results back into the next planning step, stop with explicit reasons such as `no_tool_calls`, `duplicate_plan`, or `max_steps`, audit the loop, and write redacted JSON/Markdown transcripts under `agent/auto-loops`.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles, auth status, preflight, and guardrail self-tests:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report; `/guardrail-test` writes a redacted Markdown simulation report under `agent/guardrails/`.
 - **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start. Approval args/results are redacted before SQLite storage; if redaction changed the queued arguments, replay is blocked so the operator can re-submit fresh execution input instead of running an altered command. Approval lookup and resolution helpers accept the active `session_id`, so future gateway/CLI replay surfaces inherit the same ownership boundary instead of relying on caller-side filtering.
@@ -763,7 +763,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 58 tests
+Ran 59 tests
 OK
 ```
 
@@ -808,6 +808,8 @@ guardrail_selftest_ok=True
 natural_response_polish_ok=True
 auto_memory_recall=True
 auto_loop_ok=True
+native_tool_call_plan_validation_ok=True
+native_tool_call_feedback_loop_ok=True
 memory_hygiene_forget_ok=True
 message_memory_context_media_storage_redaction_ok=True
 workspace_roundtrip_and_escape_block=True
@@ -876,7 +878,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=316
+artifact_count=324
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -1029,7 +1031,7 @@ This is now a real local Hermes-like offsec agent runtime, but it is still not a
 - Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
 - bridge media handling imports explicit local files and records remote platform attachment metadata, but does not blindly download remote attachments or transcribe voice/audio;
 - web UI is intentionally minimal and single-operator oriented, not a production multi-user console; remote/VPS use requires bearer-token auth plus TLS/reverse proxy, firewall, VPN, or SSH tunnel controls, and there is no RBAC/session management;
-- `/auto` has deterministic planning plus optional model-returned JSON plans, pre-dispatch name/schema validation, redacted rejected-call transcript entries, and a bounded `/auto-loop`, but it is not yet Hermes' full native function-calling autonomy or a general-purpose task computer;
+- `/auto` has deterministic planning plus optional model-returned JSON plans, pre-dispatch name/schema validation, redacted rejected-call transcript entries, and a bounded result-feedback `/auto-loop` with redacted transcript artifacts, but it is not yet Hermes' full native function-calling autonomy or a general-purpose task computer;
 - local `/delegate` persists batches, artifacts, and child session records, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
 - sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
 - Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;

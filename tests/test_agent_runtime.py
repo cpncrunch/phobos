@@ -70,6 +70,41 @@ class FakeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallFeedbackAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-feedback"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        if "Stored memory" in prompt:
+            payload = {"summary": "feedback loop complete", "tool_calls": [], "warnings": []}
+        elif "Workspace file not found" in prompt:
+            payload = {
+                "summary": "recover from the tool error with a safe local memory write",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "feedback-recovered", "value": "model feedback loop recovered after tool error"},
+                        "reason": "previous tool result was an error, so record the recovery marker",
+                    }
+                ],
+                "warnings": [],
+            }
+        else:
+            payload = {
+                "summary": "first try a safe local read that will produce a recoverable tool error",
+                "tool_calls": [
+                    {
+                        "tool": "workspace_read",
+                        "args": {"path": "missing-feedback-fixture.txt"},
+                        "reason": "safe local read used to exercise tool-result feedback",
+                    }
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def make_runtime(self, tmp: str) -> tuple[OffSecAgentRuntime, Path]:
         tmp_path = Path(tmp)
@@ -1955,6 +1990,49 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("dry_run", result_statuses)
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
                 self.assertFalse((tmp_path / "should-not-run").exists())
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_feeds_back_tool_errors_and_writes_redacted_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Feedback Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-feedback",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallFeedbackAdapter(),
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback loop token=feedback-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "no_tool_calls")
+                self.assertEqual(payload["steps_executed"], 2)
+                self.assertTrue(payload["transcript_artifact_written"])
+                statuses = [item["result"]["status"] for step in payload["steps"] for item in step.get("results", [])]
+                self.assertEqual(statuses[:2], ["error", "ok"])
+                self.assertNotIn("feedback-secret", json.dumps(payload))
+                recalled = runtime.handle_message('/recall query=feedback-recovered')
+                self.assertIn("model feedback loop recovered", recalled)
+                json_path = Path(payload["artifacts"]["json"])
+                md_path = Path(payload["artifacts"]["markdown"])
+                self.assertTrue(json_path.exists())
+                self.assertTrue(md_path.exists())
+                transcript = json_path.read_text(encoding="utf-8") + md_path.read_text(encoding="utf-8")
+                self.assertIn("Workspace file not found", transcript)
+                self.assertIn("feedback loop recovered", transcript)
+                self.assertNotIn("feedback-secret", transcript)
+                audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
+                self.assertIn("auto_loop", audit_events)
             finally:
                 runtime.close()
 
