@@ -1418,10 +1418,15 @@ def main(argv: list[str] | None = None) -> int:
                 native_plan_transcript += native_plan_md_path.read_text(encoding="utf-8")
             pending_native_approvals_after_plan = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
             plan_audit_events = [row["event"] for row in model_tool_runtime.store.list_audit(model_tool_runtime.session_id, limit=20)]
+            native_plan_detail = {"status": "missing"}
+            if native_plan_json_path.is_file():
+                native_plan_rel_json = native_plan_json_path.relative_to(model_tool_runtime.registry.harness.store.root).as_posix()
+                native_plan_detail = model_tool_runtime.registry.run("get_auto_transcript", {"path": native_plan_rel_json, "max_ledger": 5}).to_dict()
             native_apply = model_tool_runtime.handle_message('/auto apply=true model=true prompt="mixed native tool call plan token=native-plan-secret"')
             write("native-tool-call-plan.txt", native_plan)
             write("native-tool-call-plan-transcript.txt", native_plan_transcript)
             write("native-tool-call-apply.txt", native_apply)
+            write("native-tool-call-plan-detail.json", json.dumps(native_plan_detail, indent=2, sort_keys=True))
             native_apply_payload = json.loads(native_apply.split("\n", 1)[1])
             native_apply_ledger = native_apply_payload.get("execution_ledger", []) if isinstance(native_apply_payload.get("execution_ledger"), list) else []
             pending_native_approvals_after_apply = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
@@ -1450,9 +1455,28 @@ def main(argv: list[str] | None = None) -> int:
             and native_plan_md_path.is_file()
             and "Phobos Native Tool-Calling Auto Plan" in native_plan_transcript
             and "Mode: `plan_only`" in native_plan_transcript
+            and "Planner trace" in native_plan_transcript
+            and "provider=`smoke-tool-call-validation`" in native_plan_transcript
             and "No registry results were recorded" in native_plan_transcript
             and "auto_plan_preview" in plan_audit_events
             and "native-plan-secret" not in native_plan + native_plan_transcript + json.dumps(plan_audit_events)
+        )
+        native_plan_trace = native_plan_payload.get("planner_trace", []) if isinstance(native_plan_payload.get("planner_trace"), list) else []
+        native_apply_trace = native_apply_payload.get("planner_trace", []) if isinstance(native_apply_payload.get("planner_trace"), list) else []
+        native_plan_detail_summary = native_plan_detail.get("data", {}).get("summary", {}) if isinstance(native_plan_detail.get("data"), dict) else {}
+        checks["native_tool_call_one_shot_planner_trace_ok"] = (
+            native_plan_payload.get("planner_trace_count") == 1
+            and native_apply_payload.get("planner_trace_count") == 1
+            and len(native_plan_trace) == 1
+            and len(native_apply_trace) == 1
+            and native_plan_trace[0].get("provider") == "smoke-tool-call-validation"
+            and native_apply_trace[0].get("provider") == "smoke-tool-call-validation"
+            and native_plan_trace[0].get("tool_call_count") == 2
+            and native_plan_trace[0].get("rejected_tool_call_count") == 2
+            and native_plan_detail.get("status") == "ok"
+            and native_plan_detail_summary.get("planner_trace_count") == 1
+            and native_plan_detail_summary.get("planner_trace", [{}])[0].get("provider") == "smoke-tool-call-validation"
+            and "native-plan-secret" not in json.dumps(native_plan_trace + native_apply_trace) + json.dumps(native_plan_detail)
         )
 
         native_context_adapter = SmokeToolCallContextAdapter()
@@ -1783,6 +1807,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("execution_requires_operator_execute_true") is True
             and native_status_data.get("per_step_execution_ledger_delta") is True
             and native_status_data.get("per_step_planner_trace") is True
+            and native_status_data.get("one_shot_planner_trace") is True
             and native_status_data.get("planner_trace_redacted") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True

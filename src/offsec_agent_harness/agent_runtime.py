@@ -464,6 +464,9 @@ class OffSecAgentRuntime:
         safe_trigger = str(trigger or "slash_auto").strip() or "slash_auto"
         payload["trigger"] = safe_trigger
         payload["natural_auto_execute"] = safe_trigger == "natural_auto"
+        planner_trace = [_auto_loop_planner_trace_entry(1, plan)]
+        payload["planner_trace"] = planner_trace
+        payload["planner_trace_count"] = len(planner_trace)
         if not apply:
             payload["mode"] = "plan_only"
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
@@ -489,6 +492,12 @@ class OffSecAgentRuntime:
                     "natural_auto_execute": payload.get("natural_auto_execute", False),
                     "transcript_artifact_written": payload.get("transcript_artifact_written", False),
                     "artifacts": payload.get("artifacts", {}),
+                    "planner_trace_count": len(planner_trace),
+                    "planner_providers": [
+                        str(item.get("provider") or item.get("selected_provider") or "")
+                        for item in planner_trace
+                        if isinstance(item, dict) and str(item.get("provider") or item.get("selected_provider") or "").strip()
+                    ],
                     "no_tools_executed": True,
                 },
             )
@@ -527,6 +536,12 @@ class OffSecAgentRuntime:
                 "natural_auto_execute": payload.get("natural_auto_execute", False),
                 "transcript_artifact_written": payload.get("transcript_artifact_written", False),
                 "artifacts": payload.get("artifacts", {}),
+                "planner_trace_count": len(planner_trace),
+                "planner_providers": [
+                    str(item.get("provider") or item.get("selected_provider") or "")
+                    for item in planner_trace
+                    if isinstance(item, dict) and str(item.get("provider") or item.get("selected_provider") or "").strip()
+                ],
             },
         )
         return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)
@@ -1151,6 +1166,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "execution_requires_operator_execute_true": True,
             "per_step_execution_ledger_delta": True,
             "per_step_planner_trace": True,
+            "one_shot_planner_trace": True,
             "planner_trace_redacted": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
@@ -1754,9 +1770,29 @@ def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
         "",
         str(payload.get("prompt") or ""),
         "",
-        "## Execution ledger",
+        "## Planner trace",
         "",
     ]
+    raw_trace = payload.get("planner_trace")
+    planner_trace: list[Any] = raw_trace if isinstance(raw_trace, list) else []
+    if not planner_trace:
+        lines.append("- No planner trace entries were recorded.")
+    for item in planner_trace:
+        if not isinstance(item, dict):
+            continue
+        fallback_note = ""
+        if item.get("fallback_attempt_count") is not None:
+            fallback_note = f", fallback_attempts=`{item.get('fallback_attempt_count')}`"
+        lines.append(
+            f"- step=`{item.get('step')}` planner=`{item.get('planner')}` provider=`{item.get('provider')}` "
+            f"selected_provider=`{item.get('selected_provider')}` tool_calls=`{item.get('tool_call_count')}` "
+            f"rejected=`{item.get('rejected_tool_call_count')}` context_chars=`{item.get('context_chars', 0)}`{fallback_note}"
+        )
+    lines.extend([
+        "",
+        "## Execution ledger",
+        "",
+    ])
     raw_ledger = payload.get("execution_ledger")
     ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
     if not ledger:
