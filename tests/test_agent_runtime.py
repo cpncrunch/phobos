@@ -408,6 +408,46 @@ class FakeToolCallModelErrorAfterFeedbackAdapter(BaseModelAdapter):
         )
 
 
+class FakeToolCallInvalidAfterFeedbackAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-invalid-after-feedback"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "model proposed only invalid native tool calls after feedback",
+                    "tool_calls": [
+                        {"tool": "missing_tool", "args": {}, "reason": "unknown tools must not dispatch"},
+                        {"tool": "remember", "args": {"key": "invalid-plan-withheld"}, "reason": "missing required value must be rejected before dispatch"},
+                    ],
+                    "warnings": ["token=invalid-plan-secret should be redacted from transcripts"],
+                }),
+            )
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "first step writes a local marker before invalid model plan stop",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-invalid-plan-stop", "value": "native invalid plan first step ran"},
+                        "reason": "safe local marker proves the loop had feedback before invalid-plan stop",
+                    }
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallTerminalNoToolAdapter(BaseModelAdapter):
     provider = "fake-tool-call-terminal-no-tool"
 
@@ -3793,6 +3833,67 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("Native tool loop stopped: `model_error`", chat)
                 self.assertIn("Model tool planning failed", chat)
                 self.assertNotIn("model-error-secret", response + transcript + chat + recalled)
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_stops_on_invalid_plan_after_feedback_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Invalid Plan Stop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallInvalidAfterFeedbackAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-invalid-plan-stop",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native invalid plan stop token=invalid-plan-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "invalid_plan")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(payload.get("feedback_history_entries"), 1)
+                self.assertEqual(len(adapter.prompts), 2)
+                steps = payload.get("steps", [])
+                invalid_step = steps[-1]
+                self.assertEqual(invalid_step.get("mode"), "invalid_plan")
+                self.assertTrue(invalid_step.get("no_tools_executed"))
+                self.assertEqual(invalid_step.get("execution_ledger_delta"), [])
+                self.assertEqual(invalid_step.get("rejected_tool_call_count"), 2)
+                invalid_plan = invalid_step.get("plan", {})
+                self.assertEqual(invalid_plan.get("tool_calls"), [])
+                self.assertEqual(len(invalid_plan.get("rejected_tool_calls", [])), 2)
+                metadata = invalid_plan.get("metadata", {})
+                self.assertTrue(metadata.get("all_tool_calls_rejected"), metadata)
+                self.assertTrue(metadata.get("invalid_model_tool_plan"), metadata)
+                self.assertTrue(metadata.get("deterministic_fallback_suppressed"), metadata)
+                self.assertEqual(metadata.get("attempted_tool_call_count"), 2)
+                self.assertEqual(metadata.get("accepted_tool_call_count"), 0)
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(len(ledger), 1)
+                self.assertEqual(ledger[0]["execution_state"], "completed_without_command_execution")
+                self.assertFalse(ledger[0]["actual_command_or_process_activity"])
+                recalled = runtime.handle_message('/recall query=native-invalid-plan-stop')
+                self.assertIn("native invalid plan first step ran", recalled)
+                self.assertEqual(runtime.store.recall("invalid-plan-withheld", limit=5), [])
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Stop reason: `invalid_plan`", transcript)
+                self.assertIn("Invalid plan stop", transcript)
+                chat = runtime.render_chat_response(response, message='/auto-loop model=true prompt="native invalid plan stop"', platform="discord")
+                self.assertIn("Native tool loop stopped: `invalid_plan`", chat)
+                self.assertIn("invalid or rejected tool calls", chat)
+                self.assertNotIn("invalid-plan-secret", response + transcript + chat + recalled)
+                status = runtime.registry.run("runtime_status", {})
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("invalid_plan_stop_enforced"), status.to_dict())
             finally:
                 runtime.close()
 

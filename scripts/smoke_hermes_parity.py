@@ -351,6 +351,36 @@ class SmokeToolCallModelErrorAfterFeedbackAdapter(BaseModelAdapter):
         )
 
 
+class SmokeToolCallInvalidAfterFeedbackAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-invalid-after-feedback"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            payload = {
+                "summary": "smoke model proposed only invalid native calls after feedback",
+                "tool_calls": [
+                    {"tool": "not_a_real_tool", "args": {}, "reason": "unknown tool should be rejected before dispatch"},
+                    {"tool": "remember", "args": {"key": "native-invalid-withheld"}, "reason": "missing required value should be rejected before dispatch"},
+                ],
+                "warnings": ["token=invalid-plan-smoke-secret should be redacted"],
+            }
+        else:
+            payload = {
+                "summary": "smoke first step writes one marker before invalid plan stop",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-invalid-plan-stop", "value": "native invalid plan first step ran"}, "reason": "safe local marker proves feedback existed before invalid-plan stop"}
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 class SmokeToolCallTerminalNoToolAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-terminal-no-tool"
 
@@ -1813,6 +1843,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
             and native_status_data.get("model_error_stop_enforced") is True
+            and native_status_data.get("invalid_plan_stop_enforced") is True
             and native_status_data.get("provider_tool_result_echo_ignored") is True
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2674,6 +2705,38 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             model_error_runtime.close()
 
+        invalid_plan_adapter = SmokeToolCallInvalidAfterFeedbackAdapter()
+        invalid_plan_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-invalid-plan-stop.db"),
+                session_name="native-tool-invalid-plan-stop-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=invalid_plan_adapter,
+        )
+        try:
+            invalid_plan_loop = invalid_plan_runtime.handle_message('/auto-loop model=true steps=4 prompt="native invalid plan stop token=invalid-plan-smoke-secret"')
+            invalid_plan_payload = json.loads(invalid_plan_loop.split("\n", 1)[1])
+            invalid_plan_ledger = invalid_plan_payload.get("execution_ledger", []) if isinstance(invalid_plan_payload.get("execution_ledger"), list) else []
+            invalid_plan_steps = invalid_plan_payload.get("steps", []) if isinstance(invalid_plan_payload.get("steps"), list) else []
+            invalid_plan_step = invalid_plan_steps[-1] if invalid_plan_steps and isinstance(invalid_plan_steps[-1], dict) else {}
+            invalid_plan_plan = invalid_plan_step.get("plan") if isinstance(invalid_plan_step.get("plan"), dict) else {}
+            invalid_plan_metadata = invalid_plan_plan.get("metadata") if isinstance(invalid_plan_plan.get("metadata"), dict) else {}
+            invalid_plan_recall = invalid_plan_runtime.handle_message('/recall query=native-invalid-plan-stop')
+            invalid_plan_artifacts = invalid_plan_payload.get("artifacts", {}) if isinstance(invalid_plan_payload.get("artifacts"), dict) else {}
+            invalid_plan_transcript = ""
+            for path_value in [invalid_plan_artifacts.get("json"), invalid_plan_artifacts.get("markdown")]:
+                if path_value:
+                    invalid_plan_transcript += Path(str(path_value)).read_text(encoding="utf-8")
+            invalid_plan_chat = invalid_plan_runtime.render_chat_response(invalid_plan_loop, message='/auto-loop model=true prompt="native invalid plan stop"', platform="discord")
+            invalid_plan_status = invalid_plan_runtime.registry.run("runtime_status", {}).to_dict()
+            write("native-tool-invalid-plan-stop.txt", invalid_plan_loop)
+            write("native-tool-invalid-plan-stop-transcript.txt", invalid_plan_transcript)
+            write("native-tool-invalid-plan-stop-chat.txt", invalid_plan_chat)
+        finally:
+            invalid_plan_runtime.close()
+
         terminal_adapter = SmokeToolCallTerminalNoToolAdapter()
         terminal_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
@@ -2865,6 +2928,32 @@ def main(argv: list[str] | None = None) -> int:
             and "Native tool loop stopped: `model_error`" in model_error_chat
             and "Model tool planning failed" in model_error_chat
             and "model-error-smoke-secret" not in json.dumps(model_error_payload) + model_error_transcript + model_error_chat + model_error_recall
+        )
+        checks["native_tool_call_invalid_plan_stop_ok"] = (
+            invalid_plan_payload.get("stop_reason") == "invalid_plan"
+            and invalid_plan_payload.get("steps_executed") == 1
+            and invalid_plan_payload.get("feedback_history_entries") == 1
+            and len(invalid_plan_adapter.prompts) == 2
+            and invalid_plan_step.get("mode") == "invalid_plan"
+            and invalid_plan_step.get("no_tools_executed") is True
+            and invalid_plan_step.get("execution_ledger_delta") == []
+            and invalid_plan_step.get("rejected_tool_call_count") == 2
+            and invalid_plan_plan.get("tool_calls") == []
+            and len(invalid_plan_plan.get("rejected_tool_calls", [])) == 2
+            and invalid_plan_metadata.get("all_tool_calls_rejected") is True
+            and invalid_plan_metadata.get("invalid_model_tool_plan") is True
+            and invalid_plan_metadata.get("deterministic_fallback_suppressed") is True
+            and invalid_plan_metadata.get("attempted_tool_call_count") == 2
+            and invalid_plan_metadata.get("accepted_tool_call_count") == 0
+            and len(invalid_plan_ledger) == 1
+            and invalid_plan_ledger[0].get("execution_state") == "completed_without_command_execution"
+            and invalid_plan_ledger[0].get("actual_command_or_process_activity") is False
+            and "native invalid plan first step ran" in invalid_plan_recall
+            and "Invalid plan stop" in invalid_plan_transcript
+            and "Native tool loop stopped: `invalid_plan`" in invalid_plan_chat
+            and "invalid or rejected tool calls" in invalid_plan_chat
+            and invalid_plan_status.get("data", {}).get("native_tool_calling", {}).get("invalid_plan_stop_enforced") is True
+            and "invalid-plan-smoke-secret" not in json.dumps(invalid_plan_payload) + invalid_plan_transcript + invalid_plan_chat + invalid_plan_recall
         )
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"

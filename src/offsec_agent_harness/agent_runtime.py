@@ -558,6 +558,7 @@ class OffSecAgentRuntime:
         warnings = list(plan.warnings)
         rejected = list(plan.rejected_tool_calls)
         validated_calls: list[PlannedToolCall] = []
+        attempted_tool_call_count = len(plan.tool_calls)
         for call in plan.tool_calls:
             tool = str(call.tool or "").strip()
             args = dict(call.args) if isinstance(call.args, dict) else call.args
@@ -593,13 +594,21 @@ class OffSecAgentRuntime:
                     warnings.append(f"Planned tool {tool} will be blocked by guardrails if applied.")
             validation_payload.update({"status": "ok", "schema_validated": True, "runtime_policy": runtime_policy})
             validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload))
+        metadata = dict(plan.metadata or {})
+        if attempted_tool_call_count:
+            metadata["attempted_tool_call_count"] = attempted_tool_call_count
+            metadata["accepted_tool_call_count"] = len(validated_calls)
+            if not validated_calls:
+                metadata["all_tool_calls_rejected"] = True
+                if metadata.get("planner") == "model" or metadata.get("provider"):
+                    metadata["invalid_model_tool_plan"] = True
         return AgentPlan(
             prompt=plan.prompt,
             summary=plan.summary,
             tool_calls=validated_calls,
             warnings=warnings,
             rejected_tool_calls=rejected,
-            metadata=dict(plan.metadata or {}),
+            metadata=metadata,
         )
 
     def _plan_actions(
@@ -651,7 +660,11 @@ class OffSecAgentRuntime:
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         if not validated_model.tool_calls and not allow_deterministic_model_fallback:
             validated_model.metadata = dict(validated_model.metadata or {})
-            validated_model.metadata.update({"deterministic_fallback_suppressed": True, "terminal_no_tool_plan_respected": True})
+            validated_model.metadata["deterministic_fallback_suppressed"] = True
+            if validated_model.metadata.get("all_tool_calls_rejected"):
+                validated_model.metadata["invalid_model_tool_plan"] = True
+            else:
+                validated_model.metadata["terminal_no_tool_plan_respected"] = True
         return validated_model
 
     def _model_tool_plan_context(self, prompt: str) -> str:
@@ -796,6 +809,17 @@ class OffSecAgentRuntime:
                         "no_tools_executed": True,
                         "execution_ledger_delta": [],
                     }))
+                elif use_model and metadata.get("invalid_model_tool_plan") is True:
+                    stop_reason = "invalid_plan"
+                    loop_results.append(_redact_runtime_value({
+                        "step": step,
+                        "mode": "invalid_plan",
+                        "plan": plan.to_dict(),
+                        "planner_trace": trace_entry,
+                        "rejected_tool_call_count": len(plan.rejected_tool_calls),
+                        "no_tools_executed": True,
+                        "execution_ledger_delta": [],
+                    }))
                 else:
                     stop_reason = "no_tool_calls"
                     loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict(), "planner_trace": trace_entry}))
@@ -885,6 +909,10 @@ class OffSecAgentRuntime:
         elif stop_reason == "model_error":
             payload["next_step"] = (
                 "Model tool planning failed after prior tool feedback. Review the redacted transcript and provider health before rerunning."
+            )
+        elif stop_reason == "invalid_plan":
+            payload["next_step"] = (
+                "Model proposed only invalid or rejected tool calls after prior feedback. Review the rejected-call transcript before rerunning."
             )
         try:
             artifacts = _write_auto_loop_artifacts(self.registry.harness.store.root, payload)
@@ -990,6 +1018,10 @@ def _auto_loop_planner_trace_entry(step: int, plan: AgentPlan) -> dict[str, Any]
         "native_tool_calls": bool(metadata.get("native_tool_calls", False)),
         "native_tool_call_count": metadata_int("native_tool_call_count"),
         "rejected_native_tool_call_count": metadata_int("rejected_native_tool_call_count"),
+        "attempted_tool_call_count": metadata_int("attempted_tool_call_count"),
+        "accepted_tool_call_count": metadata_int("accepted_tool_call_count"),
+        "all_tool_calls_rejected": bool(metadata.get("all_tool_calls_rejected", False)),
+        "invalid_model_tool_plan": bool(metadata.get("invalid_model_tool_plan", False)),
         "tool_plan_fallback": bool(metadata.get("tool_plan_fallback", False)),
         "model_planner_failed": bool(metadata.get("model_planner_failed", False)),
         "deterministic_fallback_suppressed": bool(metadata.get("deterministic_fallback_suppressed", False)),
@@ -1172,6 +1204,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
             "model_error_stop_enforced": True,
+            "invalid_plan_stop_enforced": True,
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
                 "flat_tool_calls",
@@ -1947,6 +1980,11 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
             lines.extend([
                 f"Duplicate plan stop: {step.get('duplicate_tool_call_count', 0)} repeated tool+args call(s); "
                 f"new calls withheld={step.get('new_tool_call_count', 0)}; no tools were dispatched for this step.",
+                "",
+            ])
+        if step.get("mode") == "invalid_plan":
+            lines.extend([
+                f"Invalid plan stop: {step.get('rejected_tool_call_count', 0)} model-proposed call(s) were rejected before dispatch; no tools were dispatched for this step.",
                 "",
             ])
         raw_calls = plan.get("tool_calls")
