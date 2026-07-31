@@ -540,7 +540,7 @@ class OffSecAgentRuntime:
             tool = str(call.tool or "").strip()
             args = dict(call.args) if isinstance(call.args, dict) else call.args
             reason = str(call.reason or "Planned tool call.")
-            if tool in {"run_command", "start_process"} and isinstance(args, dict) and not allow_command_execution:
+            if tool in _EXECUTION_CAPABLE_TOOLS and isinstance(args, dict) and not allow_command_execution:
                 if bool(args.get("execute", False)):
                     warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
                 args = dict(args)
@@ -724,7 +724,7 @@ class OffSecAgentRuntime:
                 warnings.append(f"Model planner proposed {tool}; skipped because approval actions require direct operator control.")
                 rejected.append(_redact_runtime_value({"tool": tool, "reason": message, "args": tool_args}))
                 continue
-            if tool in {"run_command", "start_process"} and not allow_command_execution:
+            if tool in _EXECUTION_CAPABLE_TOOLS and not allow_command_execution:
                 tool_args = dict(tool_args)
                 tool_args["execute"] = False
                 warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")

@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
+import offsec_agent_harness.agent_tools as agent_tools_module
 from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter
 import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
@@ -146,6 +147,35 @@ class SmokeToolCallAllowedExecutionAdapter(BaseModelAdapter):
                                 "timeout": "5",
                             },
                             "reason": "prove native tool plans execute allowed commands only when execute=true is explicit",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
+class SmokeToolCallScannerExecutionAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-scanner-execution"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "smoke model proposed a scanner wrapper with execute=true",
+                    "tool_calls": [
+                        {
+                            "tool": "nmap_scan",
+                            "args": {
+                                "target": "app.example.test",
+                                "ports": "80",
+                                "profile": "quick",
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "scanner wrappers must obey the native tool-call execution boundary",
                         }
                     ],
                     "warnings": [],
@@ -1498,6 +1528,67 @@ def main(argv: list[str] | None = None) -> int:
             and "actual_command_or_process_activity=0" in native_allowed_bridge.response
             and "native-allowed-secret" not in native_allowed_transcript
             and "native-apply-secret" not in json.dumps(native_allowed_bridge.to_dict()) + native_allowed_transcript
+        )
+
+        native_scanner_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-scanner-execution.db"),
+                session_name="native-tool-scanner-execution-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallScannerExecutionAdapter(),
+        )
+        native_scanner_subprocess_calls: list[str] = []
+        original_scanner_run = agent_tools_module.subprocess.run
+
+        def blocked_scanner_run(*run_args, **run_kwargs):
+            native_scanner_subprocess_calls.append(repr(run_args[:1]))
+            raise AssertionError("scanner execution should stay dry-run without operator execute=true")
+
+        try:
+            native_scanner_plan = native_scanner_runtime.handle_message('/auto model=true prompt="native scanner execute boundary smoke token=native-scanner-secret"')
+            native_scanner_plan_payload = json.loads(native_scanner_plan.split("\n", 1)[1])
+            native_scanner_explicit = native_scanner_runtime.handle_message('/auto model=true execute=true prompt="native scanner execute boundary smoke token=native-scanner-secret"')
+            native_scanner_explicit_payload = json.loads(native_scanner_explicit.split("\n", 1)[1])
+            agent_tools_module.subprocess.run = blocked_scanner_run
+            native_scanner_dry = native_scanner_runtime.handle_message('/auto apply=true model=true prompt="native scanner execute boundary smoke token=native-scanner-secret"')
+            native_scanner_dry_payload = json.loads(native_scanner_dry.split("\n", 1)[1])
+            native_scanner_loop = native_scanner_runtime.handle_message('/auto-loop model=true steps=1 prompt="native scanner loop smoke token=native-scanner-secret"')
+            native_scanner_loop_payload = json.loads(native_scanner_loop.split("\n", 1)[1])
+            native_scanner_pending_approvals = native_scanner_runtime.store.list_approvals(native_scanner_runtime.session_id, status="pending")
+            write("native-tool-scanner-execution-boundary.json", json.dumps({
+                "plan": native_scanner_plan_payload,
+                "explicit_execute_plan": native_scanner_explicit_payload,
+                "dry_apply": native_scanner_dry_payload,
+                "loop": native_scanner_loop_payload,
+                "subprocess_calls": native_scanner_subprocess_calls,
+                "pending_approvals": native_scanner_pending_approvals,
+            }, indent=2, sort_keys=True))
+        finally:
+            agent_tools_module.subprocess.run = original_scanner_run
+            native_scanner_runtime.close()
+        native_scanner_dry_ledger = native_scanner_dry_payload.get("execution_ledger", []) if isinstance(native_scanner_dry_payload.get("execution_ledger"), list) else []
+        native_scanner_loop_ledger = native_scanner_loop_payload.get("execution_ledger", []) if isinstance(native_scanner_loop_payload.get("execution_ledger"), list) else []
+        checks["native_tool_call_scanner_execute_boundary_ok"] = (
+            native_scanner_plan_payload.get("mode") == "plan_only"
+            and native_scanner_plan_payload.get("tool_calls", [{}])[0].get("tool") == "nmap_scan"
+            and native_scanner_plan_payload.get("tool_calls", [{}])[0].get("args", {}).get("execute") is False
+            and native_scanner_plan_payload.get("tool_calls", [{}])[0].get("validation", {}).get("guardrail_status") == "allow"
+            and "nmap_scan planned with execute=false" in json.dumps(native_scanner_plan_payload.get("warnings", []))
+            and native_scanner_explicit_payload.get("tool_calls", [{}])[0].get("args", {}).get("execute") is True
+            and [item.get("result", {}).get("status") for item in native_scanner_dry_payload.get("results", [])] == ["dry_run"]
+            and bool(native_scanner_dry_ledger)
+            and native_scanner_dry_ledger[0].get("tool") == "nmap_scan"
+            and native_scanner_dry_ledger[0].get("execution_state") == "dry_run_not_executed"
+            and native_scanner_dry_ledger[0].get("command_execution_requested") is False
+            and native_scanner_dry_ledger[0].get("actual_command_or_process_activity") is False
+            and bool(native_scanner_loop_ledger)
+            and native_scanner_loop_ledger[0].get("tool") == "nmap_scan"
+            and native_scanner_loop_ledger[0].get("actual_command_or_process_activity") is False
+            and not native_scanner_subprocess_calls
+            and native_scanner_pending_approvals == []
+            and "native-scanner-secret" not in native_scanner_plan + native_scanner_explicit + native_scanner_dry + native_scanner_loop
         )
 
         native_flag_marker = root / "native-slash-flag-should-not-execute.txt"

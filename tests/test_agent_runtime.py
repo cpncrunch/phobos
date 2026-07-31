@@ -151,6 +151,35 @@ class FakeToolCallAllowedExecutionAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallScannerExecutionAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-scanner-execution"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model proposed a structured scanner wrapper with execute=true",
+                    "tool_calls": [
+                        {
+                            "tool": "nmap_scan",
+                            "args": {
+                                "target": "app.example.test",
+                                "ports": "80",
+                                "profile": "quick",
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "scanner wrappers must obey the same explicit operator execute boundary as raw commands",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeToolCallGuardrailAdapter(BaseModelAdapter):
     provider = "fake-tool-call-guardrail"
 
@@ -2660,6 +2689,62 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("actual_command_or_process_activity=0", bridge.response)
                 self.assertNotIn("apply-secret", json.dumps(bridge.to_dict()))
                 self.assertNotIn("allowed-secret", planned + dry_applied + executed)
+            finally:
+                runtime.close()
+
+    def test_model_planned_scanner_wrappers_dry_run_without_explicit_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Scanner Execute Boundary",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-scanner-execution-boundary",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallScannerExecutionAdapter(),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="native scanner execute boundary token=scanner-secret"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual(plan_payload["tool_calls"][0]["tool"], "nmap_scan")
+                self.assertFalse(plan_payload["tool_calls"][0]["args"]["execute"])
+                self.assertEqual(plan_payload["tool_calls"][0]["validation"].get("guardrail_status"), "allow")
+                self.assertIn("nmap_scan planned with execute=false", json.dumps(plan_payload["warnings"]))
+
+                explicit_plan = runtime.handle_message('/auto model=true execute=true prompt="native scanner execute boundary token=scanner-secret"')
+                explicit_payload = json.loads(explicit_plan.split("\n", 1)[1])
+                self.assertTrue(explicit_payload["tool_calls"][0]["args"]["execute"])
+
+                with mock.patch("offsec_agent_harness.agent_tools.subprocess.run", side_effect=AssertionError("scanner execution should stay dry-run")) as run_mock:
+                    dry_applied = runtime.handle_message('/auto apply=true model=true prompt="native scanner execute boundary token=scanner-secret"')
+                    dry_payload = json.loads(dry_applied.split("\n", 1)[1])
+                    dry_ledger = dry_payload.get("execution_ledger", [])
+                    self.assertEqual([item["result"]["status"] for item in dry_payload["results"]], ["dry_run"])
+                    self.assertEqual(dry_ledger[0]["tool"], "nmap_scan")
+                    self.assertEqual(dry_ledger[0]["execution_state"], "dry_run_not_executed")
+                    self.assertFalse(dry_ledger[0]["command_execution_requested"])
+                    self.assertFalse(dry_ledger[0]["actual_command_or_process_activity"])
+                    self.assertFalse(dry_ledger[0]["safe_to_claim_command_executed"])
+
+                    looped = runtime.handle_message('/auto-loop model=true steps=1 prompt="native scanner loop token=scanner-secret"')
+                    loop_payload = json.loads(looped.split("\n", 1)[1])
+                    loop_ledger = loop_payload.get("execution_ledger", [])
+                    self.assertEqual(loop_payload["steps_executed"], 1)
+                    self.assertEqual(loop_ledger[0]["tool"], "nmap_scan")
+                    self.assertEqual(loop_ledger[0]["execution_state"], "dry_run_not_executed")
+                    self.assertFalse(loop_ledger[0]["actual_command_or_process_activity"])
+                    run_mock.assert_not_called()
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                self.assertNotIn("scanner-secret", planned + explicit_plan + dry_applied + looped)
             finally:
                 runtime.close()
 
