@@ -825,17 +825,31 @@ class OffSecAgentRuntime:
                     loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict(), "planner_trace": trace_entry}))
                 break
             signatures = [_planned_call_duplicate_signature(call) for call in plan.tool_calls]
-            duplicate_signatures = [signature for signature in signatures if signature in seen]
+            same_step_seen: set[str] = set()
+            same_step_duplicate_signatures: list[str] = []
+            for signature in signatures:
+                if signature in same_step_seen:
+                    same_step_duplicate_signatures.append(signature)
+                else:
+                    same_step_seen.add(signature)
+            prior_duplicate_signatures = [signature for signature in signatures if signature in seen]
+            duplicate_signatures = sorted(set(prior_duplicate_signatures + same_step_duplicate_signatures))
             if duplicate_signatures:
                 stop_reason = "duplicate_plan"
+                if same_step_duplicate_signatures and not prior_duplicate_signatures:
+                    duplicate_detection = "tool_args_same_step_repeat"
+                elif same_step_duplicate_signatures and prior_duplicate_signatures:
+                    duplicate_detection = "tool_args_any_or_same_step_repeat"
+                else:
+                    duplicate_detection = "tool_args_any_repeat"
                 loop_results.append(_redact_runtime_value({
                     "step": step,
                     "mode": "stopped_duplicate_plan",
                     "plan": plan.to_dict(),
                     "planner_trace": trace_entry,
                     "duplicate_tool_call_count": len(duplicate_signatures),
-                    "new_tool_call_count": max(0, len(signatures) - len(duplicate_signatures)),
-                    "duplicate_detection": "tool_args_any_repeat",
+                    "new_tool_call_count": len([signature for signature in set(signatures) if signature not in seen]),
+                    "duplicate_detection": duplicate_detection,
                     "no_tools_executed": True,
                     "execution_ledger_delta": [],
                 }))
@@ -1203,6 +1217,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
+            "same_step_duplicate_plan_stop_enforced": True,
             "model_error_stop_enforced": True,
             "invalid_plan_stop_enforced": True,
             "provider_native_tool_call_variants": [
@@ -1977,8 +1992,9 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         if summary:
             lines.extend([f"Plan summary: {summary}", ""])
         if step.get("mode") == "stopped_duplicate_plan":
+            detection = step.get("duplicate_detection", "tool_args_any_repeat")
             lines.extend([
-                f"Duplicate plan stop: {step.get('duplicate_tool_call_count', 0)} repeated tool+args call(s); "
+                f"Duplicate plan stop ({detection}): {step.get('duplicate_tool_call_count', 0)} repeated tool+args call(s); "
                 f"new calls withheld={step.get('new_tool_call_count', 0)}; no tools were dispatched for this step.",
                 "",
             ])

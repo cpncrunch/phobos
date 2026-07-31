@@ -548,6 +548,39 @@ class FakeToolCallPartialDuplicatePlanAdapter(BaseModelAdapter):
         )
 
 
+class FakeToolCallSameStepDuplicatePlanAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-same-step-duplicate-plan"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        calls = [
+            {
+                "tool": "remember",
+                "args": {"key": "same-step-duplicate-marker", "value": "this duplicate batch must not dispatch"},
+                "reason": "first duplicate call in the same model batch",
+            },
+            {
+                "tool": "remember",
+                "args": {"key": "same-step-duplicate-marker", "value": "this duplicate batch must not dispatch"},
+                "reason": "same tool and args in the same batch should stop before any dispatch",
+            },
+        ]
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "fake model emitted duplicate tool+args in one native batch",
+                "tool_calls": calls,
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallMaxStepsAdapter(BaseModelAdapter):
     provider = "fake-tool-call-max-steps"
 
@@ -4029,6 +4062,52 @@ class AgentRuntimeTests(unittest.TestCase):
                 status = runtime.registry.run("runtime_status", {})
                 self.assertTrue(status.data.get("native_tool_calling", {}).get("partial_duplicate_plan_stop_enforced"), status.to_dict())
                 self.assertNotIn("partial-duplicate-secret", response + transcript + withheld)
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_stops_same_step_duplicate_batch_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Same Step Duplicate Plan Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallSameStepDuplicatePlanAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-same-step-duplicate-plan",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native same-step duplicate loop token=same-step-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "duplicate_plan")
+                self.assertEqual(payload["steps_executed"], 0)
+                self.assertEqual(payload.get("feedback_history_entries"), 0)
+                self.assertEqual(len(adapter.prompts), 1)
+                self.assertEqual(payload.get("execution_ledger", []), [])
+                duplicate_step = payload["steps"][-1]
+                self.assertEqual(duplicate_step["mode"], "stopped_duplicate_plan")
+                self.assertEqual(duplicate_step["duplicate_detection"], "tool_args_same_step_repeat")
+                self.assertEqual(duplicate_step["duplicate_tool_call_count"], 1)
+                self.assertEqual(duplicate_step["new_tool_call_count"], 1)
+                self.assertTrue(duplicate_step["no_tools_executed"])
+                self.assertEqual(duplicate_step["execution_ledger_delta"], [])
+                withheld = runtime.handle_message('/recall query=same-step-duplicate-marker')
+                self.assertNotIn("this duplicate batch must not dispatch", withheld)
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("tool_args_same_step_repeat", transcript)
+                self.assertIn("new calls withheld=1", transcript)
+                status = runtime.registry.run("runtime_status", {})
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("same_step_duplicate_plan_stop_enforced"), status.to_dict())
+                self.assertNotIn("same-step-secret", response + transcript + withheld)
             finally:
                 runtime.close()
 
