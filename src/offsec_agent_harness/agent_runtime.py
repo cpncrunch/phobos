@@ -418,7 +418,7 @@ class OffSecAgentRuntime:
         return _format_result(result)
 
     def _execute_plan(self, plan: AgentPlan, *, apply: bool) -> str:
-        payload: dict[str, Any] = plan.to_dict()
+        payload: dict[str, Any] = _redact_runtime_value(plan.to_dict())
         if not apply:
             payload["mode"] = "plan_only"
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
@@ -426,26 +426,72 @@ class OffSecAgentRuntime:
         results = []
         for call in plan.tool_calls:
             result = self.registry.run(call.tool, call.args)
-            results.append({"tool": call.tool, "reason": call.reason, "result": result.to_dict()})
+            results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict()}))
         payload["mode"] = "applied"
         payload["results"] = results
-        return "Auto plan applied:\n" + json.dumps(payload, indent=2)[:10000]
+        return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
+
+    def _validate_plan(self, plan: AgentPlan, *, allow_command_execution: bool) -> AgentPlan:
+        """Validate planned tool names and JSON-schema args without dispatch.
+
+        Model-generated and deterministic plans both pass through this boundary
+        before plan-only display or application, so invalid tool calls cannot be
+        shown as runnable steps and cannot create approval rows before the
+        operator explicitly applies a validated plan.
+        """
+
+        warnings = list(plan.warnings)
+        rejected = list(plan.rejected_tool_calls)
+        validated_calls: list[PlannedToolCall] = []
+        for call in plan.tool_calls:
+            tool = str(call.tool or "").strip()
+            args = dict(call.args) if isinstance(call.args, dict) else call.args
+            reason = str(call.reason or "Planned tool call.")
+            if tool in {"run_command", "start_process"} and isinstance(args, dict) and not allow_command_execution:
+                if bool(args.get("execute", False)):
+                    warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
+                args = dict(args)
+                args["execute"] = False
+            validation = self.registry.validate_tool_call(tool, args if isinstance(args, dict) else {})
+            if validation.status != "ok":
+                message = validation.message
+                warnings.append(f"Planned tool {tool or '<missing>'} rejected before dispatch: {message}")
+                rejected.append(_redact_runtime_value({"tool": tool or None, "reason": message, "args": args if isinstance(args, dict) else {"value_type": type(args).__name__}}))
+                continue
+            validated_args = validation.data.get("args", args) if isinstance(validation.data, dict) else args
+            runtime_policy = "allow"
+            if tool in self.registry.blocked_tools and tool not in self.registry._policy_bypass_tools:
+                runtime_policy = "blocked"
+                warnings.append(f"Planned tool {tool} will be blocked by runtime policy if applied.")
+            elif tool in self.registry.confirm_tools and tool not in self.registry._policy_bypass_tools:
+                runtime_policy = "confirm_required"
+                warnings.append(f"Planned tool {tool} will require approval by runtime policy if applied.")
+            validation_payload = dict(call.validation or {})
+            validation_payload.update({"status": "ok", "schema_validated": True, "runtime_policy": runtime_policy})
+            validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload))
+        return AgentPlan(prompt=plan.prompt, summary=plan.summary, tool_calls=validated_calls, warnings=warnings, rejected_tool_calls=rejected)
 
     def _plan_actions(self, prompt: str, *, allow_command_execution: bool, use_model: bool) -> AgentPlan:
         deterministic = plan_agent_actions(prompt, allow_command_execution=allow_command_execution)
         if not use_model:
-            return deterministic
+            return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         try:
             model_plan = self._plan_actions_with_model(prompt, allow_command_execution=allow_command_execution)
         except Exception as exc:
             deterministic.warnings.append(f"Model planner failed; deterministic planner used: {exc}")
-            return deterministic
+            return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         if not model_plan.tool_calls:
             if deterministic.tool_calls:
                 deterministic.warnings.extend(model_plan.warnings)
-                return deterministic
-            return model_plan
-        return model_plan
+                deterministic.rejected_tool_calls.extend(model_plan.rejected_tool_calls)
+                return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
+            return self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
+        validated_model = self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
+        if not validated_model.tool_calls and deterministic.tool_calls:
+            deterministic.warnings.extend(validated_model.warnings)
+            deterministic.rejected_tool_calls.extend(validated_model.rejected_tool_calls)
+            return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
+        return validated_model
 
     def _plan_actions_with_model(self, prompt: str, *, allow_command_execution: bool) -> AgentPlan:
         specs = [spec.to_dict() for spec in self.registry.specs()]
@@ -460,24 +506,31 @@ class OffSecAgentRuntime:
         raw = self.adapter.generate("impact", planner_prompt).content
         parsed = _extract_json_object(raw)
         calls: list[PlannedToolCall] = []
+        rejected: list[dict[str, Any]] = []
         warnings = [str(item) for item in parsed.get("warnings", []) if str(item).strip()] if isinstance(parsed.get("warnings", []), list) else []
         for item in parsed.get("tool_calls", []):
             if not isinstance(item, dict):
+                warnings.append("Model planner returned a non-object tool call; skipped.")
+                rejected.append({"tool": None, "reason": "tool call must be an object", "args": {"value_type": type(item).__name__}})
                 continue
             tool = str(item.get("tool", "")).strip()
-            if tool not in self.registry.tools:
-                warnings.append(f"Model planner requested unknown tool {tool!r}; skipped.")
-                continue
             tool_args = item.get("args", {})
             if not isinstance(tool_args, dict):
                 warnings.append(f"Model planner args for {tool!r} were not an object; skipped.")
+                rejected.append({"tool": tool or None, "reason": "Tool args must be an object.", "args": {"value_type": type(tool_args).__name__}})
                 continue
             if tool in {"run_command", "start_process"} and not allow_command_execution:
                 tool_args = dict(tool_args)
                 tool_args["execute"] = False
                 warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
             calls.append(PlannedToolCall(tool=tool, args=tool_args, reason=str(item.get("reason") or "Model planner selected this tool.")))
-        return AgentPlan(prompt=prompt, summary=str(parsed.get("summary") or f"Model planned {len(calls)} tool call(s)."), tool_calls=calls, warnings=warnings)
+        return AgentPlan(
+            prompt=prompt,
+            summary=str(parsed.get("summary") or f"Model planned {len(calls)} tool call(s)."),
+            tool_calls=calls,
+            warnings=warnings,
+            rejected_tool_calls=rejected,
+        )
 
     def _execute_auto_loop(self, prompt: str, *, steps: int, execute: bool, use_model: bool) -> str:
         steps = max(1, min(int(steps), 10))
@@ -487,23 +540,23 @@ class OffSecAgentRuntime:
         for step in range(1, steps + 1):
             plan = self._plan_actions(current_prompt, allow_command_execution=execute, use_model=use_model)
             if not plan.tool_calls:
-                loop_results.append({"step": step, "mode": "no_plan", "plan": plan.to_dict()})
+                loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
                 break
             signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
             if all(signature in seen for signature in signatures):
-                loop_results.append({"step": step, "mode": "stopped_duplicate_plan", "plan": plan.to_dict()})
+                loop_results.append(_redact_runtime_value({"step": step, "mode": "stopped_duplicate_plan", "plan": plan.to_dict()}))
                 break
             for signature in signatures:
                 seen.add(signature)
             step_results = []
             for call in plan.tool_calls:
                 result = self.registry.run(call.tool, call.args)
-                step_results.append({"tool": call.tool, "reason": call.reason, "result": result.to_dict()})
-            loop_results.append({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results})
+                step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict()}))
+            loop_results.append(_redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results}))
             if not use_model:
                 break
             current_prompt = prompt + "\n\nPrevious Phobos tool results:\n" + json.dumps(step_results, indent=2)[:8000] + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
-        return "Auto loop completed:\n" + json.dumps({"prompt": prompt, "steps_requested": steps, "execute": execute, "model": use_model, "steps": loop_results}, indent=2)[:12000]
+        return "Auto loop completed:\n" + json.dumps(_redact_runtime_value({"prompt": prompt, "steps_requested": steps, "execute": execute, "model": use_model, "steps": loop_results}), indent=2)[:12000]
 
     def _load_skill(self, name: str) -> LocalSkill:
         skill = load_skill(name, self.config.skill_dirs)
@@ -868,6 +921,20 @@ def _coerce(value: str) -> Any:
             return json.loads(value)
         except json.JSONDecodeError:
             return value
+    return value
+
+
+def _redact_runtime_value(value: Any) -> Any:
+    """Recursively redact string leaves while preserving JSON structure."""
+
+    if isinstance(value, str):
+        return redact_secrets(value) or ""
+    if isinstance(value, dict):
+        return {str(_redact_runtime_value(key)): _redact_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_runtime_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_runtime_value(item) for item in value]
     return value
 
 

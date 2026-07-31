@@ -21,7 +21,30 @@ if str(SRC) not in sys.path:
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
+from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
 from offsec_agent_harness.models import redact_secrets
+
+
+class SmokeToolCallValidationAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-validation"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "smoke model mixed valid and invalid native tool calls",
+                    "tool_calls": [
+                        {"tool": "not_a_tool", "args": {}, "reason": "unknown tool should be rejected"},
+                        {"tool": "remember", "args": {"key": "native-missing-value"}, "reason": "missing required schema field should be rejected"},
+                        {"tool": "list_tasks", "args": {"status": "pending", "limit": "2"}, "reason": "safe local state read"},
+                        {"tool": "run_command", "args": {"target": "app.example.test", "purpose": "native tool loop dry-run smoke", "command": "printf native-tool-loop-ok", "execute": True}, "reason": "execute must be forced false unless explicit execute=true is supplied"},
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -913,6 +936,43 @@ def main(argv: list[str] | None = None) -> int:
         loop_recall = handle("auto-loop-recall", "/recall query=loop-client")
         checks["auto_memory_recall"] = '"mode": "plan_only"' in auto_plan and '"tool": "remember"' in auto_apply and "ACME parity" in recall
         checks["auto_loop_ok"] = "Auto loop completed" in auto_loop and "ACME loop parity" in loop_recall
+
+        model_tool_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-tool-call-smoke",
+                auto_model_planning=True,
+                confirm_tools=("remember",),
+            ),
+            adapter=SmokeToolCallValidationAdapter(),
+        )
+        try:
+            native_plan = model_tool_runtime.handle_message('/auto model=true prompt="mixed native tool call plan"')
+            native_plan_payload = json.loads(native_plan.split("\n", 1)[1])
+            pending_native_approvals_after_plan = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
+            plan_audit_events = [row["event"] for row in model_tool_runtime.store.list_audit(model_tool_runtime.session_id, limit=20)]
+            native_apply = model_tool_runtime.handle_message('/auto apply=true model=true prompt="mixed native tool call plan"')
+            write("native-tool-call-plan.txt", native_plan)
+            write("native-tool-call-apply.txt", native_apply)
+            native_apply_payload = json.loads(native_apply.split("\n", 1)[1])
+            pending_native_approvals_after_apply = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
+        finally:
+            model_tool_runtime.close()
+        checks["native_tool_call_plan_validation_ok"] = (
+            native_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_plan_payload.get("tool_calls", [])] == ["list_tasks", "run_command"]
+            and native_plan_payload["tool_calls"][0]["args"].get("limit") == 2
+            and native_plan_payload["tool_calls"][0]["validation"].get("schema_validated") is True
+            and native_plan_payload["tool_calls"][1]["args"].get("execute") is False
+            and "Unknown tool: not_a_tool" in json.dumps(native_plan_payload.get("rejected_tool_calls", []))
+            and "value is required" in json.dumps(native_plan_payload.get("rejected_tool_calls", []))
+            and "tool_call" not in plan_audit_events
+            and not pending_native_approvals_after_plan
+            and native_apply_payload.get("mode") == "applied"
+            and "dry_run" in [item.get("result", {}).get("status") for item in native_apply_payload.get("results", [])]
+            and not pending_native_approvals_after_apply
+        )
         hygiene_memory = runtime.registry.run("remember", {"key": "smoke-forget", "value": "Temporary memory hygiene marker token=supersecret", "tags": "hygiene"})
         hygiene_id = int(hygiene_memory.data.get("id", 0))
         memory_list = handle("memory-list", "/memories query=smoke-forget")

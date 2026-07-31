@@ -44,6 +44,32 @@ class FakePlannerAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallValidationAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-validation"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model mixed valid and invalid tool calls",
+                    "tool_calls": [
+                        {"tool": "missing_tool", "args": {}, "reason": "unknown tool should be rejected before dispatch"},
+                        {"tool": "remember", "args": {"key": "missing-value"}, "reason": "missing required value should be rejected before approval"},
+                        {"tool": "list_tasks", "args": {"status": "pending", "limit": "2"}, "reason": "safe local status read"},
+                        {
+                            "tool": "run_command",
+                            "args": {"target": "app.example.test", "purpose": "fake guarded dry run", "command": "printf should-not-run", "execute": True},
+                            "reason": "command execution must be forced back to dry-run unless explicit execute=true is supplied",
+                        },
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def make_runtime(self, tmp: str) -> tuple[OffSecAgentRuntime, Path]:
         tmp_path = Path(tmp)
@@ -1883,6 +1909,52 @@ class AgentRuntimeTests(unittest.TestCase):
             try:
                 searched = runtime.handle_message('/search-all query=crosssession-acme')
                 self.assertIn("crosssession-acme", searched)
+            finally:
+                runtime.close()
+
+    def test_model_plan_validates_tool_names_and_schema_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Plan Validation",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-validation",
+                    auto_model_planning=True,
+                    confirm_tools=("remember",),
+                ),
+                adapter=FakeToolCallValidationAdapter(),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="mixed fake model plan"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(payload["mode"], "plan_only")
+                self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["list_tasks", "run_command"])
+                self.assertEqual(payload["tool_calls"][0]["args"]["limit"], 2)
+                self.assertTrue(payload["tool_calls"][0]["validation"]["schema_validated"])
+                self.assertEqual(payload["tool_calls"][1]["args"]["execute"], False)
+                rejected_blob = json.dumps(payload["rejected_tool_calls"])
+                self.assertIn("Unknown tool: missing_tool", rejected_blob)
+                self.assertIn("value is required", rejected_blob)
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT event FROM audit_log").fetchall())
+                self.assertNotIn("tool_call", raw_audit)
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="mixed fake model plan"')
+                applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(applied_payload["mode"], "applied")
+                result_statuses = [item["result"]["status"] for item in applied_payload["results"]]
+                self.assertIn("ok", result_statuses)
+                self.assertIn("dry_run", result_statuses)
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                self.assertFalse((tmp_path / "should-not-run").exists())
             finally:
                 runtime.close()
 

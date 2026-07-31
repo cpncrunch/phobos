@@ -11,6 +11,7 @@ class PlannedToolCall:
     tool: str
     args: dict[str, Any]
     reason: str
+    validation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -22,6 +23,7 @@ class AgentPlan:
     summary: str
     tool_calls: list[PlannedToolCall] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    rejected_tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -29,6 +31,7 @@ class AgentPlan:
             "summary": self.summary,
             "tool_calls": [call.to_dict() for call in self.tool_calls],
             "warnings": self.warnings,
+            "rejected_tool_calls": self.rejected_tool_calls,
         }
 
 

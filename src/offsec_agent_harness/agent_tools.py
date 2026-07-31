@@ -129,6 +129,24 @@ class OffSecToolRegistry:
     def specs(self) -> list[ToolSpec]:
         return [self.tool_specs[name] for name in sorted(self.tool_specs)]
 
+    def validate_tool_call(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Validate a proposed tool call without policy queueing or dispatch.
+
+        This is used by model/tool-calling planning paths so plan-only responses
+        cannot present unknown tools or schema-invalid arguments as executable
+        next steps, and invalid model output cannot create approval rows before
+        an operator explicitly applies a validated plan.
+        """
+
+        if name not in self.tools:
+            return ToolResult("error", f"Unknown tool: {name}", {"available": [spec.name for spec in self.specs()]})
+        if not isinstance(args, dict):
+            return ToolResult("error", "Tool args must be an object.")
+        validated, arg_error = self._validated_tool_args(name, args)
+        if arg_error is not None:
+            return arg_error
+        return ToolResult("ok", "Tool call schema validated.", {"tool": name, "args": validated})
+
     def run(self, name: str, args: dict[str, Any]) -> ToolResult:
         if name not in self.tools:
             return ToolResult("error", f"Unknown tool: {name}", {"available": [spec.name for spec in self.specs()]})
