@@ -185,91 +185,12 @@ class OffSecToolRegistry:
         for arg_name, arg_schema in properties.items():
             if not isinstance(arg_schema, dict):
                 continue
-            arg_type = arg_schema.get("type")
-            enum_values = arg_schema.get("enum")
             if arg_name not in validated or validated.get(arg_name) is None:
                 continue
-            raw_value = validated.get(arg_name)
-            if raw_value == "" and _schema_blank_value_skips_validation(arg_schema):
-                continue
-            if isinstance(enum_values, list) and enum_values:
-                parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
-                if not ok:
-                    return validated, ToolResult("error", f"{arg_name} must be one of: {_schema_enum_error_values(enum_values)}.")
-                validated[arg_name] = parsed_enum
-                continue
-            if arg_type == "integer":
-                if raw_value is None or isinstance(raw_value, bool):
-                    return validated, ToolResult("error", f"{arg_name} must be an integer.")
-                try:
-                    parsed_int = int(raw_value)
-                except (TypeError, ValueError):
-                    return validated, ToolResult("error", f"{arg_name} must be an integer.")
-                minimum = arg_schema.get("minimum")
-                maximum = arg_schema.get("maximum")
-                if isinstance(minimum, (int, float)) and parsed_int < minimum:
-                    return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_bound(minimum)}.")
-                if isinstance(maximum, (int, float)) and parsed_int > maximum:
-                    return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_bound(maximum)}.")
-                validated[arg_name] = parsed_int
-                continue
-            if arg_type == "number":
-                parsed_number, ok = _parse_schema_number(raw_value)
-                if not ok:
-                    return validated, ToolResult("error", f"{arg_name} must be a number.")
-                minimum = arg_schema.get("minimum")
-                maximum = arg_schema.get("maximum")
-                if isinstance(minimum, (int, float)) and parsed_number < minimum:
-                    return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_bound(minimum)}.")
-                if isinstance(maximum, (int, float)) and parsed_number > maximum:
-                    return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_bound(maximum)}.")
-                validated[arg_name] = parsed_number
-                continue
-            if arg_type == "boolean":
-                parsed, ok = _parse_schema_bool(raw_value)
-                if not ok:
-                    return validated, ToolResult("error", f"{arg_name} must be a boolean.")
-                validated[arg_name] = parsed
-                continue
-            if arg_type == "string":
-                if not isinstance(raw_value, str) and not arg_schema.get("x-allow-non-string", False):
-                    return validated, ToolResult("error", f"{arg_name} must be a string.")
-                if isinstance(raw_value, str):
-                    min_length = _schema_size_bound(arg_schema.get("minLength"))
-                    max_length = _schema_size_bound(arg_schema.get("maxLength"))
-                    if min_length is not None and len(raw_value) < min_length:
-                        return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_count('character', min_length)}.")
-                    if max_length is not None and len(raw_value) > max_length:
-                        return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_count('character', max_length)}.")
-                    pattern = arg_schema.get("pattern")
-                    if isinstance(pattern, str) and pattern:
-                        try:
-                            matched = re.search(pattern, raw_value) is not None
-                        except re.error:
-                            return validated, ToolResult("error", f"{arg_name} has an invalid schema pattern.")
-                        if not matched:
-                            return validated, ToolResult("error", _schema_pattern_error_message(arg_name, arg_schema))
-                continue
-            if arg_type == "array":
-                if not isinstance(raw_value, list):
-                    return validated, ToolResult("error", f"{arg_name} must be an array.")
-                min_items = _schema_size_bound(arg_schema.get("minItems"))
-                max_items = _schema_size_bound(arg_schema.get("maxItems"))
-                if min_items is not None and len(raw_value) < min_items:
-                    return validated, ToolResult("error", f"{arg_name} must contain at least {_format_schema_count('item', min_items)}.")
-                if max_items is not None and len(raw_value) > max_items:
-                    return validated, ToolResult("error", f"{arg_name} must contain at most {_format_schema_count('item', max_items)}.")
-                continue
-            if arg_type == "object":
-                if not isinstance(raw_value, dict):
-                    return validated, ToolResult("error", f"{arg_name} must be an object.")
-                min_properties = _schema_size_bound(arg_schema.get("minProperties"))
-                max_properties = _schema_size_bound(arg_schema.get("maxProperties"))
-                if min_properties is not None and len(raw_value) < min_properties:
-                    return validated, ToolResult("error", f"{arg_name} must contain at least {_format_schema_count('field', min_properties)}.")
-                if max_properties is not None and len(raw_value) > max_properties:
-                    return validated, ToolResult("error", f"{arg_name} must contain at most {_format_schema_count('field', max_properties)}.")
-                continue
+            parsed_value, value_error = _validate_schema_value(arg_name, validated.get(arg_name), arg_schema)
+            if value_error is not None:
+                return validated, value_error
+            validated[arg_name] = parsed_value
         if isinstance(required, list):
             for arg_name in required:
                 if not isinstance(arg_name, str):
@@ -4856,6 +4777,156 @@ def _parse_schema_number(value: Any) -> tuple[float, bool]:
     return parsed, True
 
 
+def _validate_schema_value(
+    field_path: str,
+    raw_value: Any,
+    arg_schema: dict[str, Any],
+    *,
+    skip_optional_blank: bool = True,
+) -> tuple[Any, ToolResult | None]:
+    """Validate and normalize one JSON-schema value fragment.
+
+    This intentionally implements a conservative, local subset of JSON Schema for
+    Phobos tool args rather than becoming a full validator dependency.  It covers
+    the schema shapes the registry exposes to slash/gateway/plugin dispatch:
+    scalar types, enum aliases, bounds, patterns, array item schemas, and nested
+    object properties before any handler runs or approval rows are queued.
+    """
+
+    if raw_value == "" and skip_optional_blank and _schema_blank_value_skips_validation(arg_schema):
+        return raw_value, None
+
+    enum_values = arg_schema.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
+        if not ok:
+            return raw_value, ToolResult("error", f"{field_path} must be one of: {_schema_enum_error_values(enum_values)}.")
+        return parsed_enum, None
+
+    arg_type = arg_schema.get("type")
+    if arg_type == "integer":
+        if raw_value is None or isinstance(raw_value, bool):
+            return raw_value, ToolResult("error", f"{field_path} must be an integer.")
+        try:
+            parsed_int = int(raw_value)
+        except (TypeError, ValueError):
+            return raw_value, ToolResult("error", f"{field_path} must be an integer.")
+        minimum = arg_schema.get("minimum")
+        maximum = arg_schema.get("maximum")
+        if isinstance(minimum, (int, float)) and parsed_int < minimum:
+            return raw_value, ToolResult("error", f"{field_path} must be at least {_format_schema_bound(minimum)}.")
+        if isinstance(maximum, (int, float)) and parsed_int > maximum:
+            return raw_value, ToolResult("error", f"{field_path} must be at most {_format_schema_bound(maximum)}.")
+        return parsed_int, None
+
+    if arg_type == "number":
+        parsed_number, ok = _parse_schema_number(raw_value)
+        if not ok:
+            return raw_value, ToolResult("error", f"{field_path} must be a number.")
+        minimum = arg_schema.get("minimum")
+        maximum = arg_schema.get("maximum")
+        if isinstance(minimum, (int, float)) and parsed_number < minimum:
+            return raw_value, ToolResult("error", f"{field_path} must be at least {_format_schema_bound(minimum)}.")
+        if isinstance(maximum, (int, float)) and parsed_number > maximum:
+            return raw_value, ToolResult("error", f"{field_path} must be at most {_format_schema_bound(maximum)}.")
+        return parsed_number, None
+
+    if arg_type == "boolean":
+        parsed, ok = _parse_schema_bool(raw_value)
+        if not ok:
+            return raw_value, ToolResult("error", f"{field_path} must be a boolean.")
+        return parsed, None
+
+    if arg_type == "string":
+        if not isinstance(raw_value, str) and not arg_schema.get("x-allow-non-string", False):
+            return raw_value, ToolResult("error", f"{field_path} must be a string.")
+        if isinstance(raw_value, str):
+            min_length = _schema_size_bound(arg_schema.get("minLength"))
+            max_length = _schema_size_bound(arg_schema.get("maxLength"))
+            if min_length is not None and len(raw_value) < min_length:
+                return raw_value, ToolResult("error", f"{field_path} must be at least {_format_schema_count('character', min_length)}.")
+            if max_length is not None and len(raw_value) > max_length:
+                return raw_value, ToolResult("error", f"{field_path} must be at most {_format_schema_count('character', max_length)}.")
+            pattern = arg_schema.get("pattern")
+            if isinstance(pattern, str) and pattern:
+                try:
+                    matched = re.search(pattern, raw_value) is not None
+                except re.error:
+                    return raw_value, ToolResult("error", f"{field_path} has an invalid schema pattern.")
+                if not matched:
+                    return raw_value, ToolResult("error", _schema_pattern_error_message(field_path, arg_schema))
+        return raw_value, None
+
+    if arg_type == "array":
+        if not isinstance(raw_value, list):
+            return raw_value, ToolResult("error", f"{field_path} must be an array.")
+        min_items = _schema_size_bound(arg_schema.get("minItems"))
+        max_items = _schema_size_bound(arg_schema.get("maxItems"))
+        if min_items is not None and len(raw_value) < min_items:
+            return raw_value, ToolResult("error", f"{field_path} must contain at least {_format_schema_count('item', min_items)}.")
+        if max_items is not None and len(raw_value) > max_items:
+            return raw_value, ToolResult("error", f"{field_path} must contain at most {_format_schema_count('item', max_items)}.")
+        items_schema = arg_schema.get("items")
+        if isinstance(items_schema, dict):
+            normalized_items: list[Any] = []
+            for idx, item in enumerate(raw_value):
+                parsed_item, item_error = _validate_schema_value(
+                    f"{field_path}[{idx}]",
+                    item,
+                    items_schema,
+                    skip_optional_blank=False,
+                )
+                if item_error is not None:
+                    return raw_value, item_error
+                normalized_items.append(parsed_item)
+            return normalized_items, None
+        return raw_value, None
+
+    if arg_type == "object":
+        if not isinstance(raw_value, dict):
+            return raw_value, ToolResult("error", f"{field_path} must be an object.")
+        min_properties = _schema_size_bound(arg_schema.get("minProperties"))
+        max_properties = _schema_size_bound(arg_schema.get("maxProperties"))
+        if min_properties is not None and len(raw_value) < min_properties:
+            return raw_value, ToolResult("error", f"{field_path} must contain at least {_format_schema_count('field', min_properties)}.")
+        if max_properties is not None and len(raw_value) > max_properties:
+            return raw_value, ToolResult("error", f"{field_path} must contain at most {_format_schema_count('field', max_properties)}.")
+        child_properties = arg_schema.get("properties")
+        if not isinstance(child_properties, dict):
+            return raw_value, None
+        normalized_object = dict(raw_value)
+        if arg_schema.get("additionalProperties") is False:
+            unexpected = _schema_unexpected_object_fields(normalized_object, child_properties)
+            if unexpected:
+                return raw_value, ToolResult("error", _schema_unexpected_object_fields_message(field_path, unexpected))
+        for child_name, child_schema in child_properties.items():
+            if not isinstance(child_name, str) or not isinstance(child_schema, dict):
+                continue
+            if child_name not in normalized_object or normalized_object.get(child_name) is None:
+                continue
+            parsed_child, child_error = _validate_schema_value(
+                f"{field_path}.{child_name}",
+                normalized_object.get(child_name),
+                child_schema,
+            )
+            if child_error is not None:
+                return raw_value, child_error
+            normalized_object[child_name] = parsed_child
+        child_required = arg_schema.get("required", [])
+        if isinstance(child_required, list):
+            for child_name in child_required:
+                if not isinstance(child_name, str):
+                    continue
+                child_schema = child_properties.get(child_name, {}) if isinstance(child_properties, dict) else {}
+                if child_name not in normalized_object or normalized_object.get(child_name) is None:
+                    return raw_value, ToolResult("error", f"{field_path}.{child_name} is required.")
+                if normalized_object.get(child_name) == "" and _blank_required_value_is_missing(child_schema):
+                    return raw_value, ToolResult("error", f"{field_path}.{child_name} is required.")
+        return normalized_object, None
+
+    return raw_value, None
+
+
 def _blank_required_value_is_missing(arg_schema: Any) -> bool:
     """Treat blank required values as missing unless an empty string is intentional."""
 
@@ -4946,6 +5017,13 @@ def _schema_unexpected_args(args: dict[str, Any], properties: dict[str, Any]) ->
     return sorted(unexpected)
 
 
+def _schema_unexpected_object_fields(args: dict[str, Any], properties: dict[str, Any]) -> list[str]:
+    """Return nested object fields not declared by a closed object schema."""
+
+    expected = {str(key) for key in properties}
+    return sorted(str(key) for key in args if str(key) not in expected)
+
+
 def _schema_unexpected_args_message(unexpected: list[str]) -> str:
     if len(unexpected) == 1:
         return f"{unexpected[0]} is not an allowed argument."
@@ -4953,6 +5031,15 @@ def _schema_unexpected_args_message(unexpected: list[str]) -> str:
     if len(unexpected) > 5:
         preview += ", ..."
     return f"Unexpected arguments: {preview}."
+
+
+def _schema_unexpected_object_fields_message(field_path: str, unexpected: list[str]) -> str:
+    if len(unexpected) == 1:
+        return f"{field_path}.{unexpected[0]} is not an allowed field."
+    preview = ", ".join(f"{field_path}.{name}" for name in unexpected[:5])
+    if len(unexpected) > 5:
+        preview += ", ..."
+    return f"Unexpected fields: {preview}."
 
 
 def _format_schema_count(noun: str, count: int) -> str:

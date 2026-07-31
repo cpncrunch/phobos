@@ -12,7 +12,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
 - **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting.
 - **Finding Markdown exporter + QA/closeout review** — renders confirmed finding JSON into report-ready Markdown, packages redacted per-finding evidence bundles, and reviews stored finding records plus engagement closeout state for blocking/advisory evidence gaps before operator/client delivery.
-- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas with scalar/bounds/pattern validation before approval queueing, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway with typed JSON `400` query/body validation plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines/manifests/closeout reviews, audit-event drill-down refs, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
+- **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas with scalar/bounds/pattern/nested array-object validation before approval queueing, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway with typed JSON `400` query/body validation plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines/manifests/closeout reviews, audit-event drill-down refs, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
 ## Quick start
 
@@ -623,7 +623,9 @@ tool_schema_string_validation_ok=True
 tool_schema_number_validation_ok=True
 tool_schema_blank_required_validation_ok=True
 tool_schema_array_object_validation_ok=True
+tool_schema_nested_validation_ok=True
 tool_schema_size_bounds_validation_ok=True
+tool_schema_pattern_validation_ok=True
 tool_schema_additional_properties_validation_ok=True
 tool_schema_required_validation_ok=True
 tool_schema_enum_validation_ok=True
@@ -701,7 +703,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=315
+artifact_count=316
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

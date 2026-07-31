@@ -321,8 +321,21 @@ class AgentRuntimeTests(unittest.TestCase):
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "items": {"type": "array", "description": "Ordered unit items."},
-                            "options": {"type": "object", "description": "Structured unit options."},
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "string", "pattern": r"^[a-z][a-z0-9_-]*$", "x-pattern-error": "must be lowercase safe item text"},
+                                "description": "Ordered unit items.",
+                            },
+                            "options": {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"type": "string", "enum": ["safe", "review"]},
+                                    "retries": {"type": "integer", "minimum": 1, "maximum": 3},
+                                },
+                                "required": ["mode"],
+                                "additionalProperties": False,
+                                "description": "Structured unit options.",
+                            },
                         },
                         "required": ["items"],
                         "additionalProperties": True,
@@ -408,6 +421,13 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("schema_collection_echo", {"items": "not-an-array"}, "items must be an array."),
                     ("schema_collection_echo", {"items": [], "options": ["not-an-object"]}, "options must be an object."),
                     ("schema_collection_echo", {"items": ""}, "items is required."),
+                    ("schema_collection_echo", {"items": ["alpha", 7], "options": {"mode": "safe"}}, "items[1] must be a string."),
+                    ("schema_collection_echo", {"items": ["Bad Space"], "options": {"mode": "safe"}}, "items[0] must be lowercase safe item text."),
+                    ("schema_collection_echo", {"items": ["alpha"], "options": {"mode": "unsafe"}}, "options.mode must be one of: safe, review."),
+                    ("schema_collection_echo", {"items": ["alpha"], "options": {}}, "options.mode is required."),
+                    ("schema_collection_echo", {"items": ["alpha"], "options": {"extra": True}}, "options.extra is not an allowed field."),
+                    ("schema_collection_echo", {"items": ["alpha"], "options": {"mode": "safe", "retries": "bad"}}, "options.retries must be an integer."),
+                    ("schema_collection_echo", {"items": ["alpha"], "options": {"mode": "safe", "retries": 4}}, "options.retries must be at most 3."),
                     ("schema_size_echo", {"label": "ab", "items": ["one"], "options": {"mode": "safe"}}, "label must be at least 3 characters."),
                     ("schema_size_echo", {"label": "too-long-label", "items": ["one"], "options": {"mode": "safe"}}, "label must be at most 8 characters."),
                     ("schema_size_echo", {"label": "okay", "items": [], "options": {"mode": "safe"}}, "items must contain at least 1 item."),
@@ -530,6 +550,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     accepted_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "2.5"})
                     rejected_array = confirm_runtime.registry.run("schema_collection_echo", {"items": "queued-string"})
                     rejected_object = confirm_runtime.registry.run("schema_collection_echo", {"items": [], "options": "queued-string"})
+                    rejected_nested_object = confirm_runtime.registry.run("schema_collection_echo", {"items": ["queued"], "options": {"mode": "unsafe"}})
                     accepted_collection = confirm_runtime.registry.run("schema_collection_echo", {"items": ["queued"], "options": {"mode": "safe"}})
                     rejected_size = confirm_runtime.registry.run("schema_size_echo", {"label": "ab", "items": ["queued"], "options": {"mode": "safe"}})
                     accepted_size = confirm_runtime.registry.run("schema_size_echo", {"label": "queued", "items": ["queued"], "options": {"mode": "safe"}})
@@ -558,6 +579,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_array.message, "items must be an array.")
                     self.assertEqual(rejected_object.status, "error")
                     self.assertEqual(rejected_object.message, "options must be an object.")
+                    self.assertEqual(rejected_nested_object.status, "error")
+                    self.assertEqual(rejected_nested_object.message, "options.mode must be one of: safe, review.")
                     self.assertEqual(accepted_collection.status, "needs_approval", accepted_collection.to_dict())
                     self.assertEqual(accepted_collection.data.get("tool"), "schema_collection_echo")
                     self.assertEqual(rejected_size.status, "error")
