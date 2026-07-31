@@ -757,6 +757,7 @@ class OffSecAgentRuntime:
         loop_results: list[dict[str, Any]] = []
         feedback_history: list[dict[str, Any]] = []
         execution_ledger: list[dict[str, Any]] = []
+        planner_trace: list[dict[str, Any]] = []
         seen: set[str] = set()
         stop_reason = "max_steps"
         for step in range(1, steps + 1):
@@ -766,6 +767,8 @@ class OffSecAgentRuntime:
                 use_model=use_model,
                 allow_deterministic_model_fallback=not feedback_history,
             )
+            trace_entry = _auto_loop_planner_trace_entry(step, plan)
+            planner_trace.append(trace_entry)
             if not plan.tool_calls:
                 metadata = plan.metadata if isinstance(plan.metadata, dict) else {}
                 if use_model and metadata.get("model_planner_failed") is True:
@@ -774,12 +777,13 @@ class OffSecAgentRuntime:
                         "step": step,
                         "mode": "model_error",
                         "plan": plan.to_dict(),
+                        "planner_trace": trace_entry,
                         "no_tools_executed": True,
                         "execution_ledger_delta": [],
                     }))
                 else:
                     stop_reason = "no_tool_calls"
-                    loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
+                    loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict(), "planner_trace": trace_entry}))
                 break
             signatures = [_planned_call_duplicate_signature(call) for call in plan.tool_calls]
             duplicate_signatures = [signature for signature in signatures if signature in seen]
@@ -789,6 +793,7 @@ class OffSecAgentRuntime:
                     "step": step,
                     "mode": "stopped_duplicate_plan",
                     "plan": plan.to_dict(),
+                    "planner_trace": trace_entry,
                     "duplicate_tool_call_count": len(duplicate_signatures),
                     "new_tool_call_count": max(0, len(signatures) - len(duplicate_signatures)),
                     "duplicate_detection": "tool_args_any_repeat",
@@ -810,6 +815,7 @@ class OffSecAgentRuntime:
                 "step": step,
                 "mode": "applied",
                 "plan": plan.to_dict(),
+                "planner_trace": trace_entry,
                 "results": step_results,
                 "execution_ledger_delta": step_ledger_delta,
             })
@@ -854,6 +860,7 @@ class OffSecAgentRuntime:
             "transcript_artifact_written": False,
             "secret_values_redacted": True,
             "execution_ledger": _redact_runtime_value(execution_ledger),
+            "planner_trace": _redact_runtime_value(planner_trace),
             "steps": loop_results,
         }
         if stop_reason == "max_steps":
@@ -931,6 +938,62 @@ def _build_auto_loop_feedback_prompt(original_prompt: str, feedback_history: lis
         + history_text
         + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
     )
+
+
+def _auto_loop_planner_trace_entry(step: int, plan: AgentPlan) -> dict[str, Any]:
+    """Return bounded, redacted model/planner metadata for one loop step.
+
+    Auto-loop transcripts already store the validated plan and execution ledger.
+    This trace is deliberately smaller: it lets operators audit which planner or
+    provider produced each step, whether fallback/native tool-call metadata was
+    involved, and how many calls were accepted or rejected without embedding raw
+    provider payloads, prompts, headers, or secrets.
+    """
+
+    metadata = plan.metadata if isinstance(plan.metadata, dict) else {}
+
+    def metadata_int(key: str) -> int:
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            return int(value.strip())
+        return 0
+
+    trace: dict[str, Any] = {
+        "step": step,
+        "planner": str(metadata.get("planner") or ("model" if metadata else "deterministic")),
+        "provider": str(metadata.get("provider") or ""),
+        "selected_provider": str(metadata.get("selected_provider") or ""),
+        "model": str(metadata.get("model") or ""),
+        "tool_call_count": len(plan.tool_calls),
+        "rejected_tool_call_count": len(plan.rejected_tool_calls),
+        "context_provided": bool(metadata.get("context_provided", False)),
+        "context_chars": metadata_int("context_chars"),
+        "native_tool_calls": bool(metadata.get("native_tool_calls", False)),
+        "native_tool_call_count": metadata_int("native_tool_call_count"),
+        "rejected_native_tool_call_count": metadata_int("rejected_native_tool_call_count"),
+        "tool_plan_fallback": bool(metadata.get("tool_plan_fallback", False)),
+        "model_planner_failed": bool(metadata.get("model_planner_failed", False)),
+        "deterministic_fallback_suppressed": bool(metadata.get("deterministic_fallback_suppressed", False)),
+        "terminal_no_tool_plan_respected": bool(metadata.get("terminal_no_tool_plan_respected", False)),
+    }
+    attempts = metadata.get("fallback_attempts")
+    if isinstance(attempts, list):
+        safe_attempts = []
+        for item in attempts[:5]:
+            if not isinstance(item, dict):
+                continue
+            safe_attempts.append({
+                "provider": str(item.get("provider") or ""),
+                "error": (redact_secrets(str(item.get("error") or "")) or "")[:500],
+            })
+        trace["fallback_attempt_count"] = len([item for item in attempts if isinstance(item, dict)])
+        trace["fallback_attempts"] = safe_attempts
+        trace["fallback_attempts_truncated"] = len(attempts) > len(safe_attempts)
+    return _redact_runtime_value(trace)
 
 
 def _planned_call_duplicate_signature(call: PlannedToolCall) -> str:
@@ -1087,6 +1150,8 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "plan_only_default": True,
             "execution_requires_operator_execute_true": True,
             "per_step_execution_ledger_delta": True,
+            "per_step_planner_trace": True,
+            "planner_trace_redacted": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
@@ -1381,6 +1446,16 @@ def _render_auto_loop_chat(response: str) -> str:
         lines.append(f"- Next: {next_step}")
     if planned:
         lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
+    planner_trace = data.get("planner_trace") if isinstance(data.get("planner_trace"), list) else []
+    providers = []
+    for item in planner_trace:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider") or item.get("selected_provider") or "").strip()
+        if provider and provider not in providers:
+            providers.append(provider)
+    if providers:
+        lines.append("- Planner trace: " + ", ".join(f"`{provider}`" for provider in providers[:4]))
     if counts:
         lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
     if ledger:
@@ -1775,6 +1850,26 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         "## Operator prompt",
         "",
         str(payload.get("prompt") or ""),
+        "",
+        "## Planner trace",
+        "",
+    ])
+    raw_trace = payload.get("planner_trace")
+    planner_trace: list[Any] = raw_trace if isinstance(raw_trace, list) else []
+    if not planner_trace:
+        lines.append("- No planner trace entries were recorded.")
+    for item in planner_trace:
+        if not isinstance(item, dict):
+            continue
+        fallback_note = ""
+        if item.get("fallback_attempt_count") is not None:
+            fallback_note = f", fallback_attempts=`{item.get('fallback_attempt_count')}`"
+        lines.append(
+            f"- step=`{item.get('step')}` planner=`{item.get('planner')}` provider=`{item.get('provider')}` "
+            f"selected_provider=`{item.get('selected_provider')}` tool_calls=`{item.get('tool_call_count')}` "
+            f"rejected=`{item.get('rejected_tool_call_count')}` context_chars=`{item.get('context_chars', 0)}`{fallback_note}"
+        )
+    lines.extend([
         "",
         "## Execution ledger",
         "",

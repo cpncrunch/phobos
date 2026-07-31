@@ -3521,6 +3521,15 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
             markdown_rel = ""
     data = payload if isinstance(payload, dict) else {}
     ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
+    raw_trace = data.get("planner_trace")
+    trace: list[Any] = raw_trace if isinstance(raw_trace, list) else []
+    providers = []
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider") or item.get("selected_provider") or "").strip()
+        if provider and provider not in providers:
+            providers.append(provider)
     calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
     if not calls and isinstance(data.get("steps"), list):
         for step in data.get("steps", []):
@@ -3543,6 +3552,8 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
         "steps_executed": data.get("steps_executed", 0),
         "steps_requested": data.get("steps_requested", 0),
         "tool_count": len(calls),
+        "planner_trace_count": len(trace),
+        "planner_providers": providers[:8],
         "execution_counts": _auto_transcript_ledger_counts(ledger),
         "actual_command_or_process_activity": sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True),
         "prompt_preview": str(data.get("prompt") or "")[:200],
@@ -3631,6 +3642,8 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
     data = payload if isinstance(payload, dict) else {}
     raw_ledger = data.get("execution_ledger")
     ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
+    raw_trace = data.get("planner_trace")
+    planner_trace: list[Any] = raw_trace if isinstance(raw_trace, list) else []
     raw_calls = data.get("tool_calls")
     calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
     if not calls and isinstance(data.get("steps"), list):
@@ -3668,6 +3681,23 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
             "arg_keys": sorted(str(key) for key in (call.get("args") or {}).keys()) if isinstance(call.get("args"), dict) else [],
         })
     result_summaries = []
+    planner_trace_summaries = []
+    for item in planner_trace[:max_ledger]:
+        if not isinstance(item, dict):
+            continue
+        planner_trace_summaries.append({
+            "step": item.get("step"),
+            "planner": item.get("planner"),
+            "provider": item.get("provider"),
+            "selected_provider": item.get("selected_provider"),
+            "tool_call_count": item.get("tool_call_count"),
+            "rejected_tool_call_count": item.get("rejected_tool_call_count"),
+            "native_tool_calls": item.get("native_tool_calls", False),
+            "tool_plan_fallback": item.get("tool_plan_fallback", False),
+            "fallback_attempt_count": item.get("fallback_attempt_count", 0),
+            "context_chars": item.get("context_chars", 0),
+            "model_planner_failed": item.get("model_planner_failed", False),
+        })
     for item in results[:max_ledger]:
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
@@ -3692,6 +3722,9 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         "tool_call_count": len(calls),
         "rejected_tool_call_count": len(data.get("rejected_tool_calls", [])) if isinstance(data.get("rejected_tool_calls"), list) else 0,
         "result_summaries": result_summaries,
+        "planner_trace": planner_trace_summaries,
+        "planner_trace_count": len(planner_trace),
+        "planner_trace_truncated": len(planner_trace) > max_ledger,
         "result_count": len(results),
         "execution_ledger": ledger[:max_ledger],
         "step_ledger_deltas": step_ledger_deltas[:max_ledger],

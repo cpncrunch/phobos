@@ -1782,6 +1782,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
             and native_status_data.get("per_step_execution_ledger_delta") is True
+            and native_status_data.get("per_step_planner_trace") is True
+            and native_status_data.get("planner_trace_redacted") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
@@ -2515,6 +2517,7 @@ def main(argv: list[str] | None = None) -> int:
             feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
             feedback_ledger = feedback_payload.get("execution_ledger", []) if isinstance(feedback_payload.get("execution_ledger"), list) else []
             feedback_steps = feedback_payload.get("steps", []) if isinstance(feedback_payload.get("steps"), list) else []
+            feedback_planner_trace = feedback_payload.get("planner_trace", []) if isinstance(feedback_payload.get("planner_trace"), list) else []
             feedback_step_deltas = [
                 step.get("execution_ledger_delta", [])
                 for step in feedback_steps
@@ -2603,6 +2606,7 @@ def main(argv: list[str] | None = None) -> int:
                 "transcript_index": feedback_transcript_list,
                 "transcript_detail": feedback_transcript_detail,
                 "transcript_ref": feedback_transcript_ref,
+                "planner_trace": feedback_planner_trace,
                 "step_deltas": feedback_step_deltas,
                 "gateway_transcript_index": feedback_gateway_transcript_index,
                 "gateway_transcript_detail": feedback_gateway_transcript_detail,
@@ -2860,6 +2864,17 @@ def main(argv: list[str] | None = None) -> int:
             and feedback_gateway_transcript_detail.get("data", {}).get("summary", {}).get("step_ledger_delta_count") == 2
             and not any(item.get("actual_command_or_process_activity") for delta in feedback_step_deltas for item in delta)
             and "feedback-smoke-secret" not in json.dumps(feedback_step_deltas) + json.dumps(feedback_transcript_detail) + json.dumps(feedback_gateway_transcript_detail)
+        )
+        checks["native_tool_call_planner_trace_ok"] = (
+            [item.get("step") for item in feedback_planner_trace] == [1, 2, 3]
+            and [item.get("tool_call_count") for item in feedback_planner_trace] == [1, 1, 0]
+            and all(item.get("provider") == "smoke-tool-call-feedback" for item in feedback_planner_trace)
+            and all(item.get("context_provided") is True for item in feedback_planner_trace)
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("planner_trace_count") == 3
+            and feedback_gateway_transcript_detail.get("data", {}).get("summary", {}).get("planner_trace_count") == 3
+            and "Planner trace" in feedback_transcript
+            and "provider=`smoke-tool-call-feedback`" in feedback_transcript
+            and "feedback-smoke-secret" not in json.dumps(feedback_planner_trace) + feedback_transcript
         )
         feedback_final_prompt = feedback_adapter.prompts[-1] if feedback_adapter.prompts else ""
         checks["native_tool_call_cumulative_feedback_ok"] = (
