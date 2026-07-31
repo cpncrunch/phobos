@@ -47,6 +47,48 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallGuardrailAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-guardrail"
+
+    def __init__(self, confirm_marker: Path, block_marker: Path):
+        self.confirm_marker = confirm_marker
+        self.block_marker = block_marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "smoke model proposed target-affecting native tool calls",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native guardrail approval smoke",
+                                "command": f"curl -X POST https://app.example.test/api/native-smoke && touch {self.confirm_marker}",
+                                "execute": True,
+                            },
+                            "reason": "state-changing request must queue approval without execution",
+                        },
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "outside.example.test",
+                                "purpose": "native guardrail block smoke",
+                                "command": f"printf native-block > {self.block_marker}",
+                                "execute": True,
+                            },
+                            "reason": "out-of-scope target must block without execution",
+                        },
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-feedback"
 
@@ -999,6 +1041,48 @@ def main(argv: list[str] | None = None) -> int:
             and native_apply_payload.get("mode") == "applied"
             and "dry_run" in [item.get("result", {}).get("status") for item in native_apply_payload.get("results", [])]
             and not pending_native_approvals_after_apply
+        )
+
+        native_confirm_marker = root / "native-confirm-should-not-run.txt"
+        native_block_marker = root / "native-block-should-not-run.txt"
+        guardrail_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-guardrail.db"),
+                session_name="native-tool-guardrail-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallGuardrailAdapter(native_confirm_marker, native_block_marker),
+        )
+        try:
+            guardrail_plan = guardrail_runtime.handle_message('/auto model=true execute=true prompt="native guardrail smoke plan"')
+            guardrail_plan_payload = json.loads(guardrail_plan.split("\n", 1)[1])
+            pending_guardrail_after_plan = guardrail_runtime.store.list_approvals(guardrail_runtime.session_id, status="pending")
+            guardrail_plan_audit_events = [row["event"] for row in guardrail_runtime.store.list_audit(guardrail_runtime.session_id, limit=20)]
+            guardrail_apply = guardrail_runtime.handle_message('/auto apply=true model=true execute=true prompt="native guardrail smoke plan"')
+            guardrail_apply_payload = json.loads(guardrail_apply.split("\n", 1)[1])
+            pending_guardrail_after_apply = guardrail_runtime.store.list_approvals(guardrail_runtime.session_id, status="pending")
+            write("native-tool-guardrail-plan.txt", guardrail_plan)
+            write("native-tool-guardrail-apply.txt", guardrail_apply)
+        finally:
+            guardrail_runtime.close()
+        guardrail_plan_statuses = [call.get("validation", {}).get("guardrail_status") for call in guardrail_plan_payload.get("tool_calls", [])]
+        guardrail_previews = [call.get("validation", {}).get("guardrail_preview", {}) for call in guardrail_plan_payload.get("tool_calls", [])]
+        guardrail_result_statuses = [item.get("result", {}).get("status") for item in guardrail_apply_payload.get("results", [])]
+        checks["native_tool_call_guardrail_approval_ok"] = (
+            guardrail_plan_payload.get("mode") == "plan_only"
+            and guardrail_plan_statuses == ["confirm", "block"]
+            and all(preview.get("no_target_activity") is True and preview.get("evidence_written") is False and preview.get("approval_queued") is False for preview in guardrail_previews)
+            and "will require guardrail approval" in json.dumps(guardrail_plan_payload.get("warnings", []))
+            and "will be blocked by guardrails" in json.dumps(guardrail_plan_payload.get("warnings", []))
+            and not pending_guardrail_after_plan
+            and "tool_call" not in guardrail_plan_audit_events
+            and guardrail_apply_payload.get("mode") == "applied"
+            and guardrail_result_statuses == ["needs_approval", "blocked"]
+            and len(pending_guardrail_after_apply) == 1
+            and pending_guardrail_after_apply[0].get("tool_name") == "run_command"
+            and not native_confirm_marker.exists()
+            and not native_block_marker.exists()
         )
 
         feedback_runtime = PhobosAgentRuntime(

@@ -70,6 +70,48 @@ class FakeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallGuardrailAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-guardrail"
+
+    def __init__(self, confirm_marker: Path, block_marker: Path):
+        self.confirm_marker = confirm_marker
+        self.block_marker = block_marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model proposed target-affecting calls that must stay guardrailed",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native guardrail confirm boundary",
+                                "command": f"curl -X POST https://app.example.test/api/native-check && touch {self.confirm_marker}",
+                                "execute": True,
+                            },
+                            "reason": "state-changing HTTP must queue approval instead of executing",
+                        },
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "outside.example.test",
+                                "purpose": "native guardrail block boundary",
+                                "command": f"printf blocked-native > {self.block_marker}",
+                                "execute": True,
+                            },
+                            "reason": "out-of-scope target must block instead of executing",
+                        },
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "fake-tool-call-feedback"
 
@@ -1990,6 +2032,55 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("dry_run", result_statuses)
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
                 self.assertFalse((tmp_path / "should-not-run").exists())
+            finally:
+                runtime.close()
+
+    def test_model_plan_previews_guardrails_and_apply_queues_confirm_without_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Guardrail Boundary",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            confirm_marker = tmp_path / "confirm-should-not-run.txt"
+            block_marker = tmp_path / "block-should-not-run.txt"
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-guardrails",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallGuardrailAdapter(confirm_marker, block_marker),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true execute=true prompt="native guardrail boundary plan"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call["validation"].get("guardrail_status") for call in plan_payload["tool_calls"]], ["confirm", "block"])
+                for call in plan_payload["tool_calls"]:
+                    preview = call["validation"].get("guardrail_preview", {})
+                    self.assertTrue(preview.get("no_target_activity"))
+                    self.assertFalse(preview.get("evidence_written"))
+                    self.assertFalse(preview.get("approval_queued"))
+                self.assertIn("will require guardrail approval", json.dumps(plan_payload["warnings"]))
+                self.assertIn("will be blocked by guardrails", json.dumps(plan_payload["warnings"]))
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                plan_audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
+                self.assertNotIn("tool_call", plan_audit_events)
+
+                applied = runtime.handle_message('/auto apply=true model=true execute=true prompt="native guardrail boundary plan"')
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                result_statuses = [item["result"]["status"] for item in apply_payload["results"]]
+                self.assertEqual(result_statuses, ["needs_approval", "blocked"])
+                pending = runtime.store.list_approvals(runtime.session_id, status="pending")
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["tool_name"], "run_command")
+                self.assertFalse(confirm_marker.exists())
+                self.assertFalse(block_marker.exists())
             finally:
                 runtime.close()
 

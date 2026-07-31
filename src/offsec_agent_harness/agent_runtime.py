@@ -14,7 +14,7 @@ from .agent_store import AgentStore, utc_now
 from .agent_tools import OffSecToolRegistry, ToolResult
 from .agent_bridges import BridgeConfig
 from .model_adapters import BaseModelAdapter, build_adapter, build_fallback_adapter
-from .models import EngagementROE, redact_secrets
+from .models import ActionRequest, EngagementROE, redact_secrets
 
 
 @dataclass(slots=True)
@@ -467,6 +467,15 @@ class OffSecAgentRuntime:
                 runtime_policy = "confirm_required"
                 warnings.append(f"Planned tool {tool} will require approval by runtime policy if applied.")
             validation_payload = dict(call.validation or {})
+            guardrail_preview = _guardrail_preview_for_planned_call(self.roe, self.registry, tool, validated_args)
+            if guardrail_preview:
+                guardrail_status = str(guardrail_preview.get("status") or "unknown")
+                validation_payload["guardrail_status"] = guardrail_status
+                validation_payload["guardrail_preview"] = guardrail_preview
+                if guardrail_status == "confirm":
+                    warnings.append(f"Planned tool {tool} will require guardrail approval if applied.")
+                elif guardrail_status == "block":
+                    warnings.append(f"Planned tool {tool} will be blocked by guardrails if applied.")
             validation_payload.update({"status": "ok", "schema_validated": True, "runtime_policy": runtime_policy})
             validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload))
         return AgentPlan(prompt=plan.prompt, summary=plan.summary, tool_calls=validated_calls, warnings=warnings, rejected_tool_calls=rejected)
@@ -598,6 +607,47 @@ class OffSecAgentRuntime:
         self.loaded_skills[skill.name] = skill
         self.store.audit(self.session_id, "skill_loaded", {"skill": skill.name, "path": skill.path})
         return skill
+
+
+def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecToolRegistry, tool: str, args: Any) -> dict[str, Any] | None:
+    """Return a read-only guardrail preview for target-affecting planned calls.
+
+    Native model/tool-call planning must not call registry.run(...) just to label
+    a plan: that would write evidence rows, queue approvals, or dispatch tools.
+    This helper mirrors the command request shape and evaluates guardrails only,
+    so plan-only transcripts can show whether applying a target-affecting call
+    would allow, confirm-gate, or block before any side effects are possible.
+    """
+
+    if tool not in {"assess_action", "run_command", "start_process"}:
+        return None
+    if not isinstance(args, dict):
+        return {"status": "error", "error": "tool args were not an object"}
+    try:
+        request = ActionRequest(
+            target=str(args.get("target", "")),
+            action_type=str(args.get("action_type") or args.get("type") or "host"),
+            purpose=str(args.get("purpose", "")),
+            command=args.get("command"),
+            actor=str(args.get("actor", "operator")),
+        )
+        decision = registry.harness.guardrails.evaluate(roe, request)
+        data = _redact_runtime_value(decision.to_dict())
+        if not isinstance(data, dict):
+            return {"status": "error", "error": "guardrail preview could not be serialized"}
+        return {
+            "status": data.get("status"),
+            "reasons": list(data.get("reasons") or [])[:6],
+            "required_confirmations": list(data.get("required_confirmations") or [])[:6],
+            "safer_alternatives": list(data.get("safer_alternatives") or [])[:6],
+            "redacted_command": data.get("redacted_command"),
+            "no_target_activity": True,
+            "evidence_written": False,
+            "approval_queued": False,
+        }
+    except Exception as exc:  # defensive preview boundary; execution path still revalidates
+        return {"status": "error", "error": redact_secrets(str(exc)) or "guardrail preview failed"}
+
 
 
 def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
