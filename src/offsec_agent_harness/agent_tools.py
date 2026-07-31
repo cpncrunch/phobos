@@ -3524,8 +3524,10 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
     calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
     if not calls and isinstance(data.get("steps"), list):
         for step in data.get("steps", []):
-            plan = step.get("plan") if isinstance(step, dict) and isinstance(step.get("plan"), dict) else {}
-            step_calls = plan.get("tool_calls") if isinstance(plan.get("tool_calls"), list) else []
+            raw_plan = step.get("plan") if isinstance(step, dict) else None
+            plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
+            raw_step_calls = plan.get("tool_calls")
+            step_calls: list[Any] = raw_step_calls if isinstance(raw_step_calls, list) else []
             calls.extend(step_calls)
     return _redacted_mapping({
         "kind": kind,
@@ -3625,19 +3627,28 @@ def _auto_transcript_ledger_counts(ledger: Any) -> dict[str, int]:
 
 def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int = 20) -> dict[str, Any]:
     data = payload if isinstance(payload, dict) else {}
-    ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
-    calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
+    raw_ledger = data.get("execution_ledger")
+    ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
+    raw_calls = data.get("tool_calls")
+    calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
     if not calls and isinstance(data.get("steps"), list):
         for step in data.get("steps", []):
-            plan = step.get("plan") if isinstance(step, dict) and isinstance(step.get("plan"), dict) else {}
-            step_calls = plan.get("tool_calls") if isinstance(plan.get("tool_calls"), list) else []
+            raw_plan = step.get("plan") if isinstance(step, dict) else None
+            plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
+            raw_step_calls = plan.get("tool_calls")
+            step_calls: list[Any] = raw_step_calls if isinstance(raw_step_calls, list) else []
             calls.extend(step_calls)
     results: list[dict[str, Any]] = []
+    step_ledger_deltas: list[dict[str, Any]] = []
     raw_results = data.get("results") if isinstance(data.get("results"), list) else []
     if raw_results:
         results.extend(item for item in raw_results if isinstance(item, dict))
     elif isinstance(data.get("steps"), list):
         for step in data.get("steps", []):
+            if isinstance(step, dict) and isinstance(step.get("execution_ledger_delta"), list):
+                for item in step.get("execution_ledger_delta", []):
+                    if isinstance(item, dict):
+                        step_ledger_deltas.append(item)
             for item in step.get("results", []) if isinstance(step, dict) and isinstance(step.get("results"), list) else []:
                 if isinstance(item, dict):
                     results.append(item)
@@ -3679,8 +3690,10 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         "result_summaries": result_summaries,
         "result_count": len(results),
         "execution_ledger": ledger[:max_ledger],
+        "step_ledger_deltas": step_ledger_deltas[:max_ledger],
+        "step_ledger_delta_count": len(step_ledger_deltas),
         "execution_counts": _auto_transcript_ledger_counts(ledger),
-        "truncated": len(ledger) > max_ledger or len(calls) > max_ledger or len(results) > max_ledger,
+        "truncated": len(ledger) > max_ledger or len(calls) > max_ledger or len(results) > max_ledger or len(step_ledger_deltas) > max_ledger,
     })
 
 

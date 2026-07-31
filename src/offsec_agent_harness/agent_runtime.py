@@ -487,7 +487,7 @@ class OffSecAgentRuntime:
                     "no_tools_executed": True,
                 },
             )
-            return "Auto plan (no tools executed):\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
+            return "Auto plan (no tools executed):\n" + json.dumps(_redact_runtime_value(payload), indent=2)
         results = []
         execution_ledger = []
         for call in plan.tool_calls:
@@ -522,7 +522,7 @@ class OffSecAgentRuntime:
                 "artifacts": payload.get("artifacts", {}),
             },
         )
-        return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
+        return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)
 
     def _validate_plan(self, plan: AgentPlan, *, allow_command_execution: bool) -> AgentPlan:
         """Validate planned tool names and JSON-schema args without dispatch.
@@ -789,12 +789,20 @@ class OffSecAgentRuntime:
             for signature in signatures:
                 seen.add(signature)
             step_results = []
+            step_ledger_delta = []
             for call in plan.tool_calls:
                 result = self.registry.run(call.tool, call.args)
                 execution = _planned_call_execution_ledger(call, result, step=step)
                 execution_ledger.append(execution)
+                step_ledger_delta.append(execution)
                 step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict(), "execution": execution}))
-            step_record = _redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results})
+            step_record = _redact_runtime_value({
+                "step": step,
+                "mode": "applied",
+                "plan": plan.to_dict(),
+                "results": step_results,
+                "execution_ledger_delta": step_ledger_delta,
+            })
             terminal_status_values: list[str] = []
             for item in step_results:
                 if not isinstance(item, dict):
@@ -866,7 +874,7 @@ class OffSecAgentRuntime:
                 "transcript_artifact_written": payload.get("transcript_artifact_written", False),
             },
         )
-        return "Auto loop completed:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:12000]
+        return "Auto loop completed:\n" + json.dumps(_redact_runtime_value(payload), indent=2)
 
     def _load_skill(self, name: str) -> LocalSkill:
         skill = load_skill(name, self.config.skill_dirs)
@@ -1055,6 +1063,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "max_auto_steps": int(config.max_auto_steps),
             "plan_only_default": True,
             "execution_requires_operator_execute_true": True,
+            "per_step_execution_ledger_delta": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "model_error_stop_enforced": True,
@@ -1796,6 +1805,19 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
             lines.append("")
         raw_results = step.get("results")
         results: list[Any] = raw_results if isinstance(raw_results, list) else []
+        raw_delta = step.get("execution_ledger_delta")
+        delta: list[Any] = raw_delta if isinstance(raw_delta, list) else []
+        if delta:
+            lines.append("Execution ledger delta:")
+            for item in delta:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f"- `{item.get('tool')}`: state=`{item.get('execution_state')}`, "
+                    f"result=`{item.get('result_status')}`, "
+                    f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`"
+                )
+            lines.append("")
         if results:
             lines.append("Tool results:")
             for item in results:

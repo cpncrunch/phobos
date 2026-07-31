@@ -1721,6 +1721,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
+            and native_status_data.get("per_step_execution_ledger_delta") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("model_error_stop_enforced") is True
@@ -2181,6 +2182,12 @@ def main(argv: list[str] | None = None) -> int:
             feedback_loop = feedback_runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback smoke token=feedback-smoke-secret"')
             feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
             feedback_ledger = feedback_payload.get("execution_ledger", []) if isinstance(feedback_payload.get("execution_ledger"), list) else []
+            feedback_steps = feedback_payload.get("steps", []) if isinstance(feedback_payload.get("steps"), list) else []
+            feedback_step_deltas = [
+                step.get("execution_ledger_delta", [])
+                for step in feedback_steps
+                if isinstance(step, dict) and step.get("mode") == "applied"
+            ]
             feedback_recall = feedback_runtime.handle_message('/recall query=native-feedback-recovered')
             feedback_artifacts = feedback_payload.get("artifacts", {}) if isinstance(feedback_payload.get("artifacts"), dict) else {}
             feedback_json_path = Path(feedback_artifacts.get("json", ""))
@@ -2264,6 +2271,7 @@ def main(argv: list[str] | None = None) -> int:
                 "transcript_index": feedback_transcript_list,
                 "transcript_detail": feedback_transcript_detail,
                 "transcript_ref": feedback_transcript_ref,
+                "step_deltas": feedback_step_deltas,
                 "gateway_transcript_index": feedback_gateway_transcript_index,
                 "gateway_transcript_detail": feedback_gateway_transcript_detail,
                 "symlink_created": feedback_symlink_created,
@@ -2460,8 +2468,22 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("result", {}).get("status") for step in feedback_payload.get("steps", []) for item in step.get("results", [])][:2] == ["error", "ok"]
             and "native feedback loop recovered" in feedback_recall
             and "Execution ledger" in feedback_transcript
+            and "Execution ledger delta" in feedback_transcript
             and "Workspace file not found" in feedback_transcript
             and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
+        )
+        checks["native_tool_call_step_ledger_delta_ok"] = (
+            len(feedback_step_deltas) == 2
+            and all(len(delta) == 1 for delta in feedback_step_deltas)
+            and [delta[0].get("step") for delta in feedback_step_deltas] == [1, 2]
+            and [delta[0].get("execution_state") for delta in feedback_step_deltas] == ["handler_error_no_target_execution_claimed", "completed_without_command_execution"]
+            and feedback_step_deltas[0][0] == feedback_ledger[0]
+            and feedback_step_deltas[1][0] == feedback_ledger[1]
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("step_ledger_delta_count") == 2
+            and [item.get("step") for item in feedback_transcript_detail.get("data", {}).get("summary", {}).get("step_ledger_deltas", [])] == [1, 2]
+            and feedback_gateway_transcript_detail.get("data", {}).get("summary", {}).get("step_ledger_delta_count") == 2
+            and not any(item.get("actual_command_or_process_activity") for delta in feedback_step_deltas for item in delta)
+            and "feedback-smoke-secret" not in json.dumps(feedback_step_deltas) + json.dumps(feedback_transcript_detail) + json.dumps(feedback_gateway_transcript_detail)
         )
         feedback_final_prompt = feedback_adapter.prompts[-1] if feedback_adapter.prompts else ""
         checks["native_tool_call_cumulative_feedback_ok"] = (
