@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -1438,6 +1439,24 @@ def main(argv: list[str] | None = None) -> int:
             if feedback_md_path.is_file():
                 feedback_transcript += feedback_md_path.read_text(encoding="utf-8")
 
+            feedback_rel_json = feedback_json_path.relative_to(feedback_runtime.registry.harness.store.root).as_posix() if feedback_json_path.is_file() else ""
+            feedback_outside_transcript = root / "outside-native-transcript.txt"
+            feedback_outside_transcript.write_text('{"prompt":"OUTSIDE_NATIVE_TRANSCRIPT_SENTINEL"}\n', encoding="utf-8")
+            feedback_symlink_created = False
+            if feedback_rel_json and hasattr(os, "symlink"):
+                try:
+                    feedback_symlink = feedback_json_path.parent / "escape.json"
+                    if feedback_symlink.exists() or feedback_symlink.is_symlink():
+                        feedback_symlink.unlink()
+                    feedback_symlink.symlink_to(feedback_outside_transcript)
+                    feedback_symlink_created = True
+                except OSError:
+                    feedback_symlink_created = False
+            feedback_transcript_list = feedback_runtime.registry.run("list_auto_transcripts", {"kind": "loop", "limit": 10}).to_dict()
+            feedback_transcript_detail = feedback_runtime.registry.run("get_auto_transcript", {"path": feedback_rel_json, "max_ledger": 2}).to_dict()
+            feedback_transcript_ref = feedback_runtime.registry.run("resolve_local_ref", {"ref": f"auto-transcript:{feedback_rel_json}", "max_ledger": 2}).to_dict()
+            feedback_transcript_slash = feedback_runtime.handle_message(f"/auto-transcript path={feedback_rel_json} max_ledger=2") if feedback_rel_json else ""
+
             feedback_gateway = AgentGateway(feedback_runtime, port=0)
             feedback_thread = threading.Thread(target=feedback_gateway.serve_forever, daemon=True)
             feedback_thread.start()
@@ -1461,6 +1480,11 @@ def main(argv: list[str] | None = None) -> int:
             gateway_auto_payload = json.loads(str(gateway_auto.get("response", "{}")).split("\n", 1)[1])
             gateway_loop = feedback_post("/auto-loop", {"prompt": "native gateway loop token=native-loop-secret", "model": True, "steps": "4"})
             gateway_loop_payload = json.loads(str(gateway_loop.get("response", "{}")).split("\n", 1)[1])
+            with urllib.request.urlopen(f"http://{feedback_host}:{feedback_port}/auto-transcripts?kind=loop&limit=5", timeout=5) as response:
+                feedback_gateway_transcript_index = json.loads(response.read().decode("utf-8"))
+            transcript_detail_query = urllib.parse.urlencode({"path": feedback_rel_json, "max_ledger": "2"})
+            with urllib.request.urlopen(f"http://{feedback_host}:{feedback_port}/auto-transcript?{transcript_detail_query}", timeout=5) as response:
+                feedback_gateway_transcript_detail = json.loads(response.read().decode("utf-8"))
             try:
                 bad_gateway_req = urllib.request.Request(
                     f"http://{feedback_host}:{feedback_port}/auto-loop",
@@ -1485,6 +1509,12 @@ def main(argv: list[str] | None = None) -> int:
                 "gateway_auto": gateway_auto,
                 "gateway_loop": gateway_loop,
                 "bad_gateway_steps": bad_gateway_steps,
+                "transcript_index": feedback_transcript_list,
+                "transcript_detail": feedback_transcript_detail,
+                "transcript_ref": feedback_transcript_ref,
+                "gateway_transcript_index": feedback_gateway_transcript_index,
+                "gateway_transcript_detail": feedback_gateway_transcript_detail,
+                "symlink_created": feedback_symlink_created,
                 "bridge_loop": bridge_loop.to_dict(),
             }, indent=2, sort_keys=True))
         finally:
@@ -1500,6 +1530,37 @@ def main(argv: list[str] | None = None) -> int:
             and "Execution ledger" in feedback_transcript
             and "Workspace file not found" in feedback_transcript
             and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
+        )
+        feedback_transcript_rows = feedback_transcript_list.get("data", {}).get("transcripts", []) if isinstance(feedback_transcript_list.get("data"), dict) else []
+        feedback_transcript_blob = json.dumps({
+            "list": feedback_transcript_list,
+            "detail": feedback_transcript_detail,
+            "ref": feedback_transcript_ref,
+            "slash": feedback_transcript_slash,
+            "gateway_index": feedback_gateway_transcript_index,
+            "gateway_detail": feedback_gateway_transcript_detail,
+        }, sort_keys=True)
+        checks["native_tool_call_transcript_index_detail_ok"] = (
+            feedback_transcript_list.get("status") == "ok"
+            and feedback_rel_json in [str(item.get("path")) for item in feedback_transcript_rows]
+            and feedback_transcript_list.get("data", {}).get("no_target_activity") is True
+            and feedback_transcript_list.get("data", {}).get("raw_file_contents_emitted") is False
+            and (not feedback_symlink_created or "escape.json" in json.dumps(feedback_transcript_list.get("data", {}).get("skipped", [])))
+            and feedback_transcript_detail.get("status") == "ok"
+            and feedback_transcript_detail.get("data", {}).get("raw_file_contents_emitted") is False
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("execution_counts", {}).get("handler_error") == 1
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("result_count") == 2
+            and feedback_transcript_ref.get("status") == "ok"
+            and "Native tool-calling transcript returned" in feedback_transcript_slash
+            and "/auto-transcripts" in feedback_routes.get("paths", [])
+            and "/auto-transcript" in feedback_routes.get("paths", [])
+            and feedback_gateway_transcript_index.get("status") == "ok"
+            and feedback_gateway_transcript_detail.get("status") == "ok"
+            and feedback_gateway_transcript_detail.get("data", {}).get("raw_file_contents_emitted") is False
+            and "execution_counts" in feedback_gateway_transcript_detail.get("data", {}).get("summary", {})
+            and "OUTSIDE_NATIVE_TRANSCRIPT_SENTINEL" not in feedback_transcript_blob
+            and "feedback-smoke-secret" not in feedback_transcript_blob
+            and "native-loop-secret" not in feedback_transcript_blob
         )
         checks["native_tool_call_execution_ledger_ok"] = (
             len(native_apply_ledger) >= 2

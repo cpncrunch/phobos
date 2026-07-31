@@ -238,6 +238,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("/timeline?include_audit=maybe", "include_audit must be a boolean"),
                     ("/manifest?include_agent=perhaps", "include_agent must be a boolean"),
                     ("/manifest-verify?detect_new=sometimes", "detect_new must be a boolean"),
+                    ("/auto-transcript?max_ledger=not-an-int", "max_ledger must be an integer"),
                     ("/ref?kind=artifact&id=not-an-int", "id must be an integer"),
                     ("/ref?ref=artifact:agent/preflight/report.md&max_bytes=not-an-int", "max_bytes must be an integer"),
                 ]:
@@ -2503,6 +2504,40 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("Workspace file not found", transcript)
                 self.assertIn("feedback loop recovered", transcript)
                 self.assertNotIn("feedback-secret", transcript)
+                outside_transcript = tmp_path / "outside-auto-transcript.json"
+                outside_transcript.write_text('{"prompt":"outside-auto-transcript-sentinel"}\n', encoding="utf-8")
+                symlink_path = json_path.parent / "escape.json"
+                symlink_created = False
+                if hasattr(os, "symlink"):
+                    try:
+                        os.symlink(outside_transcript, symlink_path)
+                        symlink_created = True
+                    except OSError:
+                        symlink_created = False
+                transcript_list = runtime.registry.run("list_auto_transcripts", {"kind": "loop", "limit": 10})
+                self.assertEqual(transcript_list.status, "ok", transcript_list.to_dict())
+                self.assertTrue(transcript_list.data["no_target_activity"])
+                self.assertFalse(transcript_list.data["raw_file_contents_emitted"])
+                paths = [item["path"] for item in transcript_list.data["transcripts"]]
+                rel_json = json_path.relative_to(runtime.registry.harness.store.root).as_posix()
+                self.assertIn(rel_json, paths)
+                if symlink_created:
+                    self.assertIn("escape.json", json.dumps(transcript_list.data.get("skipped", [])))
+                self.assertNotIn("outside-auto-transcript-sentinel", json.dumps(transcript_list.to_dict()))
+                detail = runtime.registry.run("get_auto_transcript", {"path": rel_json, "max_ledger": 2})
+                self.assertEqual(detail.status, "ok", detail.to_dict())
+                self.assertFalse(detail.data["raw_file_contents_emitted"])
+                self.assertEqual(detail.data["summary"]["execution_counts"]["handler_error"], 1)
+                self.assertEqual(detail.data["summary"]["result_count"], 2)
+                self.assertNotIn("feedback-secret", json.dumps(detail.to_dict()))
+                self.assertNotIn("outside-auto-transcript-sentinel", json.dumps(detail.to_dict()))
+                ref_detail = runtime.registry.run("resolve_local_ref", {"ref": f"auto-transcript:{rel_json}"})
+                self.assertEqual(ref_detail.status, "ok", ref_detail.to_dict())
+                self.assertFalse(ref_detail.data["entity"]["raw_file_contents_emitted"])
+                slash_detail = runtime.handle_message(f"/auto-transcript path={rel_json} max_ledger=2")
+                self.assertIn("Native tool-calling transcript returned", slash_detail)
+                blocked = runtime.registry.run("get_auto_transcript", {"path": "../outside-auto-transcript.json"})
+                self.assertEqual(blocked.status, "blocked", blocked.to_dict())
                 audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
                 self.assertIn("auto_loop", audit_events)
             finally:
@@ -2548,6 +2583,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     routes = json.loads(response.read().decode("utf-8"))
                 self.assertIn("/auto", routes.get("paths", []))
                 self.assertIn("/auto-loop", routes.get("paths", []))
+                self.assertIn("/auto-transcripts", routes.get("paths", []))
+                self.assertIn("/auto-transcript", routes.get("paths", []))
                 with urllib.request.urlopen(f"http://{host}:{port}/", timeout=5) as response:
                     dashboard = response.read().decode("utf-8")
                 self.assertIn("Native Tool Loop", dashboard)
@@ -2562,6 +2599,21 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(loop_payload["steps_executed"], 2)
                 self.assertTrue(loop_payload["transcript_artifact_written"])
                 self.assertNotIn("loop-secret", json.dumps(loop))
+
+                with urllib.request.urlopen(f"http://{host}:{port}/auto-transcripts?kind=loop&limit=5", timeout=5) as response:
+                    transcript_index = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(transcript_index.get("status"), "ok", transcript_index)
+                transcript_rows = transcript_index.get("data", {}).get("transcripts", [])
+                self.assertTrue(transcript_rows)
+                self.assertTrue(transcript_index.get("data", {}).get("no_target_activity"))
+                self.assertFalse(transcript_index.get("data", {}).get("raw_file_contents_emitted"))
+                transcript_path = transcript_rows[0]["path"]
+                with urllib.request.urlopen(f"http://{host}:{port}/auto-transcript?" + urllib.parse.urlencode({"path": transcript_path, "max_ledger": "2"}), timeout=5) as response:
+                    transcript_detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(transcript_detail.get("status"), "ok", transcript_detail)
+                self.assertFalse(transcript_detail.get("data", {}).get("raw_file_contents_emitted"))
+                self.assertIn("execution_counts", transcript_detail.get("data", {}).get("summary", {}))
+                self.assertNotIn("loop-secret", json.dumps(transcript_index) + json.dumps(transcript_detail))
 
                 invalid_req = urllib.request.Request(
                     f"http://{host}:{port}/auto-loop",

@@ -446,6 +446,28 @@ class AgentGateway:
                     if path == "/guardrails":
                         _write_json(self, _guardrail_policy(runtime))
                         return
+                    if path in {"/auto-transcripts", "/native-transcripts", "/tool-call-transcripts"}:
+                        query = parse_qs(parsed.query)
+                        limit = _query_int(self, query, "limit", 50)
+                        if limit is None:
+                            return
+                        kind = (query.get("kind") or ["all"])[0]
+                        _write_json(self, runtime.registry.run("list_auto_transcripts", {"kind": kind, "limit": limit}).to_dict())
+                        return
+                    if path in {"/auto-transcript", "/native-transcript", "/tool-call-transcript", "/auto-transcript-detail", "/native-transcript-detail"}:
+                        query = parse_qs(parsed.query)
+                        max_ledger = _query_int(self, query, "max_ledger", 20)
+                        if max_ledger is None:
+                            return
+                        args: dict[str, Any] = {"max_ledger": max_ledger}
+                        if (query.get("path") or [""])[0]:
+                            args["path"] = (query.get("path") or [""])[0]
+                        if (query.get("ref") or query.get("local_ref") or [""])[0]:
+                            args["ref"] = (query.get("ref") or query.get("local_ref") or [""])[0]
+                        if (query.get("kind") or [""])[0]:
+                            args["kind"] = (query.get("kind") or [""])[0]
+                        _write_json(self, runtime.registry.run("get_auto_transcript", args).to_dict())
+                        return
                 _write_json(self, {"error": "not found", "paths": _gateway_paths()}, status=404)
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
@@ -619,6 +641,10 @@ def _gateway_paths() -> list[str]:
         "/auth",
         "/bridges",
         "/guardrails",
+        "/auto-transcripts",
+        "/auto-transcript",
+        "/native-transcripts",
+        "/native-transcript",
         "/audit",
         "/message",
         "/auto",

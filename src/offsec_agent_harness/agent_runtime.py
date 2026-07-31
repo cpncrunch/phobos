@@ -408,6 +408,16 @@ class OffSecAgentRuntime:
             "media-artifact": "media_get",
             "sealed-export": "sealed_export",
             "sealed-import": "sealed_import",
+            "auto-transcripts": "list_auto_transcripts",
+            "auto-transcript-list": "list_auto_transcripts",
+            "native-transcripts": "list_auto_transcripts",
+            "native-transcript-list": "list_auto_transcripts",
+            "tool-call-transcripts": "list_auto_transcripts",
+            "auto-transcript": "get_auto_transcript",
+            "auto-transcript-detail": "get_auto_transcript",
+            "native-transcript": "get_auto_transcript",
+            "native-transcript-detail": "get_auto_transcript",
+            "tool-call-transcript": "get_auto_transcript",
             "audit": "audit_log",
             "audit-get": "get_audit",
             "audit-detail": "get_audit",
@@ -1542,6 +1552,8 @@ HELP_TEXT = """Phobos Agent commands:
 /tool name=<tool_name> key=value ...
 /auto prompt=<natural request> apply=false execute=false model=false
 /auto-loop prompt=<goal> steps=5 execute=false model=false
+/auto-transcripts kind=all limit=50
+/auto-transcript path=<agent/auto-plans-or-auto-loops/file.json> max_ledger=20
 /plugins
 /skills
 /skill name=<skill-name>
@@ -1625,7 +1637,7 @@ HELP_TEXT = """Phobos Agent commands:
 /manifest-verify path=<manifest.json> out=<optional.json>
 /secret-scan limit=200 max_bytes=2000000 include_agent=true out=<optional.json>
 /closeout out=<optional.md>
-/ref ref=<task:1|finding:1|tool-run:1|artifact:agent/path>
+/ref ref=<task:1|finding:1|tool-run:1|auto-transcript:agent/auto-loops/file.json|artifact:agent/path>
 /tasks status=all
 /task-detail id=<task-id>
 /task-add content=<task> status=pending

@@ -43,6 +43,7 @@ _FINDING_SEVERITY_ALIASES = {"info": "Informational", "med": "Medium", "crit": "
 _TIMELINE_ORDER_VALUES = ("desc", "asc", "newest", "newest-first", "oldest", "oldest-first")
 _MEDIA_KIND_VALUES = ("image", "audio", "voice", "video", "file")
 _NMAP_PROFILE_VALUES = ("safe", "version", "quick")
+_AUTO_TRANSCRIPT_KIND_VALUES = ("all", "plan", "loop")
 
 # Registry-level resource ceilings for operator/API-controlled numeric args.
 # Handlers may keep defensive clamps, but the generic /tool and gateway boundary
@@ -309,6 +310,8 @@ class OffSecToolRegistry:
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": _integer("Maximum rows to return.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}, []))
         self.register_tool("get_delegation", self.get_delegation, _spec("get_delegation", "Get one current-session delegation batch by id, including child-session metadata and artifact paths.", {"id": _integer("Current-session delegation id.", minimum=1)}, ["id"]))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
+        self.register_tool("list_auto_transcripts", self.list_auto_transcripts, _spec("list_auto_transcripts", "List redacted native /auto and /auto-loop transcript artifacts without reading target systems.", {"kind": _string_enum("plan/loop/all transcript filter; default all.", _AUTO_TRANSCRIPT_KIND_VALUES), "limit": _integer("Maximum transcript rows to return.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}, []))
+        self.register_tool("get_auto_transcript", self.get_auto_transcript, _spec("get_auto_transcript", "Return metadata and bounded redacted summaries for one native tool-calling transcript; emits no raw file contents.", {"path": _string("Evidence-root relative transcript JSON path, e.g. agent/auto-loops/auto-loop-...json."), "ref": _string("auto-transcript:agent/... JSON ref alias."), "kind": _string_enum("plan/loop/all filter when path is omitted; default all.", _AUTO_TRANSCRIPT_KIND_VALUES), "max_ledger": _integer("Maximum ledger/result rows to include.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}, []))
         self.register_tool("safety_preflight", self.safety_preflight, _spec("safety_preflight", "Run a read-only engagement/runtime readiness preflight and write a redacted Markdown report.", {"out": _string("Optional Markdown output path; relative paths go under agent/preflight.")}, []))
         self.register_tool("guardrail_selftest", self.guardrail_selftest, _spec("guardrail_selftest", "Run a read-only guardrail simulator over representative allow/confirm/block cases; writes a redacted Markdown report and performs no target activity.", {"target": _string("Optional in-scope host/IP/URL to use for synthetic allow/confirm cases."), "host": _string("Alias for target."), "url": _string("Alias for target."), "out": _string("Optional Markdown output path; relative paths go under agent/guardrails.")}, []))
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string_enum("image/audio/voice/video/file; inferred when omitted.", _MEDIA_KIND_VALUES)}, ["path"]))
@@ -1426,6 +1429,49 @@ class OffSecToolRegistry:
         env = {name: {"set": bool(os.environ.get(name)), "length": len(os.environ.get(name, "")) if args.get("include_environment", False) and os.environ.get(name) else None} for name in sorted(set(env_names.values()))}
         return ToolResult("ok", "Auth and token environment checked without revealing values.", {"provider": adapter_provider, "environment": env, "secret_values_redacted": True})
 
+    def list_auto_transcripts(self, args: dict[str, Any]) -> ToolResult:
+        kind = _normalize_auto_transcript_kind(str(args.get("kind") or "all"))
+        limit = max(1, min(int(args.get("limit", 50)), _SCHEMA_ROW_LIMIT_MAX))
+        entries, skipped = _auto_transcript_entries(self.harness.store.root, kind=kind, limit=limit)
+        data = _redacted_mapping({
+            "kind": kind,
+            "count": len(entries),
+            "transcripts": entries,
+            "skipped": skipped,
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+            "secret_values_redacted": True,
+        })
+        return ToolResult("ok", f"Found {len(entries)} native tool-calling transcript(s).", data)
+
+    def get_auto_transcript(self, args: dict[str, Any]) -> ToolResult:
+        kind = _normalize_auto_transcript_kind(str(args.get("kind") or "all"))
+        max_ledger = max(1, min(int(args.get("max_ledger", 20)), _SCHEMA_ROW_LIMIT_MAX))
+        raw_ref = str(args.get("ref") or args.get("local_ref") or "").strip()
+        path_value = str(args.get("path") or args.get("name") or raw_ref or "").strip()
+        resolved = _resolve_auto_transcript_path(self.harness.store.root, path_value, kind=kind)
+        if resolved.get("status") != "ok":
+            status = "blocked" if resolved.get("status") == "blocked" else "error"
+            return ToolResult(status, str(resolved.get("message") or "Transcript path could not be resolved."), {"resolution": _redacted_mapping(resolved), "no_target_activity": True, "raw_file_contents_emitted": False, "secret_values_redacted": True})
+        path = Path(str(resolved["path"]))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return ToolResult("error", f"Transcript JSON could not be read or parsed: {exc}", {"path": redact_secrets(str(path)), "no_target_activity": True, "raw_file_contents_emitted": False, "secret_values_redacted": True})
+        transcript_kind = str(resolved.get("kind") or _auto_transcript_kind_from_path(path))
+        entry = _auto_transcript_entry(self.harness.store.root, transcript_kind, path, payload=payload)
+        if entry is None:
+            return ToolResult("blocked", "Transcript path is not safely contained under the engagement evidence root.", {"path": redact_secrets(str(path)), "no_target_activity": True, "raw_file_contents_emitted": False, "secret_values_redacted": True})
+        summary = _auto_transcript_payload_summary(payload, max_ledger=max_ledger)
+        data = _redacted_mapping({
+            "transcript": entry,
+            "summary": summary,
+            "no_target_activity": True,
+            "raw_file_contents_emitted": False,
+            "secret_values_redacted": True,
+        })
+        return ToolResult("ok", f"Native tool-calling transcript returned: {entry.get('path')}", data)
+
     def safety_preflight(self, args: dict[str, Any]) -> ToolResult:
         checks = _preflight_checks(
             self.roe,
@@ -1667,6 +1713,22 @@ class OffSecToolRegistry:
                     "ref": display_ref,
                     "kind": kind,
                     "id": ident,
+                    "entity": _redacted_mapping(result.data),
+                    "no_target_activity": True,
+                    "secret_values_redacted": True,
+                },
+            )
+        if kind in {"auto-transcript", "native-transcript", "auto-plan", "auto-loop"}:
+            transcript_kind = "plan" if kind == "auto-plan" else "loop" if kind == "auto-loop" else "all"
+            result = self.get_auto_transcript({"path": value, "kind": transcript_kind, "max_ledger": args.get("max_ledger", 20)})
+            if result.status != "ok":
+                return ToolResult(result.status, f"{display_ref} not resolved: {result.message}", {"ref": display_ref, "kind": kind, "no_target_activity": True, "secret_values_redacted": True})
+            return ToolResult(
+                "ok",
+                f"Resolved {display_ref}.",
+                {
+                    "ref": display_ref,
+                    "kind": kind,
                     "entity": _redacted_mapping(result.data),
                     "no_target_activity": True,
                     "secret_values_redacted": True,
@@ -3322,6 +3384,274 @@ def _first_int_arg(args: dict[str, Any], *names: str) -> int | None:
     return None
 
 
+def _normalize_auto_transcript_kind(value: str) -> str:
+    normalized = str(value or "all").strip().lower().replace("_", "-")
+    if normalized in {"", "*", "all", "auto", "native", "auto-transcript", "native-transcript", "tool-call-transcript"}:
+        return "all"
+    if normalized in {"plan", "plans", "auto-plan", "auto-plans", "preview", "previews"}:
+        return "plan"
+    if normalized in {"loop", "loops", "auto-loop", "auto-loops", "tool-loop", "tool-loops"}:
+        return "loop"
+    return normalized
+
+
+def _auto_transcript_directories(evidence_root: Path) -> dict[str, Path]:
+    return {
+        "plan": (evidence_root / "agent" / "auto-plans").resolve(strict=False),
+        "loop": (evidence_root / "agent" / "auto-loops").resolve(strict=False),
+    }
+
+
+def _auto_transcript_kind_from_path(path: Path, evidence_root: Path | None = None) -> str:
+    rel = ""
+    try:
+        if evidence_root is not None:
+            rel = path.resolve(strict=False).relative_to(evidence_root.resolve(strict=False)).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        rel = ""
+    if not rel:
+        rel = path.as_posix()
+    if "/auto-plans/" in f"/{rel}" or Path(rel).name.startswith("auto-plan-"):
+        return "plan"
+    if "/auto-loops/" in f"/{rel}" or Path(rel).name.startswith("auto-loop-"):
+        return "loop"
+    return "unknown"
+
+
+def _auto_transcript_entries(evidence_root: Path, *, kind: str = "all", limit: int = 50) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    root = evidence_root.resolve(strict=False)
+    kind = _normalize_auto_transcript_kind(kind)
+    dirs = _auto_transcript_directories(evidence_root)
+    wanted = [item for item in ("plan", "loop") if kind in {"all", item}]
+    entries: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item_kind in wanted:
+        directory = dirs[item_kind]
+        if not _is_relative_to(directory, root) or not directory.exists():
+            continue
+        for candidate in sorted(directory.glob("*.json")):
+            try:
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                skipped.append({"path": redact_secrets(str(candidate)) or str(candidate), "reason": f"could not resolve path safely: {exc}"})
+                continue
+            if not _is_relative_to(resolved, directory):
+                try:
+                    rel = candidate.relative_to(root).as_posix()
+                except ValueError:
+                    rel = candidate.name
+                skipped.append({"path": redact_secrets(rel) or rel, "reason": "symlink target outside transcript directory"})
+                continue
+            try:
+                payload = json.loads(resolved.read_text(encoding="utf-8")) if resolved.is_file() else {}
+            except (OSError, json.JSONDecodeError) as exc:
+                skipped.append({"path": redact_secrets(str(resolved)) or str(resolved), "reason": f"transcript JSON unreadable: {exc}"})
+                continue
+            entry = _auto_transcript_entry(evidence_root, item_kind, resolved, payload=payload)
+            if entry is None:
+                skipped.append({"path": redact_secrets(str(resolved)) or str(resolved), "reason": "transcript path not safely contained"})
+                continue
+            entries.append(entry)
+    entries.sort(key=lambda item: str(item.get("modified_at") or ""), reverse=True)
+    return entries[: max(1, limit)], skipped
+
+
+def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    root = evidence_root.resolve(strict=False)
+    kind = _normalize_auto_transcript_kind(kind)
+    if kind == "all":
+        kind = _auto_transcript_kind_from_path(json_path, evidence_root)
+    dirs = _auto_transcript_directories(evidence_root)
+    directory = dirs.get(kind)
+    if directory is None:
+        return None
+    try:
+        resolved = json_path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    if not _is_relative_to(resolved, root) or not _is_relative_to(resolved, directory) or not resolved.is_file():
+        return None
+    if resolved.suffix.lower() != ".json":
+        return None
+    try:
+        rel = resolved.relative_to(root).as_posix()
+        stat_result = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    markdown = resolved.with_suffix(".md")
+    markdown_rel = ""
+    if markdown.exists():
+        try:
+            markdown_resolved = markdown.resolve(strict=False)
+            if _is_relative_to(markdown_resolved, directory) and markdown_resolved.is_file():
+                markdown_rel = markdown_resolved.relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            markdown_rel = ""
+    data = payload if isinstance(payload, dict) else {}
+    ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
+    calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
+    if not calls and isinstance(data.get("steps"), list):
+        for step in data.get("steps", []):
+            plan = step.get("plan") if isinstance(step, dict) and isinstance(step.get("plan"), dict) else {}
+            step_calls = plan.get("tool_calls") if isinstance(plan.get("tool_calls"), list) else []
+            calls.extend(step_calls)
+    return _redacted_mapping({
+        "kind": kind,
+        "path": rel,
+        "ref": f"auto-transcript:{rel}",
+        "markdown_path": markdown_rel,
+        "bytes": stat_result.st_size,
+        "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
+        "mode": data.get("mode") or ("loop" if kind == "loop" else "unknown"),
+        "stop_reason": data.get("stop_reason", ""),
+        "steps_executed": data.get("steps_executed", 0),
+        "steps_requested": data.get("steps_requested", 0),
+        "tool_count": len(calls),
+        "execution_counts": _auto_transcript_ledger_counts(ledger),
+        "actual_command_or_process_activity": sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True),
+        "prompt_preview": str(data.get("prompt") or "")[:200],
+        "no_target_activity": True,
+        "raw_file_contents_emitted": False,
+    })
+
+
+def _resolve_auto_transcript_path(evidence_root: Path, path_value: str, *, kind: str = "all") -> dict[str, Any]:
+    root = evidence_root.resolve(strict=False)
+    kind = _normalize_auto_transcript_kind(kind)
+    raw = str(path_value or "").strip()
+    for prefix in ("auto-transcript:", "native-transcript:", "auto-plan:", "auto-loop:", "artifact:"):
+        if raw.lower().startswith(prefix):
+            raw = raw[len(prefix) :].strip()
+            if prefix == "auto-plan:":
+                kind = "plan"
+            elif prefix == "auto-loop:":
+                kind = "loop"
+            break
+    if not raw:
+        entries, _skipped = _auto_transcript_entries(evidence_root, kind=kind, limit=1)
+        if not entries:
+            return {"status": "error", "message": "No native tool-calling transcripts found.", "kind": kind}
+        raw = str(entries[0].get("path") or "")
+    raw = raw.replace("\\", "/")
+    raw_path = Path(raw).expanduser()
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        parts = raw_path.parts
+        if re.match(r"^[A-Za-z]:", raw) or ".." in parts:
+            return {"status": "blocked", "message": "Transcript path must stay under agent/auto-plans or agent/auto-loops.", "path": redact_secrets(raw), "kind": kind}
+        if raw.startswith("agent/auto-plans/") or raw.startswith("agent/auto-loops/"):
+            candidates.append(root / raw)
+        else:
+            dirs = _auto_transcript_directories(evidence_root)
+            for item_kind, directory in dirs.items():
+                if kind not in {"all", item_kind}:
+                    continue
+                candidates.append(directory / raw)
+    for candidate in candidates:
+        if candidate.suffix.lower() == ".md":
+            candidate = candidate.with_suffix(".json")
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            return {"status": "error", "message": f"Transcript path could not be resolved: {exc}", "path": redact_secrets(str(candidate)), "kind": kind}
+        resolved_kind = _auto_transcript_kind_from_path(resolved, evidence_root)
+        if kind not in {"all", resolved_kind}:
+            continue
+        directory = _auto_transcript_directories(evidence_root).get(resolved_kind)
+        if directory is None or not _is_relative_to(resolved, root) or not _is_relative_to(resolved, directory):
+            return {"status": "blocked", "message": "Transcript path resolves outside the native transcript artifact directories.", "path": redact_secrets(str(candidate)), "kind": kind}
+        if not resolved.exists():
+            continue
+        if not resolved.is_file() or resolved.suffix.lower() != ".json":
+            return {"status": "error", "message": "Transcript path must point to a JSON transcript file.", "path": redact_secrets(str(candidate)), "kind": kind}
+        return {"status": "ok", "path": str(resolved), "kind": resolved_kind}
+    return {"status": "error", "message": "Native tool-calling transcript not found.", "path": redact_secrets(raw), "kind": kind}
+
+
+def _auto_transcript_ledger_counts(ledger: Any) -> dict[str, int]:
+    counts = {"results": 0, "actual_command_or_process_activity": 0, "approval_queued": 0, "blocked": 0, "dry_run": 0, "handler_error": 0}
+    if not isinstance(ledger, list):
+        return counts
+    counts["results"] = len([item for item in ledger if isinstance(item, dict)])
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        if item.get("actual_command_or_process_activity") is True:
+            counts["actual_command_or_process_activity"] += 1
+        if item.get("approval_queued") is True:
+            counts["approval_queued"] += 1
+        if item.get("blocked") is True:
+            counts["blocked"] += 1
+        if item.get("dry_run") is True:
+            counts["dry_run"] += 1
+        if str(item.get("execution_state") or "").startswith("handler_error"):
+            counts["handler_error"] += 1
+    return counts
+
+
+def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int = 20) -> dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
+    calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
+    if not calls and isinstance(data.get("steps"), list):
+        for step in data.get("steps", []):
+            plan = step.get("plan") if isinstance(step, dict) and isinstance(step.get("plan"), dict) else {}
+            step_calls = plan.get("tool_calls") if isinstance(plan.get("tool_calls"), list) else []
+            calls.extend(step_calls)
+    results: list[dict[str, Any]] = []
+    raw_results = data.get("results") if isinstance(data.get("results"), list) else []
+    if raw_results:
+        results.extend(item for item in raw_results if isinstance(item, dict))
+    elif isinstance(data.get("steps"), list):
+        for step in data.get("steps", []):
+            for item in step.get("results", []) if isinstance(step, dict) and isinstance(step.get("results"), list) else []:
+                if isinstance(item, dict):
+                    results.append(item)
+    call_summaries = []
+    for call in calls[:max_ledger]:
+        if not isinstance(call, dict):
+            continue
+        validation = call.get("validation") if isinstance(call.get("validation"), dict) else {}
+        call_summaries.append({
+            "tool": call.get("tool"),
+            "reason": call.get("reason"),
+            "schema_validated": validation.get("schema_validated"),
+            "runtime_policy": validation.get("runtime_policy"),
+            "guardrail_status": validation.get("guardrail_status"),
+            "arg_keys": sorted(str(key) for key in (call.get("args") or {}).keys()) if isinstance(call.get("args"), dict) else [],
+        })
+    result_summaries = []
+    for item in results[:max_ledger]:
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        result_summaries.append({
+            "tool": item.get("tool"),
+            "result_status": result.get("status"),
+            "message": str(result.get("message") or "")[:500],
+            "execution_state": execution.get("execution_state"),
+            "actual_command_or_process_activity": execution.get("actual_command_or_process_activity", False),
+        })
+    return _redacted_mapping({
+        "mode": data.get("mode") or ("loop" if data.get("steps") else "unknown"),
+        "prompt_preview": str(data.get("prompt") or "")[:300],
+        "stop_reason": data.get("stop_reason", ""),
+        "steps_requested": data.get("steps_requested", 0),
+        "steps_executed": data.get("steps_executed", 0),
+        "model": data.get("model", False),
+        "execute": data.get("execute", False),
+        "tool_calls": call_summaries,
+        "tool_call_count": len(calls),
+        "rejected_tool_call_count": len(data.get("rejected_tool_calls", [])) if isinstance(data.get("rejected_tool_calls"), list) else 0,
+        "result_summaries": result_summaries,
+        "result_count": len(results),
+        "execution_ledger": ledger[:max_ledger],
+        "execution_counts": _auto_transcript_ledger_counts(ledger),
+        "truncated": len(ledger) > max_ledger or len(calls) > max_ledger or len(results) > max_ledger,
+    })
+
+
 _LOCAL_REF_KIND_ALIASES = {
     "approvals": "approval",
     "tasks": "task",
@@ -3356,6 +3686,11 @@ _LOCAL_REF_KIND_ALIASES = {
     "manifests": "manifest",
     "closeouts": "closeout",
     "briefings": "briefing",
+    "auto-transcripts": "auto-transcript",
+    "native-transcript": "auto-transcript",
+    "native-transcripts": "auto-transcript",
+    "tool-call-transcript": "auto-transcript",
+    "tool-call-transcripts": "auto-transcript",
 }
 
 
