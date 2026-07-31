@@ -260,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
         number_dispatches: list[dict[str, object]] = []
         collection_dispatches: list[dict[str, object]] = []
+        size_dispatches: list[dict[str, object]] = []
 
         def schema_number_echo(args: dict[str, object]) -> ToolResult:
             number_dispatches.append(dict(args))
@@ -268,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         def schema_collection_echo(args: dict[str, object]) -> ToolResult:
             collection_dispatches.append(dict(args))
             return ToolResult("ok", "collection ok", {"items": args.get("items"), "options": args.get("options")})
+
+        def schema_size_echo(args: dict[str, object]) -> ToolResult:
+            size_dispatches.append(dict(args))
+            return ToolResult("ok", "size ok", {"label": args.get("label"), "items": args.get("items"), "options": args.get("options")})
 
         runtime.registry.register_tool(
             "schema_number_echo",
@@ -297,6 +302,23 @@ def main(argv: list[str] | None = None) -> int:
                         "options": {"type": "object", "description": "Structured smoke options."},
                     },
                     "required": ["items"],
+                    "additionalProperties": True,
+                },
+            },
+        )
+        runtime.registry.register_tool(
+            "schema_size_echo",
+            schema_size_echo,
+            {
+                "description": "Smoke-only JSON-schema string/collection size-bound validation boundary.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 3, "maxLength": 8, "description": "Bounded smoke label."},
+                        "items": {"type": "array", "minItems": 1, "maxItems": 2, "description": "Bounded smoke items."},
+                        "options": {"type": "object", "minProperties": 1, "maxProperties": 2, "description": "Bounded smoke options."},
+                    },
+                    "required": ["label", "items", "options"],
                     "additionalProperties": True,
                 },
             },
@@ -482,6 +504,55 @@ def main(argv: list[str] | None = None) -> int:
             and collection_approval_count_before == collection_approval_count_after
             and collection_dispatches == [{"items": ["alpha", "beta"], "options": {"mode": "safe"}}]
             and "Traceback" not in json.dumps(collection_validation_payload)
+        )
+        invalid_size_short_string = runtime.registry.run("schema_size_echo", {"label": "ab", "items": ["one"], "options": {"mode": "safe"}})
+        invalid_size_long_string = runtime.registry.run("schema_size_echo", {"label": "too-long-label", "items": ["one"], "options": {"mode": "safe"}})
+        invalid_size_few_items = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": [], "options": {"mode": "safe"}})
+        invalid_size_many_items = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["one", "two", "three"], "options": {"mode": "safe"}})
+        invalid_size_few_fields = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["one"], "options": {}})
+        invalid_size_many_fields = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["one"], "options": {"a": 1, "b": 2, "c": 3}})
+        valid_size_bounds = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["one", "two"], "options": {"mode": "safe", "phase": "smoke"}})
+        size_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("schema_size_echo")
+        try:
+            invalid_confirm_size = runtime.registry.run("schema_size_echo", {"label": "ab", "items": ["queued"], "options": {"mode": "safe"}})
+        finally:
+            runtime.registry.confirm_tools.discard("schema_size_echo")
+        size_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        size_validation_payload = {
+            "invalid_short_string": invalid_size_short_string.to_dict(),
+            "invalid_long_string": invalid_size_long_string.to_dict(),
+            "invalid_few_items": invalid_size_few_items.to_dict(),
+            "invalid_many_items": invalid_size_many_items.to_dict(),
+            "invalid_few_fields": invalid_size_few_fields.to_dict(),
+            "invalid_many_fields": invalid_size_many_fields.to_dict(),
+            "valid": valid_size_bounds.to_dict(),
+            "invalid_confirm": invalid_confirm_size.to_dict(),
+            "approvals_before": size_approval_count_before,
+            "approvals_after": size_approval_count_after,
+            "dispatches": size_dispatches,
+        }
+        write("tool-schema-size-bounds-validation.json", json.dumps(size_validation_payload, indent=2))
+        checks["tool_schema_size_bounds_validation_ok"] = (
+            invalid_size_short_string.status == "error"
+            and invalid_size_short_string.message == "label must be at least 3 characters."
+            and invalid_size_long_string.status == "error"
+            and invalid_size_long_string.message == "label must be at most 8 characters."
+            and invalid_size_few_items.status == "error"
+            and invalid_size_few_items.message == "items must contain at least 1 item."
+            and invalid_size_many_items.status == "error"
+            and invalid_size_many_items.message == "items must contain at most 2 items."
+            and invalid_size_few_fields.status == "error"
+            and invalid_size_few_fields.message == "options must contain at least 1 field."
+            and invalid_size_many_fields.status == "error"
+            and invalid_size_many_fields.message == "options must contain at most 2 fields."
+            and valid_size_bounds.status == "ok"
+            and valid_size_bounds.data.get("label") == "bounded"
+            and invalid_confirm_size.status == "error"
+            and invalid_confirm_size.message == "label must be at least 3 characters."
+            and size_approval_count_after == size_approval_count_before
+            and size_dispatches == [{"label": "bounded", "items": ["one", "two"], "options": {"mode": "safe", "phase": "smoke"}}]
+            and "Traceback" not in json.dumps(size_validation_payload)
         )
         missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
         approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))

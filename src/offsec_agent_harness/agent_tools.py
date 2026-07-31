@@ -148,8 +148,9 @@ class OffSecToolRegistry:
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
         integer/number/boolean strings, normalize schema-declared enum aliases, and reject
         ambiguous, out-of-set, missing required, blank required scalar, non-string
-        string-typed values, and malformed collection values with clean operator
-        errors before policy confirm queues are created.
+        string-typed values, malformed collection values, and schema-declared
+        string/collection size-bound violations with clean operator errors before
+        policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -209,14 +210,33 @@ class OffSecToolRegistry:
             if arg_type == "string":
                 if not isinstance(raw_value, str) and not arg_schema.get("x-allow-non-string", False):
                     return validated, ToolResult("error", f"{arg_name} must be a string.")
+                if isinstance(raw_value, str):
+                    min_length = _schema_size_bound(arg_schema.get("minLength"))
+                    max_length = _schema_size_bound(arg_schema.get("maxLength"))
+                    if min_length is not None and len(raw_value) < min_length:
+                        return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_count('character', min_length)}.")
+                    if max_length is not None and len(raw_value) > max_length:
+                        return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_count('character', max_length)}.")
                 continue
             if arg_type == "array":
                 if not isinstance(raw_value, list):
                     return validated, ToolResult("error", f"{arg_name} must be an array.")
+                min_items = _schema_size_bound(arg_schema.get("minItems"))
+                max_items = _schema_size_bound(arg_schema.get("maxItems"))
+                if min_items is not None and len(raw_value) < min_items:
+                    return validated, ToolResult("error", f"{arg_name} must contain at least {_format_schema_count('item', min_items)}.")
+                if max_items is not None and len(raw_value) > max_items:
+                    return validated, ToolResult("error", f"{arg_name} must contain at most {_format_schema_count('item', max_items)}.")
                 continue
             if arg_type == "object":
                 if not isinstance(raw_value, dict):
                     return validated, ToolResult("error", f"{arg_name} must be an object.")
+                min_properties = _schema_size_bound(arg_schema.get("minProperties"))
+                max_properties = _schema_size_bound(arg_schema.get("maxProperties"))
+                if min_properties is not None and len(raw_value) < min_properties:
+                    return validated, ToolResult("error", f"{arg_name} must contain at least {_format_schema_count('field', min_properties)}.")
+                if max_properties is not None and len(raw_value) > max_properties:
+                    return validated, ToolResult("error", f"{arg_name} must contain at most {_format_schema_count('field', max_properties)}.")
                 continue
         if isinstance(required, list):
             for arg_name in required:
@@ -4839,6 +4859,26 @@ def _parse_schema_enum(value: Any, enum_values: list[Any], aliases: Any = None) 
 
 def _schema_enum_error_values(enum_values: list[Any]) -> str:
     return ", ".join(str(item) for item in enum_values)
+
+
+def _schema_size_bound(value: Any) -> int | None:
+    """Return a non-negative integer JSON-schema size bound, or None.
+
+    Schema metadata is trusted code/plugin configuration rather than operator
+    input, so invalid bound shapes are ignored here instead of producing runtime
+    errors for otherwise valid tool calls.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _format_schema_count(noun: str, count: int) -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {noun}{suffix}"
 
 
 def _format_schema_bound(value: int | float) -> str:

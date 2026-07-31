@@ -280,6 +280,7 @@ class AgentRuntimeTests(unittest.TestCase):
             try:
                 number_dispatches: list[dict[str, object]] = []
                 collection_dispatches: list[dict[str, object]] = []
+                size_dispatches: list[dict[str, object]] = []
 
                 def schema_number_echo(args: dict[str, object]) -> ToolResult:
                     number_dispatches.append(dict(args))
@@ -288,6 +289,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 def schema_collection_echo(args: dict[str, object]) -> ToolResult:
                     collection_dispatches.append(dict(args))
                     return ToolResult("ok", "collection ok", {"items": args.get("items"), "options": args.get("options")})
+
+                def schema_size_echo(args: dict[str, object]) -> ToolResult:
+                    size_dispatches.append(dict(args))
+                    return ToolResult("ok", "size ok", {"label": args.get("label"), "items": args.get("items"), "options": args.get("options")})
 
                 number_tool_spec = {
                     "description": "Unit-only JSON-schema number validation boundary.",
@@ -313,6 +318,19 @@ class AgentRuntimeTests(unittest.TestCase):
                         "additionalProperties": True,
                     },
                 }
+                size_tool_spec = {
+                    "description": "Unit-only JSON-schema string/collection size-bound validation boundary.",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "minLength": 3, "maxLength": 8, "description": "Bounded unit label."},
+                            "items": {"type": "array", "minItems": 1, "maxItems": 2, "description": "Bounded unit items."},
+                            "options": {"type": "object", "minProperties": 1, "maxProperties": 2, "description": "Bounded unit options."},
+                        },
+                        "required": ["label", "items", "options"],
+                        "additionalProperties": True,
+                    },
+                }
 
                 runtime.registry.register_tool(
                     "schema_number_echo",
@@ -323,6 +341,11 @@ class AgentRuntimeTests(unittest.TestCase):
                     "schema_collection_echo",
                     schema_collection_echo,
                     collection_tool_spec,
+                )
+                runtime.registry.register_tool(
+                    "schema_size_echo",
+                    schema_size_echo,
+                    size_tool_spec,
                 )
                 invalid_cases = [
                     ("get_job", {"id": "not-an-int"}, "id must be an integer."),
@@ -338,6 +361,12 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("schema_collection_echo", {"items": "not-an-array"}, "items must be an array."),
                     ("schema_collection_echo", {"items": [], "options": ["not-an-object"]}, "options must be an object."),
                     ("schema_collection_echo", {"items": ""}, "items is required."),
+                    ("schema_size_echo", {"label": "ab", "items": ["one"], "options": {"mode": "safe"}}, "label must be at least 3 characters."),
+                    ("schema_size_echo", {"label": "too-long-label", "items": ["one"], "options": {"mode": "safe"}}, "label must be at most 8 characters."),
+                    ("schema_size_echo", {"label": "okay", "items": [], "options": {"mode": "safe"}}, "items must contain at least 1 item."),
+                    ("schema_size_echo", {"label": "okay", "items": ["one", "two", "three"], "options": {"mode": "safe"}}, "items must contain at most 2 items."),
+                    ("schema_size_echo", {"label": "okay", "items": ["one"], "options": {}}, "options must contain at least 1 field."),
+                    ("schema_size_echo", {"label": "okay", "items": ["one"], "options": {"a": 1, "b": 2, "c": 3}}, "options must contain at most 2 fields."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("list_findings", {"limit": 0}, "limit must be at least 1."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
@@ -369,6 +398,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
                 valid_number = runtime.registry.run("schema_number_echo", {"threshold": "1.25", "label": "unit"})
                 valid_collection = runtime.registry.run("schema_collection_echo", {"items": ["alpha", "beta"], "options": {"mode": "safe"}})
+                valid_size = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["alpha", "beta"], "options": {"mode": "safe", "phase": "unit"}})
                 self.assertEqual(valid_number.status, "ok", valid_number.to_dict())
                 self.assertEqual(valid_number.data["threshold"], 1.25)
                 self.assertEqual(valid_number.data["threshold_type"], "float")
@@ -377,6 +407,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(valid_collection.data["items"], ["alpha", "beta"])
                 self.assertEqual(valid_collection.data["options"], {"mode": "safe"})
                 self.assertEqual(collection_dispatches, [{"items": ["alpha", "beta"], "options": {"mode": "safe"}}])
+                self.assertEqual(valid_size.status, "ok", valid_size.to_dict())
+                self.assertEqual(valid_size.data["label"], "bounded")
+                self.assertEqual(size_dispatches, [{"label": "bounded", "items": ["alpha", "beta"], "options": {"mode": "safe", "phase": "unit"}}])
 
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
@@ -408,12 +441,13 @@ class AgentRuntimeTests(unittest.TestCase):
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo", "schema_collection_echo"),
+                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo", "schema_collection_echo", "schema_size_echo"),
                     )
                 )
                 try:
                     confirm_runtime.registry.register_tool("schema_number_echo", schema_number_echo, number_tool_spec)
                     confirm_runtime.registry.register_tool("schema_collection_echo", schema_collection_echo, collection_tool_spec)
+                    confirm_runtime.registry.register_tool("schema_size_echo", schema_size_echo, size_tool_spec)
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
@@ -423,6 +457,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     rejected_array = confirm_runtime.registry.run("schema_collection_echo", {"items": "queued-string"})
                     rejected_object = confirm_runtime.registry.run("schema_collection_echo", {"items": [], "options": "queued-string"})
                     accepted_collection = confirm_runtime.registry.run("schema_collection_echo", {"items": ["queued"], "options": {"mode": "safe"}})
+                    rejected_size = confirm_runtime.registry.run("schema_size_echo", {"label": "ab", "items": ["queued"], "options": {"mode": "safe"}})
+                    accepted_size = confirm_runtime.registry.run("schema_size_echo", {"label": "queued", "items": ["queued"], "options": {"mode": "safe"}})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     rejected_string = confirm_runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
@@ -444,6 +480,10 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_object.message, "options must be an object.")
                     self.assertEqual(accepted_collection.status, "needs_approval", accepted_collection.to_dict())
                     self.assertEqual(accepted_collection.data.get("tool"), "schema_collection_echo")
+                    self.assertEqual(rejected_size.status, "error")
+                    self.assertEqual(rejected_size.message, "label must be at least 3 characters.")
+                    self.assertEqual(accepted_size.status, "needs_approval", accepted_size.to_dict())
+                    self.assertEqual(accepted_size.data.get("tool"), "schema_size_echo")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(rejected_string.status, "error")
@@ -452,7 +492,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(rejected_enum.status, "error")
                     self.assertEqual(rejected_enum.message, "status must be one of: pending, in_progress, completed, cancelled.")
-                    self.assertEqual(after, before + 2)
+                    self.assertEqual(after, before + 3)
                 finally:
                     confirm_runtime.close()
             finally:
