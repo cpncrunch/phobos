@@ -196,9 +196,13 @@ class FakeToolCallGuardrailAdapter(BaseModelAdapter):
 class FakeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "fake-tool-call-feedback"
 
+    def __init__(self):
+        self.prompts: list[str] = []
+
     def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
         if "Return ONLY JSON" not in prompt:
             return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
         if "Stored memory" in prompt:
             payload = {"summary": "feedback loop complete", "tool_calls": [], "warnings": []}
         elif "Workspace file not found" in prompt:
@@ -2679,6 +2683,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 in_scope_targets=["app.example.test"],
                 evidence_dir=str(tmp_path / "evidence"),
             ).save(engagement)
+            adapter = FakeToolCallFeedbackAdapter()
             runtime = OffSecAgentRuntime(
                 AgentRuntimeConfig(
                     engagement_path=str(engagement),
@@ -2686,13 +2691,19 @@ class AgentRuntimeTests(unittest.TestCase):
                     session_name="model-feedback",
                     auto_model_planning=True,
                 ),
-                adapter=FakeToolCallFeedbackAdapter(),
+                adapter=adapter,
             )
             try:
                 response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback loop token=feedback-secret"')
                 payload = json.loads(response.split("\n", 1)[1])
                 self.assertEqual(payload["stop_reason"], "no_tool_calls")
                 self.assertEqual(payload["steps_executed"], 2)
+                self.assertEqual(payload.get("feedback_history_mode"), "cumulative_redacted")
+                self.assertEqual(payload.get("feedback_history_entries"), 2)
+                self.assertGreaterEqual(len(adapter.prompts), 3)
+                self.assertIn("Previous Phobos tool results (cumulative, redacted", adapter.prompts[1])
+                self.assertIn("Workspace file not found", adapter.prompts[2])
+                self.assertIn("Stored memory", adapter.prompts[2])
                 self.assertTrue(payload["transcript_artifact_written"])
                 statuses = [item["result"]["status"] for step in payload["steps"] for item in step.get("results", [])]
                 self.assertEqual(statuses[:2], ["error", "ok"])

@@ -199,9 +199,13 @@ class SmokeToolCallGuardrailAdapter(BaseModelAdapter):
 class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-feedback"
 
+    def __init__(self):
+        self.prompts: list[str] = []
+
     def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
         if "Return ONLY JSON" not in prompt:
             return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
         if "Stored memory" in prompt:
             payload = {"summary": "smoke feedback loop complete", "tool_calls": [], "warnings": []}
         elif "Workspace file not found" in prompt:
@@ -1614,6 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
             and '"tool": "deny"' not in approval_action_audit
         )
 
+        feedback_adapter = SmokeToolCallFeedbackAdapter()
         feedback_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
                 engagement_path=str(engagement_path),
@@ -1621,7 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_name="native-tool-feedback-smoke",
                 auto_model_planning=True,
             ),
-            adapter=SmokeToolCallFeedbackAdapter(),
+            adapter=feedback_adapter,
         )
         feedback_gateway = None
         try:
@@ -1729,6 +1734,15 @@ def main(argv: list[str] | None = None) -> int:
             and "Execution ledger" in feedback_transcript
             and "Workspace file not found" in feedback_transcript
             and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
+        )
+        feedback_final_prompt = feedback_adapter.prompts[-1] if feedback_adapter.prompts else ""
+        checks["native_tool_call_cumulative_feedback_ok"] = (
+            feedback_payload.get("feedback_history_mode") == "cumulative_redacted"
+            and feedback_payload.get("feedback_history_entries") == 2
+            and len(feedback_adapter.prompts) >= 3
+            and "Previous Phobos tool results (cumulative, redacted" in feedback_adapter.prompts[1]
+            and "Workspace file not found" in feedback_final_prompt
+            and "Stored memory" in feedback_final_prompt
         )
         feedback_transcript_rows = feedback_transcript_list.get("data", {}).get("transcripts", []) if isinstance(feedback_transcript_list.get("data"), dict) else []
         feedback_transcript_blob = json.dumps({

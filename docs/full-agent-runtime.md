@@ -825,6 +825,7 @@ native_openai_tool_call_adapter_ok=True
 native_tool_call_guardrail_approval_ok=True
 native_tool_call_approval_action_guard_ok=True
 native_tool_call_feedback_loop_ok=True
+native_tool_call_cumulative_feedback_ok=True
 native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
 native_tool_call_gateway_chat_ok=True
@@ -1049,7 +1050,7 @@ This is now a real local Hermes-like offsec agent runtime, but it is still not a
 - Discord/Slack/Telegram bridges are implemented as local connector processes, but live operation still requires operator-created platform apps/bots, tokens in environment variables, and channel/user allowlists;
 - bridge media handling imports explicit local files and records remote platform attachment metadata, but does not blindly download remote attachments or transcribe voice/audio;
 - web UI is intentionally minimal and single-operator oriented, not a production multi-user console; remote/VPS use requires bearer-token auth plus TLS/reverse proxy, firewall, VPN, or SSH tunnel controls, and there is no RBAC/session management;
-- `/auto` has deterministic planning plus optional model-returned JSON/provider-native tool-call plans with bounded redacted runtime context, pre-dispatch name/schema validation, read-only guardrail preview metadata for target-affecting calls, explicit allowed-execution ledger proof, redacted rejected-call transcript entries, redacted plan-preview and applied-plan transcripts under `agent/auto-plans`, redacted execution ledgers, and a bounded result-feedback `/auto-loop` with redacted transcript artifacts, but it is not yet Hermes' full native function-calling autonomy or a general-purpose task computer;
+- `/auto` has deterministic planning plus optional model-returned JSON/provider-native tool-call plans with bounded redacted runtime context, pre-dispatch name/schema validation, read-only guardrail preview metadata for target-affecting calls, explicit allowed-execution ledger proof, redacted rejected-call transcript entries, redacted plan-preview and applied-plan transcripts under `agent/auto-plans`, redacted execution ledgers, and a bounded cumulative result-feedback `/auto-loop` with redacted transcript artifacts, but it is not yet Hermes' full native function-calling autonomy or a general-purpose task computer;
 - local `/delegate` persists batches, artifacts, and child session records, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
 - sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
 - Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;

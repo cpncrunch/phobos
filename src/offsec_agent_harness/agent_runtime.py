@@ -721,6 +721,7 @@ class OffSecAgentRuntime:
         steps = max(1, min(int(steps), 10))
         current_prompt = prompt
         loop_results: list[dict[str, Any]] = []
+        feedback_history: list[dict[str, Any]] = []
         execution_ledger: list[dict[str, Any]] = []
         seen: set[str] = set()
         stop_reason = "max_steps"
@@ -743,11 +744,13 @@ class OffSecAgentRuntime:
                 execution = _planned_call_execution_ledger(call, result, step=step)
                 execution_ledger.append(execution)
                 step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict(), "execution": execution}))
-            loop_results.append(_redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results}))
+            step_record = _redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results})
+            loop_results.append(step_record)
+            feedback_history.append(_redact_runtime_value({"step": step, "results": step_results}))
             if not use_model:
                 stop_reason = "deterministic_plan_applied"
                 break
-            current_prompt = prompt + "\n\nPrevious Phobos tool results:\n" + json.dumps(step_results, indent=2)[:8000] + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
+            current_prompt = _build_auto_loop_feedback_prompt(prompt, feedback_history)
         payload: dict[str, Any] = {
             "prompt": prompt,
             "steps_requested": steps,
@@ -755,6 +758,8 @@ class OffSecAgentRuntime:
             "stop_reason": stop_reason,
             "execute": execute,
             "model": use_model,
+            "feedback_history_mode": "cumulative_redacted",
+            "feedback_history_entries": len(feedback_history),
             "transcript_artifact_written": False,
             "secret_values_redacted": True,
             "execution_ledger": _redact_runtime_value(execution_ledger),
@@ -787,6 +792,46 @@ class OffSecAgentRuntime:
         self.loaded_skills[skill.name] = skill
         self.store.audit(self.session_id, "skill_loaded", {"skill": skill.name, "path": skill.path})
         return skill
+
+
+def _build_auto_loop_feedback_prompt(original_prompt: str, feedback_history: list[dict[str, Any]], *, limit: int = 8000) -> str:
+    """Return the next native-loop prompt with cumulative redacted tool results.
+
+    A model planner needs enough history to recover from earlier errors without
+    forgetting later successful local-only actions.  Keep the original operator
+    request intact, but bound the cumulative feedback window and redact result
+    leaves before the next model/tool-plan call sees them.
+    """
+
+    redacted_history = _redact_runtime_value(feedback_history)
+    history_items = redacted_history if isinstance(redacted_history, list) else []
+    retained = list(history_items)
+    history_text = json.dumps(retained, indent=2, sort_keys=True, default=str)
+    truncated = False
+    if len(history_text) > limit:
+        truncated = True
+        retained = []
+        for item in reversed(history_items):
+            candidate = [item] + retained
+            candidate_text = json.dumps(candidate, indent=2, sort_keys=True, default=str)
+            if retained and len(candidate_text) > limit:
+                break
+            retained = candidate
+            history_text = candidate_text
+        if len(history_text) > limit:
+            history_text = history_text[:limit] + "\n...[auto-loop feedback truncated]"
+        elif len(retained) < len(history_items):
+            history_text = "[older auto-loop feedback entries truncated]\n" + history_text
+    history_label = "Previous Phobos tool results (cumulative, redacted"
+    if truncated:
+        history_label += ", bounded"
+    history_label += ")"
+    return (
+        original_prompt
+        + f"\n\n{history_label}:\n"
+        + history_text
+        + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
+    )
 
 
 def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecToolRegistry, tool: str, args: Any) -> dict[str, Any] | None:
