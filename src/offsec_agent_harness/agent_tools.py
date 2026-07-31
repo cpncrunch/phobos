@@ -3537,6 +3537,8 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
         "bytes": stat_result.st_size,
         "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat_result.st_mtime)),
         "mode": data.get("mode") or ("loop" if kind == "loop" else "unknown"),
+        "trigger": data.get("trigger", ""),
+        "natural_auto_execute": bool(data.get("natural_auto_execute", False)),
         "stop_reason": data.get("stop_reason", ""),
         "steps_executed": data.get("steps_executed", 0),
         "steps_requested": data.get("steps_requested", 0),
@@ -3678,6 +3680,8 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         })
     return _redacted_mapping({
         "mode": data.get("mode") or ("loop" if data.get("steps") else "unknown"),
+        "trigger": data.get("trigger", ""),
+        "natural_auto_execute": bool(data.get("natural_auto_execute", False)),
         "prompt_preview": str(data.get("prompt") or "")[:300],
         "stop_reason": data.get("stop_reason", ""),
         "steps_requested": data.get("steps_requested", 0),

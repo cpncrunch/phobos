@@ -118,6 +118,44 @@ class FakeFallbackToolPlanAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response without tool plan")
 
 
+class FakeNaturalAutoToolPlanAdapter(BaseModelAdapter):
+    provider = "fake-natural-auto-tool-plan"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+        self.allow_seen: bool | None = None
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.allow_seen = allow_command_execution
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('natural-auto-should-not-run', encoding='utf-8')\""
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "native planner handled a natural-language auto-execute message",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-natural-auto", "value": "natural native auto model plan ran"},
+                        "reason": "safe local memory proves natural-message model planning used the registry boundary",
+                    },
+                    {
+                        "tool": "run_command",
+                        "args": {"target": "app.example.test", "purpose": "natural native auto dry-run", "command": command, "execute": True},
+                        "reason": "natural-message command plans still require explicit slash execute=true and stay dry-run",
+                    },
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-natural-auto-tool-plan", "native_tool_calls": True, "native_tool_call_count": 2, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeToolCallAllowedExecutionAdapter(BaseModelAdapter):
     provider = "fake-tool-call-allowed-execution"
 
@@ -2696,6 +2734,74 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("fallback chain selected native tool plan", recall)
                 self.assertNotIn("fallback-secret", applied + recall)
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+            finally:
+                runtime.close()
+
+    def test_natural_message_model_tool_calls_apply_with_provenance_and_dry_run_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Natural Native Auto",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "natural-auto-should-not-run.txt"
+            adapter = FakeNaturalAutoToolPlanAdapter(marker)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-natural-auto",
+                    auto_execute_natural=True,
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message("remember native-natural-auto and dry-run the safe command token=natural-auto-secret")
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["mode"], "applied")
+                self.assertEqual(payload.get("trigger"), "natural_auto")
+                self.assertTrue(payload.get("natural_auto_execute"))
+                self.assertFalse(adapter.allow_seen)
+                self.assertNotIn("approve", adapter.seen_tool_names)
+                self.assertNotIn("deny", adapter.seen_tool_names)
+                self.assertEqual([call["tool"] for call in payload.get("tool_calls", [])], ["remember", "run_command"])
+                self.assertEqual(payload["tool_calls"][1]["args"]["execute"], False)
+                self.assertEqual([item["result"]["status"] for item in payload.get("results", [])], ["ok", "dry_run"])
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual([item["execution_state"] for item in ledger], ["completed_without_command_execution", "dry_run_not_executed"])
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in ledger))
+                self.assertFalse(ledger[1]["safe_to_claim_command_executed"])
+                self.assertFalse(marker.exists())
+
+                recall = runtime.handle_message('/recall query=native-natural-auto')
+                self.assertIn("natural native auto model plan ran", recall)
+                artifacts = payload.get("artifacts", {})
+                json_path = Path(artifacts.get("json", ""))
+                md_path = Path(artifacts.get("markdown", ""))
+                self.assertTrue(json_path.is_file())
+                self.assertTrue(md_path.is_file())
+                transcript = json_path.read_text(encoding="utf-8") + md_path.read_text(encoding="utf-8")
+                self.assertIn("Trigger: `natural_auto`", transcript)
+                self.assertIn("Natural auto-execute: `True`", transcript)
+                rel_json = json_path.relative_to(runtime.registry.harness.store.root).as_posix()
+                transcript_list = runtime.registry.run("list_auto_transcripts", {"kind": "plan", "limit": 5})
+                rows = transcript_list.data.get("transcripts", [])
+                self.assertIn(rel_json, [item.get("path") for item in rows])
+                natural_rows = [item for item in rows if item.get("path") == rel_json]
+                self.assertTrue(natural_rows and natural_rows[0].get("natural_auto_execute"), transcript_list.to_dict())
+                transcript_detail = runtime.registry.run("get_auto_transcript", {"path": rel_json, "max_ledger": 3})
+                self.assertEqual(transcript_detail.data["summary"].get("trigger"), "natural_auto")
+                self.assertTrue(transcript_detail.data["summary"].get("natural_auto_execute"))
+                status = runtime.registry.run("runtime_status", {})
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("natural_auto_execute_enabled"), status.to_dict())
+                audit_blob = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT data_json FROM audit_log").fetchall())
+                self.assertIn('"trigger": "natural_auto"', audit_blob)
+                self.assertIn('"natural_auto_execute": true', audit_blob)
+                self.assertNotIn("natural-auto-secret", response + recall + transcript + json.dumps(transcript_list.to_dict()) + json.dumps(transcript_detail.to_dict()) + audit_blob)
             finally:
                 runtime.close()
 

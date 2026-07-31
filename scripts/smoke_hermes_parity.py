@@ -90,6 +90,36 @@ class SmokeFallbackToolPlanAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response without tool plan")
 
 
+class SmokeNaturalAutoToolPlanAdapter(BaseModelAdapter):
+    provider = "smoke-natural-auto-tool-plan"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+        self.allow_seen: bool | None = None
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.allow_seen = allow_command_execution
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('natural-auto-smoke-should-not-run', encoding='utf-8')\""
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "smoke native planner handled natural-language auto execution",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-natural-auto-smoke", "value": "natural auto native tool planning ran"}, "reason": "safe local memory proves natural-message model planning used the registry boundary"},
+                    {"tool": "run_command", "args": {"target": "app.example.test", "purpose": "natural auto native dry-run smoke", "command": command, "execute": True}, "reason": "natural-message command plans remain dry-run without explicit slash execute=true"},
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-natural-auto-smoke", "native_tool_calls": True, "native_tool_call_count": 2, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeToolCallContextAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-context"
 
@@ -1734,6 +1764,80 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("no_target_activity") is True
             and native_status_data.get("raw_file_contents_emitted") is False
             and "native-flag-secret" not in json.dumps(native_flag_status)
+        )
+
+        native_natural_marker = root / "native-natural-auto-should-not-run.txt"
+        native_natural_adapter = SmokeNaturalAutoToolPlanAdapter(native_natural_marker)
+        native_natural_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-natural-auto.db"),
+                session_name="native-tool-natural-auto-smoke",
+                auto_execute_natural=True,
+                auto_model_planning=True,
+            ),
+            adapter=native_natural_adapter,
+        )
+        try:
+            native_natural_response = native_natural_runtime.handle_message("remember native-natural-auto-smoke and dry-run command token=natural-auto-smoke-secret")
+            native_natural_payload = json.loads(native_natural_response.split("\n", 1)[1])
+            native_natural_ledger = native_natural_payload.get("execution_ledger", []) if isinstance(native_natural_payload.get("execution_ledger"), list) else []
+            native_natural_recall = native_natural_runtime.handle_message('/recall query=native-natural-auto-smoke')
+            native_natural_artifacts = native_natural_payload.get("artifacts", {}) if isinstance(native_natural_payload.get("artifacts"), dict) else {}
+            native_natural_json_path = Path(native_natural_artifacts.get("json", ""))
+            native_natural_md_path = Path(native_natural_artifacts.get("markdown", ""))
+            native_natural_transcript = ""
+            if native_natural_json_path.is_file():
+                native_natural_transcript += native_natural_json_path.read_text(encoding="utf-8")
+            if native_natural_md_path.is_file():
+                native_natural_transcript += native_natural_md_path.read_text(encoding="utf-8")
+            native_natural_rel = native_natural_json_path.relative_to(native_natural_runtime.registry.harness.store.root).as_posix() if native_natural_json_path.is_file() else ""
+            native_natural_transcript_list = native_natural_runtime.registry.run("list_auto_transcripts", {"kind": "plan", "limit": 50}).to_dict()
+            native_natural_transcript_detail = native_natural_runtime.registry.run("get_auto_transcript", {"path": native_natural_rel, "max_ledger": 3}).to_dict() if native_natural_rel else {}
+            native_natural_status = native_natural_runtime.registry.run("runtime_status", {}).to_dict()
+            native_natural_audit = "\n".join(row[0] or "" for row in native_natural_runtime.store.conn.execute("SELECT data_json FROM audit_log").fetchall())
+            write("native-tool-natural-auto-provenance.json", json.dumps({
+                "payload": native_natural_payload,
+                "recall": native_natural_recall,
+                "transcript_list": native_natural_transcript_list,
+                "transcript_detail": native_natural_transcript_detail,
+                "status": native_natural_status,
+                "marker_exists": native_natural_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_natural_runtime.close()
+        native_natural_rows = native_natural_transcript_list.get("data", {}).get("transcripts", []) if isinstance(native_natural_transcript_list.get("data"), dict) else []
+        native_natural_blob = json.dumps({
+            "response": native_natural_response,
+            "payload": native_natural_payload,
+            "recall": native_natural_recall,
+            "transcript_list": native_natural_transcript_list,
+            "transcript_detail": native_natural_transcript_detail,
+            "status": native_natural_status,
+            "audit": native_natural_audit,
+        }, sort_keys=True)
+        checks["native_tool_call_natural_auto_provenance_ok"] = (
+            native_natural_payload.get("mode") == "applied"
+            and native_natural_payload.get("trigger") == "natural_auto"
+            and native_natural_payload.get("natural_auto_execute") is True
+            and native_natural_adapter.allow_seen is False
+            and "approve" not in native_natural_adapter.seen_tool_names
+            and "deny" not in native_natural_adapter.seen_tool_names
+            and [item.get("result", {}).get("status") for item in native_natural_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("execution_state") for item in native_natural_ledger] == ["completed_without_command_execution", "dry_run_not_executed"]
+            and not any(item.get("actual_command_or_process_activity") for item in native_natural_ledger)
+            and not native_natural_marker.exists()
+            and "natural auto native tool planning ran" in native_natural_recall
+            and "Trigger: `natural_auto`" in native_natural_transcript
+            and "Natural auto-execute: `True`" in native_natural_transcript
+            and native_natural_rel in [str(item.get("path")) for item in native_natural_rows]
+            and any(item.get("path") == native_natural_rel and item.get("natural_auto_execute") is True for item in native_natural_rows)
+            and native_natural_transcript_detail.get("data", {}).get("summary", {}).get("trigger") == "natural_auto"
+            and native_natural_transcript_detail.get("data", {}).get("summary", {}).get("natural_auto_execute") is True
+            and native_natural_status.get("data", {}).get("native_tool_calling", {}).get("natural_auto_execute_enabled") is True
+            and '"trigger": "natural_auto"' in native_natural_audit
+            and '"natural_auto_execute": true' in native_natural_audit
+            and "natural-auto-smoke-secret" not in native_natural_blob + native_natural_transcript
         )
 
         native_openai_captured = {}

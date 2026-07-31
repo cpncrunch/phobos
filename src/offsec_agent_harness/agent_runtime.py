@@ -145,7 +145,7 @@ class OffSecAgentRuntime:
         if self.config.auto_execute_natural:
             plan = self._plan_actions(message, allow_command_execution=False, use_model=self.config.auto_model_planning)
             if plan.tool_calls:
-                return self._execute_plan(plan, apply=True)
+                return self._execute_plan(plan, apply=True, trigger="natural_auto")
         memories = self.store.recall(message, limit=5)
         recent = self.store.recent_messages(self.session_id, limit=self.config.max_context_messages)
         summary = self.store.latest_context_summary(self.session_id)
@@ -459,8 +459,11 @@ class OffSecAgentRuntime:
         result = self.registry.run(mapping[command], args)
         return _format_result(result)
 
-    def _execute_plan(self, plan: AgentPlan, *, apply: bool) -> str:
+    def _execute_plan(self, plan: AgentPlan, *, apply: bool, trigger: str = "slash_auto") -> str:
         payload: dict[str, Any] = _redact_runtime_value(plan.to_dict())
+        safe_trigger = str(trigger or "slash_auto").strip() or "slash_auto"
+        payload["trigger"] = safe_trigger
+        payload["natural_auto_execute"] = safe_trigger == "natural_auto"
         if not apply:
             payload["mode"] = "plan_only"
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
@@ -482,6 +485,8 @@ class OffSecAgentRuntime:
                     "prompt_preview": redact_secrets(str(plan.prompt or "")[:200]),
                     "tool_count": len(plan.tool_calls),
                     "rejected_tool_count": len(plan.rejected_tool_calls),
+                    "trigger": safe_trigger,
+                    "natural_auto_execute": payload.get("natural_auto_execute", False),
                     "transcript_artifact_written": payload.get("transcript_artifact_written", False),
                     "artifacts": payload.get("artifacts", {}),
                     "no_tools_executed": True,
@@ -518,6 +523,8 @@ class OffSecAgentRuntime:
                 "prompt_preview": str(plan.prompt or "")[:200],
                 "tool_count": len(plan.tool_calls),
                 "result_counts": result_counts,
+                "trigger": safe_trigger,
+                "natural_auto_execute": payload.get("natural_auto_execute", False),
                 "transcript_artifact_written": payload.get("transcript_artifact_written", False),
                 "artifacts": payload.get("artifacts", {}),
             },
@@ -1638,6 +1645,8 @@ def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
         "",
         f"Generated: {utc_now()}",
         f"Mode: `{payload.get('mode', 'unknown')}`",
+        f"Trigger: `{payload.get('trigger', 'slash_auto')}`",
+        f"Natural auto-execute: `{payload.get('natural_auto_execute', False)}`",
         "Secret-like values redacted: `true`",
         "",
         "## Operator prompt",
