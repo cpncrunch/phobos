@@ -1461,6 +1461,7 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
     guardrail_status = decision.get("status") if isinstance(decision, dict) else None
     if not guardrail_status:
         guardrail_status = planned_validation.get("guardrail_status")
+    runtime_policy = str(planned_validation.get("runtime_policy") or "unknown")
     status = str(result.status or "unknown")
     tool = str(call.tool or "")
     execution_requested = bool(args.get("execute", False)) if tool in _EXECUTION_CAPABLE_TOOLS else False
@@ -1468,6 +1469,7 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
     approval_queued = bool(status == "needs_approval" and data.get("approval_id"))
     blocked = status == "blocked"
     dry_run = status == "dry_run"
+    runtime_policy_enforced = bool((runtime_policy == "confirm_required" and approval_queued) or (runtime_policy == "blocked" and blocked))
     if actual_command_or_process_activity:
         execution_state = "executed_or_started"
     elif approval_queued:
@@ -1494,6 +1496,8 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
         "approval_queued": approval_queued,
         "blocked": blocked,
         "dry_run": dry_run,
+        "runtime_policy": runtime_policy,
+        "runtime_policy_enforced": runtime_policy_enforced,
         "safe_to_claim_tool_ran": tool_completed_or_executed,
         "safe_to_claim_command_executed": actual_command_or_process_activity,
     }

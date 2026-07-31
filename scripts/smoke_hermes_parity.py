@@ -292,6 +292,30 @@ class SmokeToolCallApprovalActionAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallRuntimePolicyAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-runtime-policy"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "smoke model proposed calls governed by runtime policy",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-policy-smoke", "value": "native runtime policy approval replayed"}, "reason": "confirm_tools should queue native-planned local tools"},
+                    {"tool": "workspace_read", "args": {"path": "native-policy-blocked-fixture.txt"}, "reason": "blocked_tools should block native-planned local tools"},
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a harmless local Hermes-like parity smoke test for phobos-agent.")
     parser.add_argument("--out-root", default="demo-phobos-parity", help="Output directory to recreate under the repository root.")
@@ -1837,6 +1861,96 @@ def main(argv: list[str] | None = None) -> int:
             and not approval_action_marker.exists()
             and '"tool": "approve"' not in approval_action_audit
             and '"tool": "deny"' not in approval_action_audit
+        )
+
+        native_policy_adapter = SmokeToolCallRuntimePolicyAdapter()
+        native_policy_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-runtime-policy.db"),
+                session_name="native-tool-runtime-policy-smoke",
+                auto_model_planning=True,
+                confirm_tools=("remember",),
+                blocked_tools=("workspace_read",),
+            ),
+            adapter=native_policy_adapter,
+        )
+        try:
+            native_policy_plan = native_policy_runtime.handle_message('/auto model=true prompt="native runtime policy smoke token=policy-smoke-secret"')
+            native_policy_plan_payload = json.loads(native_policy_plan.split("\n", 1)[1])
+            native_policy_plan_pending = native_policy_runtime.store.list_approvals(native_policy_runtime.session_id, status="pending")
+            native_policy_apply = native_policy_runtime.handle_message('/auto apply=true model=true prompt="native runtime policy smoke token=policy-smoke-secret"')
+            native_policy_apply_payload = json.loads(native_policy_apply.split("\n", 1)[1])
+            native_policy_apply_ledger = native_policy_apply_payload.get("execution_ledger", []) if isinstance(native_policy_apply_payload.get("execution_ledger"), list) else []
+            native_policy_pending = native_policy_runtime.store.list_approvals(native_policy_runtime.session_id, status="pending")
+            native_policy_approval_id = int(native_policy_pending[0].get("id", 0) or 0) if native_policy_pending else 0
+            native_policy_recall_before = native_policy_runtime.handle_message('/recall query=native-policy-smoke')
+            native_policy_approved = native_policy_runtime.handle_message(f"/approve id={native_policy_approval_id}") if native_policy_approval_id else ""
+            native_policy_recall_after = native_policy_runtime.handle_message('/recall query=native-policy-smoke')
+
+            native_policy_loop_adapter = SmokeToolCallRuntimePolicyAdapter()
+            native_policy_loop_runtime = PhobosAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement_path),
+                    db_path=str(data / "native-tool-runtime-policy-loop.db"),
+                    session_name="native-tool-runtime-policy-loop-smoke",
+                    auto_model_planning=True,
+                    confirm_tools=("remember",),
+                    blocked_tools=("workspace_read",),
+                ),
+                adapter=native_policy_loop_adapter,
+            )
+            try:
+                native_policy_loop = native_policy_loop_runtime.handle_message('/auto-loop model=true steps=3 prompt="native runtime policy loop smoke token=policy-smoke-secret"')
+                native_policy_loop_payload = json.loads(native_policy_loop.split("\n", 1)[1])
+                native_policy_loop_ledger = native_policy_loop_payload.get("execution_ledger", []) if isinstance(native_policy_loop_payload.get("execution_ledger"), list) else []
+                native_policy_loop_pending = native_policy_loop_runtime.store.list_approvals(native_policy_loop_runtime.session_id, status="pending")
+            finally:
+                native_policy_loop_runtime.close()
+            write("native-tool-runtime-policy.json", json.dumps({
+                "plan": native_policy_plan_payload,
+                "apply": native_policy_apply_payload,
+                "approved": native_policy_approved,
+                "recall_before": native_policy_recall_before,
+                "recall_after": native_policy_recall_after,
+                "loop": native_policy_loop_payload,
+            }, indent=2, sort_keys=True))
+        finally:
+            native_policy_runtime.close()
+        native_policy_plan_calls = native_policy_plan_payload.get("tool_calls", []) if isinstance(native_policy_plan_payload.get("tool_calls"), list) else []
+        native_policy_blob = json.dumps({
+            "plan": native_policy_plan_payload,
+            "apply": native_policy_apply_payload,
+            "approved": native_policy_approved,
+            "recall_before": native_policy_recall_before,
+            "recall_after": native_policy_recall_after,
+            "loop": native_policy_loop_payload,
+        }, sort_keys=True)
+        checks["native_tool_call_runtime_policy_ok"] = (
+            native_policy_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_policy_plan_calls] == ["remember", "workspace_read"]
+            and [call.get("validation", {}).get("runtime_policy") for call in native_policy_plan_calls] == ["confirm_required", "blocked"]
+            and "will require approval by runtime policy" in json.dumps(native_policy_plan_payload.get("warnings", []))
+            and "will be blocked by runtime policy" in json.dumps(native_policy_plan_payload.get("warnings", []))
+            and not native_policy_plan_pending
+            and [item.get("result", {}).get("status") for item in native_policy_apply_payload.get("results", [])] == ["needs_approval", "blocked"]
+            and [item.get("runtime_policy") for item in native_policy_apply_ledger] == ["confirm_required", "blocked"]
+            and [item.get("execution_state") for item in native_policy_apply_ledger] == ["queued_for_approval", "blocked"]
+            and all(item.get("runtime_policy_enforced") is True for item in native_policy_apply_ledger)
+            and not any(item.get("actual_command_or_process_activity") for item in native_policy_apply_ledger)
+            and len(native_policy_pending) == 1
+            and native_policy_pending[0].get("tool_name") == "remember"
+            and "native runtime policy approval replayed" not in native_policy_recall_before
+            and "native-policy-smoke" in native_policy_approved
+            and "native runtime policy approval replayed" in native_policy_recall_after
+            and native_policy_loop_payload.get("stop_reason") == "approval_or_blocked_result"
+            and native_policy_loop_payload.get("steps_executed") == 1
+            and len(native_policy_loop_adapter.prompts) == 1
+            and native_policy_loop_payload.get("steps", [{}])[0].get("terminal_result_statuses") == ["blocked", "needs_approval"]
+            and [item.get("runtime_policy") for item in native_policy_loop_ledger] == ["confirm_required", "blocked"]
+            and all(item.get("runtime_policy_enforced") is True for item in native_policy_loop_ledger)
+            and len(native_policy_loop_pending) == 1
+            and "policy-smoke-secret" not in native_policy_plan + native_policy_apply + native_policy_loop + native_policy_blob
         )
 
         feedback_adapter = SmokeToolCallFeedbackAdapter()

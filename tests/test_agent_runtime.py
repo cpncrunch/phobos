@@ -338,6 +338,38 @@ class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallRuntimePolicyAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-runtime-policy"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "fake model proposed calls governed by runtime tool policy",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-policy-confirm", "value": "native runtime policy approval replayed"},
+                        "reason": "confirm_tools must queue safe local tools until direct operator approval",
+                    },
+                    {
+                        "tool": "workspace_read",
+                        "args": {"path": "policy-blocked-fixture.txt"},
+                        "reason": "blocked_tools must hard-block even harmless local reads",
+                    },
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolPlanContextAdapter(BaseModelAdapter):
     provider = "fake-tool-plan-context"
 
@@ -2885,6 +2917,90 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn('"tool": "deny"', raw_audit)
             finally:
                 runtime.close()
+
+    def test_model_tool_call_runtime_policy_confirm_block_and_loop_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Runtime Policy Boundary",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallRuntimePolicyAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-runtime-policy",
+                    auto_model_planning=True,
+                    confirm_tools=("remember",),
+                    blocked_tools=("workspace_read",),
+                ),
+                adapter=adapter,
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="native runtime policy token=policy-secret"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "workspace_read"])
+                self.assertEqual([call["validation"].get("runtime_policy") for call in plan_payload["tool_calls"]], ["confirm_required", "blocked"])
+                self.assertIn("will require approval by runtime policy", json.dumps(plan_payload.get("warnings", [])))
+                self.assertIn("will be blocked by runtime policy", json.dumps(plan_payload.get("warnings", [])))
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                self.assertNotIn("policy-secret", planned)
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="native runtime policy token=policy-secret"')
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(apply_payload["mode"], "applied")
+                self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["needs_approval", "blocked"])
+                ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual([item["runtime_policy"] for item in ledger], ["confirm_required", "blocked"])
+                self.assertEqual([item["execution_state"] for item in ledger], ["queued_for_approval", "blocked"])
+                self.assertTrue(all(item["runtime_policy_enforced"] for item in ledger))
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in ledger))
+                self.assertFalse(any(item["safe_to_claim_tool_ran"] for item in ledger))
+                pending = runtime.store.list_approvals(runtime.session_id, status="pending")
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["tool_name"], "remember")
+                self.assertNotIn("native runtime policy approval replayed", runtime.handle_message('/recall query=native-policy-confirm'))
+
+                approved = runtime.handle_message(f'/approve id={pending[0]["id"]}')
+                self.assertIn("native-policy-confirm", approved)
+                recall = runtime.handle_message('/recall query=native-policy-confirm')
+                self.assertIn("native runtime policy approval replayed", recall)
+                self.assertNotIn("policy-secret", applied + approved + recall)
+            finally:
+                runtime.close()
+
+            loop_adapter = FakeToolCallRuntimePolicyAdapter()
+            loop_runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "loop-agent.db"),
+                    session_name="native-runtime-policy-loop",
+                    auto_model_planning=True,
+                    confirm_tools=("remember",),
+                    blocked_tools=("workspace_read",),
+                ),
+                adapter=loop_adapter,
+            )
+            try:
+                looped = loop_runtime.handle_message('/auto-loop model=true steps=3 prompt="native runtime policy loop token=policy-secret"')
+                loop_payload = json.loads(looped.split("\n", 1)[1])
+                self.assertEqual(loop_payload["stop_reason"], "approval_or_blocked_result")
+                self.assertEqual(loop_payload["steps_executed"], 1)
+                self.assertEqual(len(loop_adapter.prompts), 1)
+                self.assertEqual(loop_payload["steps"][0].get("terminal_result_statuses"), ["blocked", "needs_approval"])
+                loop_ledger = loop_payload.get("execution_ledger", [])
+                self.assertEqual([item["runtime_policy"] for item in loop_ledger], ["confirm_required", "blocked"])
+                self.assertTrue(all(item["runtime_policy_enforced"] for item in loop_ledger))
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in loop_ledger))
+                self.assertEqual(len(loop_runtime.store.list_approvals(loop_runtime.session_id, status="pending")), 1)
+                self.assertNotIn("policy-secret", looped)
+            finally:
+                loop_runtime.close()
 
     def test_model_tool_planner_receives_bounded_redacted_runtime_context(self):
         with tempfile.TemporaryDirectory() as tmp:
