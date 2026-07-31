@@ -1898,6 +1898,101 @@ def main(argv: list[str] | None = None) -> int:
             and "api_key" not in json.dumps(native_openai_response.raw).lower()
         )
 
+        native_flat_marker = root / "native-flat-should-not-run.txt"
+        native_flat_captured = {}
+
+        class NativeOpenAIFlatSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native flat tool-call smoke token=native-flat-secret",
+                                "tool_calls": [
+                                    {
+                                        "id": "flat_memory",
+                                        "type": "tool_call",
+                                        "name": "remember",
+                                        "arguments": {"key": "native-provider-flat", "value": "flat provider tool call accepted"},
+                                    },
+                                    {
+                                        "call_id": "flat_dry",
+                                        "type": "function",
+                                        "function": "run_command",
+                                        "args": {
+                                            "target": "app.example.test",
+                                            "purpose": "native flat provider dry-run smoke",
+                                            "command": f"printf native-flat > {native_flat_marker}",
+                                            "execute": True,
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_flat_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_flat_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_flat_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIFlatSmokeResponse()
+
+        native_flat_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-flat.db"),
+                session_name="native-provider-flat-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-flat-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_flat_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_flat_urlopen
+            native_flat_plan = native_flat_runtime.handle_message('/auto model=true prompt="native flat provider smoke token=native-flat-secret"')
+            native_flat_plan_payload = json.loads(native_flat_plan.split("\n", 1)[1])
+            native_flat_apply = native_flat_runtime.handle_message('/auto apply=true model=true prompt="native flat provider smoke token=native-flat-secret"')
+            native_flat_apply_payload = json.loads(native_flat_apply.split("\n", 1)[1])
+            native_flat_recall = native_flat_runtime.handle_message('/recall query=native-provider-flat')
+            write("native-provider-flat-tool-calls.json", json.dumps({
+                "plan": native_flat_plan_payload,
+                "apply": native_flat_apply_payload,
+                "captured": native_flat_captured,
+                "recall": native_flat_recall,
+                "marker_exists": native_flat_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_flat_original_urlopen
+            native_flat_runtime.close()
+        native_flat_calls = native_flat_plan_payload.get("tool_calls", []) if isinstance(native_flat_plan_payload.get("tool_calls"), list) else []
+        native_flat_metadata = native_flat_plan_payload.get("metadata", {}) if isinstance(native_flat_plan_payload.get("metadata"), dict) else {}
+        native_flat_ledger = native_flat_apply_payload.get("execution_ledger", []) if isinstance(native_flat_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_flat_tool_call_ok"] = (
+            native_flat_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_flat_calls] == ["remember", "run_command"]
+            and all("native provider flat tool_call" in call.get("reason", "") for call in native_flat_calls)
+            and native_flat_calls[1].get("args", {}).get("execute") is False
+            and native_flat_metadata.get("native_tool_calls") is True
+            and native_flat_metadata.get("native_tool_call_count") == 2
+            and int(native_flat_metadata.get("rejected_native_tool_call_count", 0) or 0) == 0
+            and [item.get("result", {}).get("status") for item in native_flat_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and len(native_flat_ledger) == 2
+            and native_flat_ledger[1].get("execution_state") == "dry_run_not_executed"
+            and native_flat_ledger[1].get("actual_command_or_process_activity") is False
+            and "flat provider tool call accepted" in native_flat_recall
+            and native_flat_captured.get("tool_choice") == "auto"
+            and native_flat_captured.get("tool_count", 0) > 0
+            and not native_flat_marker.exists()
+            and "native-flat-secret" not in native_flat_plan + native_flat_apply + native_flat_recall + json.dumps(native_flat_plan_payload) + json.dumps(native_flat_apply_payload)
+        )
+
         native_edge_captured = {}
 
         class NativeOpenAIEdgeSmokeResponse:

@@ -2683,6 +2683,99 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_flat_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Flat Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-flat-should-not-run.txt"
+
+            class FakeFlatHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native flat provider plan token=flat-secret",
+                                    "tool_calls": [
+                                        {
+                                            "id": "flat_memory",
+                                            "type": "tool_call",
+                                            "name": "remember",
+                                            "arguments": {"key": "native-flat", "value": "flat native tool call accepted"},
+                                        },
+                                        {
+                                            "call_id": "flat_dry_run",
+                                            "type": "function",
+                                            "function": "run_command",
+                                            "args": {
+                                                "target": "app.example.test",
+                                                "purpose": "flat native dry-run boundary",
+                                                "command": f"printf native-flat > {dry_run_marker}",
+                                                "execute": True,
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeFlatHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-flat-tool-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-flat", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native flat tool call token=flat-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertIn("native provider flat tool_call", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider flat tool_call", payload["tool_calls"][1]["reason"])
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    metadata = payload.get("metadata", {})
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertEqual(metadata.get("rejected_native_tool_call_count", 0), 0)
+                    self.assertNotIn("flat-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native flat tool call token=flat-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual(ledger[1]["execution_state"], "dry_run_not_executed")
+                    self.assertFalse(ledger[1]["actual_command_or_process_activity"])
+                recall = runtime.handle_message('/recall query=native-flat')
+                self.assertIn("flat native tool call accepted", recall)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertIn("tools", captured_payloads[0])
+                self.assertNotIn("flat-secret", applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_native_content_block_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -474,12 +474,28 @@ def _parse_native_content_tool_block(
 def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     if not isinstance(item, dict):
         return None, {"tool": None, "reason": "Native tool call must be an object.", "args": {"value_type": type(item).__name__}}, "Native tool call was not an object; skipped."
-    if item.get("type") not in {None, "function"}:
-        return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(item.get("type"))}}, "Native non-function tool call skipped."
+    native_type = item.get("type")
+    if native_type not in {None, "function", "tool_call", "tool_use"}:
+        return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
     function = item.get("function")
-    if not isinstance(function, dict):
-        return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
-    return _parse_native_function_call(function, index=index, legacy=False, call_id=str(item.get("id") or ""))
+    if isinstance(function, dict):
+        return _parse_native_function_call(function, index=index, legacy=False, call_id=str(item.get("id") or ""))
+    # Several OpenAI-compatible shims flatten top-level tool calls instead of
+    # nesting them under {"function": {"name", "arguments"}}.  Treat these as
+    # planner proposals only; runtime schema/ROE validation remains authoritative.
+    name = item.get("name") or item.get("tool")
+    if isinstance(function, str) and not name:
+        name = function
+    if name:
+        arguments = item.get("arguments", item.get("args", item.get("input", {})))
+        return _parse_native_function_call(
+            {"name": name, "arguments": arguments},
+            index=index,
+            legacy=False,
+            call_id=str(item.get("id") or item.get("call_id") or ""),
+            label="native provider flat tool_call",
+        )
+    return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
 
 
 def _parse_native_function_call(
