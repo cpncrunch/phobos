@@ -735,6 +735,8 @@ def _render_chat_response(response: str, *, message: str, platform: str, runtime
             return _render_count_list_chat(response, data, command)
     if response.startswith("Auto plan (no tools executed):"):
         return _render_auto_plan_chat(response)
+    if response.startswith("Auto loop completed:"):
+        return _render_auto_loop_chat(response)
     parsed = _parse_formatted_tool_response(response)
     if parsed and command not in {"schemas", "tool-schema", "tool-schemas", "skill", "load-skill"}:
         rendered = _render_generic_tool_chat(parsed)
@@ -889,6 +891,53 @@ def _render_auto_plan_chat(response: str) -> str:
         lines.append(f"- `{call.get('tool')}` — {call.get('reason', 'planned step')}")
     if calls:
         lines.append("Run it with `/auto apply=true ...`; add `execute=true` only when guarded command execution is intended.")
+    return "\n".join(lines)
+
+
+def _render_auto_loop_chat(response: str) -> str:
+    raw = response.split("\n", 1)[1] if "\n" in response else "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return response
+    steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+    counts: dict[str, int] = {}
+    planned: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        plan = step.get("plan") if isinstance(step.get("plan"), dict) else {}
+        plan_calls = plan.get("tool_calls") if isinstance(plan, dict) else []
+        if isinstance(plan_calls, list):
+            for call in plan_calls:
+                if not isinstance(call, dict):
+                    continue
+                tool = str(call.get("tool") or "").strip()
+                if tool and tool not in planned:
+                    planned.append(tool)
+        result_items = step.get("results")
+        if isinstance(result_items, list):
+            for item in result_items:
+                result_obj = item.get("result") if isinstance(item, dict) else None
+                result = result_obj if isinstance(result_obj, dict) else {}
+                status = str(result.get("status") or "unknown")
+                counts[status] = counts.get(status, 0) + 1
+    stop_reason = str(data.get("stop_reason") or "unknown")
+    executed = int(data.get("steps_executed") or 0)
+    requested = int(data.get("steps_requested") or executed or 0)
+    lines = [f"Native tool loop stopped: `{stop_reason}` after {executed}/{requested} applied step(s)."]
+    if planned:
+        lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
+    if counts:
+        lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
+    artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+    if data.get("transcript_artifact_written") and artifacts:
+        md_path = artifacts.get("markdown") or artifacts.get("json")
+        if md_path:
+            lines.append(f"- Redacted transcript: `{md_path}`")
+    if data.get("artifact_error"):
+        lines.append(f"- Transcript artifact warning: {data.get('artifact_error')}")
+    lines.append("No confirm-gated or blocked action is treated as executed unless the registry returned an executed result.")
     return "\n".join(lines)
 
 

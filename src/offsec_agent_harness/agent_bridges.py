@@ -209,7 +209,8 @@ class BridgeDispatchResult:
     attachments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        redacted = _redact_value(asdict(self))
+        return redacted if isinstance(redacted, dict) else asdict(self)
 
 
 def bridge_config_from_runtime(runtime_config: Any, platform: str, overrides: dict[str, Any] | None = None) -> BridgeConfig:

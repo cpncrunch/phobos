@@ -2127,6 +2127,88 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_native_auto_gateway_endpoints_and_bridge_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Gateway Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-gateway-loop",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallFeedbackAdapter(),
+            )
+            gateway = None
+            try:
+                gateway = AgentGateway(runtime, port=0)
+                thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                thread.start()
+                host, port = gateway.server_address
+
+                def post(route: str, body: dict[str, object]) -> dict[str, object]:
+                    req = urllib.request.Request(
+                        f"http://{host}:{port}{route}",
+                        data=json.dumps(body).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        return json.loads(response.read().decode("utf-8"))
+
+                with urllib.request.urlopen(f"http://{host}:{port}/routes", timeout=5) as response:
+                    routes = json.loads(response.read().decode("utf-8"))
+                self.assertIn("/auto", routes.get("paths", []))
+                self.assertIn("/auto-loop", routes.get("paths", []))
+                with urllib.request.urlopen(f"http://{host}:{port}/", timeout=5) as response:
+                    dashboard = response.read().decode("utf-8")
+                self.assertIn("Native Tool Loop", dashboard)
+
+                auto = post("/auto", {"prompt": "native gateway plan token=gateway-secret", "model": "true", "apply": "false"})
+                self.assertIn("Auto plan (no tools executed)", str(auto.get("response", "")))
+                self.assertNotIn("gateway-secret", json.dumps(auto))
+
+                loop = post("/auto-loop", {"prompt": "native gateway loop token=loop-secret", "model": True, "steps": "4"})
+                loop_payload = json.loads(str(loop["response"]).split("\n", 1)[1])
+                self.assertEqual(loop_payload["stop_reason"], "no_tool_calls")
+                self.assertEqual(loop_payload["steps_executed"], 2)
+                self.assertTrue(loop_payload["transcript_artifact_written"])
+                self.assertNotIn("loop-secret", json.dumps(loop))
+
+                invalid_req = urllib.request.Request(
+                    f"http://{host}:{port}/auto-loop",
+                    data=json.dumps({"prompt": "bad steps", "steps": "1.5"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(invalid_req, timeout=5)
+                self.assertEqual(raised.exception.code, 400)
+                invalid_payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(invalid_payload.get("error"), "steps must be an integer")
+
+                bridge = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text='!phobos /auto-loop model=true steps=4 prompt="native bridge loop token=bridge-secret"', channel_id="C-native", user_id="U-native", message_id="M-native"),
+                    BridgeConfig(platform="discord", allowed_channel_ids=("C-native",), allowed_user_ids=("U-native",), command_prefix="!phobos", max_response_chars=1200),
+                )
+                self.assertEqual(bridge.status, "handled", bridge.to_dict())
+                self.assertIn("Native tool loop stopped", bridge.response)
+                self.assertIn("Actual results", bridge.response)
+                self.assertIn("Auto loop completed", bridge.raw_response)
+                self.assertNotIn("bridge-secret", bridge.response + bridge.raw_response)
+            finally:
+                if gateway is not None:
+                    gateway.shutdown()
+                runtime.close()
+
     def test_model_auto_loop_media_and_sealed_export_import(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)

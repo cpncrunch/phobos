@@ -1094,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             adapter=SmokeToolCallFeedbackAdapter(),
         )
+        feedback_gateway = None
         try:
             feedback_loop = feedback_runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback smoke token=feedback-smoke-secret"')
             feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
@@ -1106,9 +1107,59 @@ def main(argv: list[str] | None = None) -> int:
                 feedback_transcript += feedback_json_path.read_text(encoding="utf-8")
             if feedback_md_path.is_file():
                 feedback_transcript += feedback_md_path.read_text(encoding="utf-8")
+
+            feedback_gateway = AgentGateway(feedback_runtime, port=0)
+            feedback_thread = threading.Thread(target=feedback_gateway.serve_forever, daemon=True)
+            feedback_thread.start()
+            feedback_host, feedback_port = feedback_gateway.server_address
+
+            def feedback_post(route: str, body: dict[str, object]) -> dict[str, object]:
+                req = urllib.request.Request(
+                    f"http://{feedback_host}:{feedback_port}{route}",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return json.loads(response.read().decode("utf-8"))
+
+            with urllib.request.urlopen(f"http://{feedback_host}:{feedback_port}/routes", timeout=5) as response:
+                feedback_routes = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(f"http://{feedback_host}:{feedback_port}/", timeout=5) as response:
+                feedback_dashboard = response.read().decode("utf-8")
+            gateway_auto = feedback_post("/auto", {"prompt": "native gateway plan token=native-gateway-secret", "model": True, "apply": False})
+            gateway_auto_payload = json.loads(str(gateway_auto.get("response", "{}")).split("\n", 1)[1])
+            gateway_loop = feedback_post("/auto-loop", {"prompt": "native gateway loop token=native-loop-secret", "model": True, "steps": "4"})
+            gateway_loop_payload = json.loads(str(gateway_loop.get("response", "{}")).split("\n", 1)[1])
+            try:
+                bad_gateway_req = urllib.request.Request(
+                    f"http://{feedback_host}:{feedback_port}/auto-loop",
+                    data=json.dumps({"prompt": "bad native loop", "steps": "1.5"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(bad_gateway_req, timeout=5)
+                bad_gateway_steps = {"status_code": 200, "payload": {}}
+            except urllib.error.HTTPError as exc:
+                bad_gateway_steps = {"status_code": exc.code, "payload": json.loads(exc.read().decode("utf-8"))}
+            bridge_loop = handle_bridge_message(
+                feedback_runtime,
+                BridgeMessage(platform="discord", text='!phobos /auto-loop model=true steps=4 prompt="native chat loop token=native-chat-secret"', channel_id="C-native-smoke", user_id="U-native-smoke", message_id="M-native-smoke"),
+                BridgeConfig(platform="discord", allowed_channel_ids=("C-native-smoke",), allowed_user_ids=("U-native-smoke",), command_prefix="!phobos", max_response_chars=1200),
+            )
             write("native-tool-feedback-loop.txt", feedback_loop)
             write("native-tool-feedback-transcript.txt", feedback_transcript)
+            write("native-tool-gateway-chat.json", json.dumps({
+                "routes": feedback_routes,
+                "dashboard_contains_native_loop": "Native Tool Loop" in feedback_dashboard,
+                "gateway_auto": gateway_auto,
+                "gateway_loop": gateway_loop,
+                "bad_gateway_steps": bad_gateway_steps,
+                "bridge_loop": bridge_loop.to_dict(),
+            }, indent=2, sort_keys=True))
         finally:
+            if feedback_gateway is not None:
+                feedback_gateway.shutdown()
             feedback_runtime.close()
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"
@@ -1118,6 +1169,23 @@ def main(argv: list[str] | None = None) -> int:
             and "native feedback loop recovered" in feedback_recall
             and "Workspace file not found" in feedback_transcript
             and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
+        )
+        checks["native_tool_call_gateway_chat_ok"] = (
+            "/auto" in feedback_routes.get("paths", [])
+            and "/auto-loop" in feedback_routes.get("paths", [])
+            and "Native Tool Loop" in feedback_dashboard
+            and gateway_auto_payload.get("mode") == "plan_only"
+            and gateway_loop_payload.get("stop_reason") == "no_tool_calls"
+            and gateway_loop_payload.get("transcript_artifact_written") is True
+            and bad_gateway_steps.get("status_code") == 400
+            and bad_gateway_steps.get("payload", {}).get("error") == "steps must be an integer"
+            and bridge_loop.status == "handled"
+            and "Native tool loop stopped" in bridge_loop.response
+            and "Actual results" in bridge_loop.response
+            and "Auto loop completed" in bridge_loop.raw_response
+            and "native-gateway-secret" not in json.dumps(gateway_auto)
+            and "native-loop-secret" not in json.dumps(gateway_loop)
+            and "native-chat-secret" not in json.dumps(bridge_loop.to_dict())
         )
         hygiene_memory = runtime.registry.run("remember", {"key": "smoke-forget", "value": "Temporary memory hygiene marker token=supersecret", "tags": "hygiene"})
         hygiene_id = int(hygiene_memory.data.get("id", 0))

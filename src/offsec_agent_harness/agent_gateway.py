@@ -6,6 +6,7 @@ from pathlib import Path
 import html
 import json
 import os
+import shlex
 import threading
 from urllib.parse import parse_qs, urlparse
 
@@ -474,6 +475,38 @@ class AgentGateway:
                             response = runtime.handle_message(message)
                             _write_json(self, {"response": response, "session_id": runtime.session_id})
                             return
+                        if path == "/auto":
+                            prompt = _payload_string(self, payload, "prompt", "query", label="prompt")
+                            if prompt is None:
+                                return
+                            apply_plan = _payload_bool(self, payload, "apply", default=False)
+                            if apply_plan is None:
+                                return
+                            execute = _payload_bool(self, payload, "execute", default=False)
+                            if execute is None:
+                                return
+                            use_model = _payload_bool(self, payload, "model", default=bool(runtime.config.auto_model_planning))
+                            if use_model is None:
+                                return
+                            response = runtime.handle_message(_auto_slash_message("auto", prompt, apply=apply_plan, execute=execute, model=use_model))
+                            _write_json(self, {"response": response, "session_id": runtime.session_id, "endpoint": "/auto"})
+                            return
+                        if path in {"/auto-loop", "/loop"}:
+                            prompt = _payload_string(self, payload, "prompt", "query", label="prompt")
+                            if prompt is None:
+                                return
+                            steps = _payload_int(self, payload, "steps", default=runtime.config.max_auto_steps, minimum=1, maximum=10)
+                            if steps is None:
+                                return
+                            execute = _payload_bool(self, payload, "execute", default=False)
+                            if execute is None:
+                                return
+                            use_model = _payload_bool(self, payload, "model", default=bool(runtime.config.auto_model_planning))
+                            if use_model is None:
+                                return
+                            response = runtime.handle_message(_auto_slash_message("auto-loop", prompt, steps=steps, execute=execute, model=use_model))
+                            _write_json(self, {"response": response, "session_id": runtime.session_id, "endpoint": "/auto-loop"})
+                            return
                         if path == "/tool":
                             name = str(payload.get("name", "")).strip()
                             tool_args = payload.get("args") or {}
@@ -588,6 +621,9 @@ def _gateway_paths() -> list[str]:
         "/guardrails",
         "/audit",
         "/message",
+        "/auto",
+        "/auto-loop",
+        "/loop",
         "/tool",
         "/finding",
         "/approve",
@@ -706,6 +742,18 @@ def remote_client_html(default_base_url: str = "") -> str:
     <pre id="messageResult"></pre>
   </section>
   <section>
+    <h2>Native Tool Loop</h2>
+    <p>Dedicated remote endpoint for model/deterministic tool-call planning. It is dry-run by default and still uses ROE, runtime policy, and approval gates.</p>
+    <textarea id="autoPrompt">remember remote-loop: native gateway surface</textarea>
+    <label><input id="autoApply" type="checkbox"> apply plan</label>
+    <label><input id="autoExecute" type="checkbox"> allow command/process execute=true</label>
+    <label><input id="autoModel" type="checkbox"> use configured model planner</label>
+    <label>loop steps<input id="autoSteps" value="3"></label>
+    <button onclick="sendAuto()">POST /auto</button>
+    <button onclick="sendAutoLoop()">POST /auto-loop</button>
+    <pre id="autoResult"></pre>
+  </section>
+  <section>
     <h2>Create Finding</h2>
     <input id="findingTitle" placeholder="Finding title">
     <input id="findingSeverity" value="Medium" placeholder="Severity">
@@ -758,6 +806,9 @@ async function saveGuardrails() {{ try {{
   show('guardrails', await api('/guardrails', {{method:'POST', body: JSON.stringify(payload)}})); await loadAll();
 }} catch(e) {{ err(e); }} }}
 async function sendMessage() {{ try {{ show('messageResult', await api('/message', {{method:'POST', body: JSON.stringify({{message: document.getElementById('message').value}})}})); await loadAll(); }} catch(e) {{ err(e); }} }}
+function autoPayload() {{ return {{prompt: document.getElementById('autoPrompt').value, apply: document.getElementById('autoApply').checked, execute: document.getElementById('autoExecute').checked, model: document.getElementById('autoModel').checked, steps: document.getElementById('autoSteps').value}}; }}
+async function sendAuto() {{ try {{ const payload = autoPayload(); delete payload.steps; show('autoResult', await api('/auto', {{method:'POST', body: JSON.stringify(payload)}})); await loadAll(); }} catch(e) {{ err(e); }} }}
+async function sendAutoLoop() {{ try {{ show('autoResult', await api('/auto-loop', {{method:'POST', body: JSON.stringify(autoPayload())}})); await loadAll(); }} catch(e) {{ err(e); }} }}
 async function createFinding() {{ try {{ show('findingResult', await api('/finding', {{method:'POST', body: JSON.stringify({{title: document.getElementById('findingTitle').value, severity: document.getElementById('findingSeverity').value, description: document.getElementById('findingDescription').value}})}})); await loadAll(); }} catch(e) {{ err(e); }} }}
 </script>
 </body>
@@ -810,6 +861,87 @@ def _payload_required_int(handler: BaseHTTPRequestHandler, payload: dict[str, An
     except (TypeError, ValueError):
         _write_json(handler, {"error": f"{label} must be an integer"}, status=400)
         return None
+
+
+def _payload_string(handler: BaseHTTPRequestHandler, payload: dict[str, Any], *names: str, label: str) -> str | None:
+    raw = _payload_first(payload, *names)
+    if raw is None or raw == "":
+        _write_json(handler, {"error": f"{label} is required"}, status=400)
+        return None
+    if not isinstance(raw, str):
+        _write_json(handler, {"error": f"{label} must be a string"}, status=400)
+        return None
+    text = raw.strip()
+    if not text:
+        _write_json(handler, {"error": f"{label} is required"}, status=400)
+        return None
+    return text
+
+
+def _payload_bool(handler: BaseHTTPRequestHandler, payload: dict[str, Any], name: str, *, default: bool = False) -> bool | None:
+    if name not in payload or payload.get(name) == "":
+        return default
+    raw = payload.get(name)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    _write_json(handler, {"error": f"{name} must be a boolean"}, status=400)
+    return None
+
+
+def _payload_int(
+    handler: BaseHTTPRequestHandler,
+    payload: dict[str, Any],
+    name: str,
+    *,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int | None:
+    if name not in payload or payload.get(name) == "":
+        value = int(default)
+    else:
+        raw = payload.get(name)
+        if isinstance(raw, bool):
+            _write_json(handler, {"error": f"{name} must be an integer"}, status=400)
+            return None
+        if isinstance(raw, float):
+            if not raw.is_integer():
+                _write_json(handler, {"error": f"{name} must be an integer"}, status=400)
+                return None
+            value = int(raw)
+        else:
+            try:
+                text = str(raw).strip()
+                if not text or any(ch in text for ch in ".eE"):
+                    raise ValueError
+                value = int(text)
+            except (TypeError, ValueError):
+                _write_json(handler, {"error": f"{name} must be an integer"}, status=400)
+                return None
+    if minimum is not None and value < minimum:
+        _write_json(handler, {"error": f"{name} must be at least {minimum}"}, status=400)
+        return None
+    if maximum is not None and value > maximum:
+        _write_json(handler, {"error": f"{name} must be at most {maximum}"}, status=400)
+        return None
+    return value
+
+
+def _auto_slash_message(command: str, prompt: str, **options: Any) -> str:
+    parts = [f"/{command}", "prompt=" + shlex.quote(prompt)]
+    for key, value in options.items():
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        parts.append(f"{key}={shlex.quote(rendered)}")
+    return " ".join(parts)
 
 
 def _write_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any], status: int = 200) -> None:
@@ -1087,7 +1219,7 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     finding_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['status'])}</code> {html.escape(item['severity'])} — {html.escape(item['title'])}</li>" for item in findings) or "<li>No findings yet.</li>"
     tool_run_items = "\n".join(f"<li>#{item['id']} <code>{html.escape(item['tool_name'])}</code> {html.escape(item['status'])} — {html.escape(item['target'])}</li>" for item in tool_runs) or "<li>No structured tool runs yet.</li>"
     job_items = "\n".join(f"<li>#{item.get('id')} <code>{'enabled' if item.get('enabled') else 'disabled'}</code> {html.escape(str(item.get('schedule', '')))} — {html.escape(str(item.get('name', ''))[:140])}</li>" for item in jobs[:8]) or "<li>No scheduled jobs yet.</li>"
-    api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/tool", "/finding", "/guardrails", "/approve", "/deny", "/run-due"})
+    api_links = ", ".join(f'<a href="{html.escape(path)}">{html.escape(path)}</a>' for path in _gateway_paths() if path not in {"/message", "/auto", "/auto-loop", "/loop", "/tool", "/finding", "/guardrails", "/approve", "/deny", "/run-due"})
     safety_non_destructive_selected = "selected" if str(runtime.roe.safety_mode) == "non_destructive" else ""
     safety_standard_selected = "selected" if str(runtime.roe.safety_mode) == "standard" else ""
     scope_text = html.escape("\n".join(engagement_policy["in_scope_targets"]))
@@ -1156,8 +1288,20 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     <pre id="response"></pre>
   </section>
   <section>
+    <h2>Native Tool Loop</h2>
+    <p>Plan or run a bounded native model/tool-calling loop through dedicated gateway endpoints. Plans are dry-run by default; command/process execution still requires <code>execute=true</code> and normal ROE/approval checks.</p>
+    <textarea id="autoPrompt">remember gateway-loop: native gateway surface</textarea><br>
+    <label><input id="autoApply" type="checkbox"> apply plan</label>
+    <label><input id="autoExecute" type="checkbox"> allow command/process execute=true</label>
+    <label><input id="autoModel" type="checkbox"> use configured model planner</label>
+    <label>loop steps<input id="autoSteps" value="3"></label>
+    <button onclick="sendAuto()">POST /auto</button>
+    <button onclick="sendAutoLoop()">POST /auto-loop</button>
+    <pre id="autoResponse"></pre>
+  </section>
+  <section>
     <h2>API Links</h2>
-    <p>Tools registered: {tool_count}. JSON endpoints: {api_links}. POST endpoints: <code>/message</code>, <code>/tool</code>, <code>/finding</code>, <code>/approve</code>, <code>/deny</code>, <code>/run-due</code>.</p>
+    <p>Tools registered: {tool_count}. JSON endpoints: {api_links}. POST endpoints: <code>/message</code>, <code>/auto</code>, <code>/auto-loop</code>, <code>/tool</code>, <code>/finding</code>, <code>/approve</code>, <code>/deny</code>, <code>/run-due</code>.</p>
   </section>
   <script>
     function getLines(id) {{ return document.getElementById(id).value.split(/\\n|,/).map(x=>x.trim()).filter(Boolean); }}
@@ -1181,6 +1325,25 @@ def _dashboard_html(runtime: OffSecAgentRuntime) -> str:
     async function sendMessage() {{
       const response = await fetch('/message', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{message: document.getElementById('message').value}})}});
       document.getElementById('response').textContent = JSON.stringify(await response.json(), null, 2);
+    }}
+    function autoPayload() {{
+      return {{
+        prompt: document.getElementById('autoPrompt').value,
+        apply: document.getElementById('autoApply').checked,
+        execute: document.getElementById('autoExecute').checked,
+        model: document.getElementById('autoModel').checked,
+        steps: document.getElementById('autoSteps').value
+      }};
+    }}
+    async function sendAuto() {{
+      const payload = autoPayload();
+      delete payload.steps;
+      const response = await fetch('/auto', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload)}});
+      document.getElementById('autoResponse').textContent = JSON.stringify(await response.json(), null, 2);
+    }}
+    async function sendAutoLoop() {{
+      const response = await fetch('/auto-loop', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(autoPayload())}});
+      document.getElementById('autoResponse').textContent = JSON.stringify(await response.json(), null, 2);
     }}
   </script>
 </body>
