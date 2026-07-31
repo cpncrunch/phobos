@@ -20,6 +20,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
+from offsec_agent_harness.agent_tools import ToolResult
 from offsec_agent_harness.models import redact_secrets
 
 
@@ -257,6 +258,28 @@ def main(argv: list[str] | None = None) -> int:
         checks["schema_returned"] = "start_process" in schema and "execute" in schema
         plugin = handle("plugin-echo", "/tool name=example_echo value=plugin-ok")
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
+        number_dispatches: list[dict[str, object]] = []
+
+        def schema_number_echo(args: dict[str, object]) -> ToolResult:
+            number_dispatches.append(dict(args))
+            return ToolResult("ok", "number ok", {"threshold": args.get("threshold"), "threshold_type": type(args.get("threshold")).__name__})
+
+        runtime.registry.register_tool(
+            "schema_number_echo",
+            schema_number_echo,
+            {
+                "description": "Smoke-only JSON-schema number validation boundary.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "threshold": {"type": "number", "minimum": 0.1, "maximum": 10, "description": "Unit threshold."},
+                        "label": {"type": "string", "description": "Optional label."},
+                    },
+                    "required": ["threshold"],
+                    "additionalProperties": True,
+                },
+            },
+        )
         invalid_tool_integer = runtime.registry.run("list_findings", {"limit": "not-an-int"})
         valid_tool_integer = runtime.registry.run("list_findings", {"limit": "2"})
         invalid_tool_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
@@ -340,6 +363,62 @@ def main(argv: list[str] | None = None) -> int:
             and string_approval_count_before == string_approval_count_after
             and (runtime.registry.workspace_root / "notes" / "schema-string.md").read_text(encoding="utf-8") == "string-ok"
             and "Traceback" not in json.dumps(string_validation_payload)
+        )
+        invalid_tool_number = runtime.registry.run("schema_number_echo", {"threshold": "not-a-number"})
+        invalid_tool_number_finite = runtime.registry.run("schema_number_echo", {"threshold": "nan"})
+        invalid_tool_number_bound = runtime.registry.run("schema_number_echo", {"threshold": "0.05"})
+        invalid_tool_number_bool = runtime.registry.run("schema_number_echo", {"threshold": True})
+        valid_tool_number = runtime.registry.run("schema_number_echo", {"threshold": "1.25", "label": "smoke"})
+        blank_required_integer = runtime.registry.run("poll_process", {"id": ""})
+        blank_required_number = runtime.registry.run("schema_number_echo", {"threshold": ""})
+        number_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("schema_number_echo")
+        try:
+            invalid_confirm_number = runtime.registry.run("schema_number_echo", {"threshold": "nope"})
+            invalid_confirm_blank_number = runtime.registry.run("schema_number_echo", {"threshold": ""})
+        finally:
+            runtime.registry.confirm_tools.discard("schema_number_echo")
+        number_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        number_validation_payload = {
+            "invalid": invalid_tool_number.to_dict(),
+            "invalid_finite": invalid_tool_number_finite.to_dict(),
+            "invalid_bound": invalid_tool_number_bound.to_dict(),
+            "invalid_bool": invalid_tool_number_bool.to_dict(),
+            "valid": valid_tool_number.to_dict(),
+            "blank_required_integer": blank_required_integer.to_dict(),
+            "blank_required_number": blank_required_number.to_dict(),
+            "invalid_confirm_number": invalid_confirm_number.to_dict(),
+            "invalid_confirm_blank_number": invalid_confirm_blank_number.to_dict(),
+            "approvals_before": number_approval_count_before,
+            "approvals_after": number_approval_count_after,
+            "dispatches": number_dispatches,
+        }
+        write("tool-schema-number-validation.json", json.dumps(number_validation_payload, indent=2))
+        checks["tool_schema_number_validation_ok"] = (
+            invalid_tool_number.status == "error"
+            and invalid_tool_number.message == "threshold must be a number."
+            and invalid_tool_number_finite.status == "error"
+            and invalid_tool_number_finite.message == "threshold must be a number."
+            and invalid_tool_number_bool.status == "error"
+            and invalid_tool_number_bool.message == "threshold must be a number."
+            and invalid_tool_number_bound.status == "error"
+            and invalid_tool_number_bound.message == "threshold must be at least 0.1."
+            and valid_tool_number.status == "ok"
+            and valid_tool_number.data.get("threshold") == 1.25
+            and invalid_confirm_number.status == "error"
+            and number_approval_count_after == number_approval_count_before
+            and number_dispatches == [{"threshold": 1.25, "label": "smoke"}]
+            and "Traceback" not in json.dumps(number_validation_payload)
+        )
+        checks["tool_schema_blank_required_validation_ok"] = (
+            blank_required_integer.status == "error"
+            and blank_required_integer.message == "id is required."
+            and blank_required_number.status == "error"
+            and blank_required_number.message == "threshold is required."
+            and invalid_confirm_blank_number.status == "error"
+            and invalid_confirm_blank_number.message == "threshold is required."
+            and number_approval_count_after == number_approval_count_before
+            and "Traceback" not in json.dumps(number_validation_payload)
         )
         missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
         approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))

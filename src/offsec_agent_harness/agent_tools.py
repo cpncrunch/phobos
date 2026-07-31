@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -145,9 +146,10 @@ class OffSecToolRegistry:
         ``ValueError`` strings, Python truthiness surprises, handler-specific
         missing-key errors, or queued approval replay.  The registry owns the
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
-        integer/boolean strings, normalize schema-declared enum aliases, and reject
-        ambiguous, out-of-set, missing required, or non-string string-typed values
-        with clean operator errors before policy confirm queues are created.
+        integer/number/boolean strings, normalize schema-declared enum aliases, and reject
+        ambiguous, out-of-set, missing required, blank required scalar, or non-string
+        string-typed values with clean operator errors before policy confirm queues
+        are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -186,6 +188,18 @@ class OffSecToolRegistry:
                     return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_bound(maximum)}.")
                 validated[arg_name] = parsed_int
                 continue
+            if arg_type == "number":
+                parsed_number, ok = _parse_schema_number(raw_value)
+                if not ok:
+                    return validated, ToolResult("error", f"{arg_name} must be a number.")
+                minimum = arg_schema.get("minimum")
+                maximum = arg_schema.get("maximum")
+                if isinstance(minimum, (int, float)) and parsed_number < minimum:
+                    return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_bound(minimum)}.")
+                if isinstance(maximum, (int, float)) and parsed_number > maximum:
+                    return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_bound(maximum)}.")
+                validated[arg_name] = parsed_number
+                continue
             if arg_type == "boolean":
                 parsed, ok = _parse_schema_bool(raw_value)
                 if not ok:
@@ -200,7 +214,10 @@ class OffSecToolRegistry:
             for arg_name in required:
                 if not isinstance(arg_name, str):
                     continue
+                arg_schema = properties.get(arg_name, {}) if isinstance(properties, dict) else {}
                 if arg_name not in validated or validated.get(arg_name) is None:
+                    return validated, ToolResult("error", f"{arg_name} is required.")
+                if validated.get(arg_name) == "" and _blank_required_value_is_missing(arg_schema):
                     return validated, ToolResult("error", f"{arg_name} is required.")
         return validated, None
 
@@ -4755,6 +4772,41 @@ def _parse_schema_bool(value: Any) -> tuple[bool, bool]:
     if text in {"0", "false", "no", "n", "off"}:
         return False, True
     return False, False
+
+
+def _parse_schema_number(value: Any) -> tuple[float, bool]:
+    """Parse a JSON-schema number while rejecting booleans, blanks, NaN, and inf."""
+
+    if value is None or isinstance(value, bool):
+        return 0.0, False
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0.0, False
+        try:
+            parsed = float(text)
+        except ValueError:
+            return 0.0, False
+    else:
+        return 0.0, False
+    if not math.isfinite(parsed):
+        return 0.0, False
+    return parsed, True
+
+
+def _blank_required_value_is_missing(arg_schema: Any) -> bool:
+    """Treat blank required scalar values as missing unless an empty string is intentional."""
+
+    if not isinstance(arg_schema, dict):
+        return True
+    if arg_schema.get("x-allow-blank-required", False):
+        return False
+    arg_type = arg_schema.get("type")
+    if isinstance(arg_schema.get("enum"), list):
+        return True
+    return arg_type in {"integer", "number", "boolean"}
 
 
 def _schema_enum_key(value: Any) -> str:

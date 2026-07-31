@@ -17,6 +17,7 @@ from pathlib import Path
 from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeDispatchResult, BridgeMessage, EngagementROE, OffSecAgentRuntime, bridge_doctor, chunk_text, discover_skills, handle_bridge_message, load_skill
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
+from offsec_agent_harness.agent_tools import ToolResult
 from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
 
 
@@ -277,10 +278,41 @@ class AgentRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)
             try:
+                number_dispatches: list[dict[str, object]] = []
+
+                def schema_number_echo(args: dict[str, object]) -> ToolResult:
+                    number_dispatches.append(dict(args))
+                    return ToolResult("ok", "number ok", {"threshold": args.get("threshold"), "threshold_type": type(args.get("threshold")).__name__})
+
+                number_tool_spec = {
+                    "description": "Unit-only JSON-schema number validation boundary.",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "threshold": {"type": "number", "minimum": 0.1, "maximum": 10, "description": "Unit threshold."},
+                            "label": {"type": "string", "description": "Optional label."},
+                        },
+                        "required": ["threshold"],
+                        "additionalProperties": True,
+                    },
+                }
+
+                runtime.registry.register_tool(
+                    "schema_number_echo",
+                    schema_number_echo,
+                    number_tool_spec,
+                )
                 invalid_cases = [
                     ("get_job", {"id": "not-an-int"}, "id must be an integer."),
                     ("poll_process", {"id": "not-an-int"}, "id must be an integer."),
+                    ("poll_process", {"id": ""}, "id is required."),
                     ("poll_process", {"id": 0}, "id must be at least 1."),
+                    ("schema_number_echo", {"threshold": "not-a-number"}, "threshold must be a number."),
+                    ("schema_number_echo", {"threshold": True}, "threshold must be a number."),
+                    ("schema_number_echo", {"threshold": "nan"}, "threshold must be a number."),
+                    ("schema_number_echo", {"threshold": "0.05"}, "threshold must be at least 0.1."),
+                    ("schema_number_echo", {"threshold": 11}, "threshold must be at most 10."),
+                    ("schema_number_echo", {"threshold": ""}, "threshold is required."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("list_findings", {"limit": 0}, "limit must be at least 1."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
@@ -307,6 +339,13 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(missing_required.status, "error")
                 self.assertEqual(missing_required.message, "content is required.")
                 self.assertFalse((runtime.registry.workspace_root / "notes" / "missing-required.md").exists())
+                self.assertEqual(number_dispatches, [])
+
+                valid_number = runtime.registry.run("schema_number_echo", {"threshold": "1.25", "label": "unit"})
+                self.assertEqual(valid_number.status, "ok", valid_number.to_dict())
+                self.assertEqual(valid_number.data["threshold"], 1.25)
+                self.assertEqual(valid_number.data["threshold_type"], "float")
+                self.assertEqual(number_dispatches, [{"threshold": 1.25, "label": "unit"}])
 
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
@@ -338,13 +377,17 @@ class AgentRuntimeTests(unittest.TestCase):
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings", "workspace_write", "add_task"),
+                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo"),
                     )
                 )
                 try:
+                    confirm_runtime.registry.register_tool("schema_number_echo", schema_number_echo, number_tool_spec)
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
+                    rejected_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "nope"})
+                    rejected_blank_required_scalar = confirm_runtime.registry.run("schema_number_echo", {"threshold": ""})
+                    accepted_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "2.5"})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     rejected_string = confirm_runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
@@ -354,6 +397,12 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected.message, "limit must be an integer.")
                     self.assertEqual(rejected_bound.status, "error")
                     self.assertEqual(rejected_bound.message, "limit must be at least 1.")
+                    self.assertEqual(rejected_number.status, "error")
+                    self.assertEqual(rejected_number.message, "threshold must be a number.")
+                    self.assertEqual(rejected_blank_required_scalar.status, "error")
+                    self.assertEqual(rejected_blank_required_scalar.message, "threshold is required.")
+                    self.assertEqual(accepted_number.status, "needs_approval", accepted_number.to_dict())
+                    self.assertEqual(accepted_number.data.get("tool"), "schema_number_echo")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(rejected_string.status, "error")
@@ -362,7 +411,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(rejected_enum.status, "error")
                     self.assertEqual(rejected_enum.message, "status must be one of: pending, in_progress, completed, cancelled.")
-                    self.assertEqual(before, after)
+                    self.assertEqual(after, before + 1)
                 finally:
                     confirm_runtime.close()
             finally:
