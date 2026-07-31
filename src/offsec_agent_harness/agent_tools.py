@@ -33,6 +33,16 @@ from .agent_crypto import seal_bytes, unseal_bytes
 
 _LIVE_PROCESSES: dict[int, subprocess.Popen] = {}
 
+_TASK_STATUS_VALUES = ("pending", "in_progress", "completed", "cancelled")
+_TASK_LIST_STATUS_VALUES = ("all", *_TASK_STATUS_VALUES)
+_FINDING_STATUS_VALUES = ("draft", "needs-evidence", "confirmed", "resolved", "accepted-risk", "false-positive")
+_FINDING_LIST_STATUS_VALUES = ("all", *_FINDING_STATUS_VALUES)
+_FINDING_SEVERITY_VALUES = ("Informational", "Low", "Medium", "High", "Critical")
+_FINDING_SEVERITY_ALIASES = {"info": "Informational", "med": "Medium", "crit": "Critical"}
+_TIMELINE_ORDER_VALUES = ("desc", "asc", "newest", "newest-first", "oldest", "oldest-first")
+_MEDIA_KIND_VALUES = ("image", "audio", "voice", "video", "file")
+_NMAP_PROFILE_VALUES = ("safe", "version", "quick")
+
 
 @dataclass(slots=True)
 class ToolSpec:
@@ -135,8 +145,9 @@ class OffSecToolRegistry:
         ``ValueError`` strings, Python truthiness surprises, handler-specific
         missing-key errors, or queued approval replay.  The registry owns the
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
-        integer/boolean strings and reject ambiguous or missing required values
-        with clean operator errors before policy confirm queues are created.
+        integer/boolean strings, normalize schema-declared enum aliases, and reject
+        ambiguous, out-of-set, or missing required values with clean operator
+        errors before policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -166,6 +177,13 @@ class OffSecToolRegistry:
                 if not ok:
                     return validated, ToolResult("error", f"{arg_name} must be a boolean.")
                 validated[arg_name] = parsed
+                continue
+            enum_values = arg_schema.get("enum")
+            if isinstance(enum_values, list) and enum_values:
+                parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
+                if not ok:
+                    return validated, ToolResult("error", f"{arg_name} must be one of: {_schema_enum_error_values(enum_values)}.")
+                validated[arg_name] = parsed_enum
         if isinstance(required, list):
             for arg_name in required:
                 if not isinstance(arg_name, str):
@@ -214,15 +232,15 @@ class OffSecToolRegistry:
         self.register_tool("bloodhound_import", self.bloodhound_import, _spec("bloodhound_import", "Offline BloodHound/ADCS graph analysis.", {"input": _string("BloodHound JSON/dir/zip."), "principal": _string("Optional principal to path from.")}))
         self.register_tool("cve_advice", self.cve_advice, _spec("cve_advice", "CVE candidate review with non-invasive validation guidance.", {"component": _string("Product/component name."), "version": _string("Observed version."), "catalog": _string("Local CVE catalog JSON."), "online": {"type": "boolean"}}))
         self.register_tool("export_finding", self.export_finding, _spec("export_finding", "Report-ready finding Markdown exporter for a finding JSON file.", {"finding_file": _string("Finding JSON path."), "out": _string("Optional output path.")}))
-        self.register_tool("nmap_scan", self.nmap_scan, _spec("nmap_scan", "ROE-gated nmap-style service enumeration wrapper with structured parsing and evidence artifacts.", {"target": _string("In-scope host/IP/CIDR."), "ports": _string("Optional comma/range ports, e.g. 80,443,8000-8010."), "profile": _string("safe|version|quick; default version."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["target"]))
+        self.register_tool("nmap_scan", self.nmap_scan, _spec("nmap_scan", "ROE-gated nmap-style service enumeration wrapper with structured parsing and evidence artifacts.", {"target": _string("In-scope host/IP/CIDR."), "ports": _string("Optional comma/range ports, e.g. 80,443,8000-8010."), "profile": _string_enum("safe|version|quick; default version.", _NMAP_PROFILE_VALUES), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["target"]))
         self.register_tool("httpx_probe", self.httpx_probe, _spec("httpx_probe", "ROE-gated httpx-style HTTP probing wrapper with JSON/plaintext parsing and evidence artifacts.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "stdout": _string("Optional captured output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
         self.register_tool("nuclei_scan", self.nuclei_scan, _spec("nuclei_scan", "ROE-gated nuclei wrapper. Real execution requires an explicit safe template path; parser/dry-run paths remain available without nuclei installed.", {"url": _string("In-scope URL or host."), "target": _string("Alias for url."), "templates": _string("Template file/directory for execution; required when execute=true."), "template": _string("Alias for templates."), "rate_limit": {"type": "integer"}, "stdout": _string("Optional captured JSONL/plain output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, []))
         self.register_tool("ffuf_scan", self.ffuf_scan, _spec("ffuf_scan", "ROE-gated ffuf-style content discovery wrapper with conservative rate limits and structured evidence.", {"url": _string("In-scope URL containing FUZZ or base URL where /FUZZ is appended."), "wordlist": _string("Wordlist path required for execution."), "rate": {"type": "integer"}, "stdout": _string("Optional captured JSON output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["url"]))
         self.register_tool("list_tool_runs", self.list_tool_runs, _spec("list_tool_runs", "List structured wrapper runs and their parsed evidence artifacts.", {"limit": {"type": "integer"}, "tool_name": _string("Optional wrapper tool name filter.")}, []))
         self.register_tool("get_tool_run", self.get_tool_run, _spec("get_tool_run", "Get one structured wrapper run by id.", {"id": {"type": "integer"}}, ["id"]))
-        self.register_tool("create_finding", self.create_finding, _spec("create_finding", "Create a finding lifecycle record linked to evidence/tool runs.", {"title": _string("Finding title."), "severity": _string("Informational/Low/Medium/High/Critical."), "status": _string("draft/needs-evidence/confirmed/resolved/accepted-risk."), "description": _string("Technical description."), "impact": _string("Impact statement."), "recommendation": _string("Remediation guidance."), "tool_run_ids": _string("Comma-separated structured tool run IDs to link."), "evidence": _string("Additional evidence refs as JSON/list/text."), "tags": _string("Comma-separated tags.")}, ["title"]))
-        self.register_tool("update_finding", self.update_finding, _spec("update_finding", "Update a finding lifecycle record and optionally append evidence.", {"id": {"type": "integer"}, "title": _string("Optional title."), "severity": _string("Optional severity."), "status": _string("Optional status."), "description": _string("Optional description."), "impact": _string("Optional impact."), "recommendation": _string("Optional recommendation."), "tool_run_ids": _string("Additional linked tool run IDs."), "evidence": _string("Replacement or appended evidence refs."), "append_evidence": {"type": "boolean"}, "tags": _string("Optional tags.")}, ["id"]))
-        self.register_tool("list_findings", self.list_findings, _spec("list_findings", "List finding lifecycle records.", {"status": _string("draft/confirmed/resolved/all; default all."), "limit": {"type": "integer"}}, []))
+        self.register_tool("create_finding", self.create_finding, _spec("create_finding", "Create a finding lifecycle record linked to evidence/tool runs.", {"title": _string("Finding title."), "severity": _string_enum("Informational/Low/Medium/High/Critical.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("draft/needs-evidence/confirmed/resolved/accepted-risk/false-positive.", _FINDING_STATUS_VALUES), "description": _string("Technical description."), "impact": _string("Impact statement."), "recommendation": _string("Remediation guidance."), "tool_run_ids": _string("Comma-separated structured tool run IDs to link."), "evidence": _string("Additional evidence refs as JSON/list/text."), "tags": _string("Comma-separated tags.")}, ["title"]))
+        self.register_tool("update_finding", self.update_finding, _spec("update_finding", "Update a finding lifecycle record and optionally append evidence.", {"id": {"type": "integer"}, "title": _string("Optional title."), "severity": _string_enum("Optional severity.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("Optional status.", _FINDING_STATUS_VALUES), "description": _string("Optional description."), "impact": _string("Optional impact."), "recommendation": _string("Optional recommendation."), "tool_run_ids": _string("Additional linked tool run IDs."), "evidence": _string("Replacement or appended evidence refs."), "append_evidence": {"type": "boolean"}, "tags": _string("Optional tags.")}, ["id"]))
+        self.register_tool("list_findings", self.list_findings, _spec("list_findings", "List finding lifecycle records.", {"status": _string_enum("draft/needs-evidence/confirmed/resolved/accepted-risk/false-positive/all; default all.", _FINDING_LIST_STATUS_VALUES), "limit": {"type": "integer"}}, []))
         self.register_tool("get_finding", self.get_finding, _spec("get_finding", "Get one finding lifecycle record by id.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("finding_export", self.finding_export, _spec("finding_export", "Export a stored finding lifecycle record to report-ready Markdown.", {"id": {"type": "integer"}, "out": _string("Optional output path; relative paths go under agent/findings.")}, ["id"]))
         self.register_tool("finding_review", self.finding_review, _spec("finding_review", "Deterministically review a stored finding for report-readiness gaps without executing target actions.", {"id": {"type": "integer"}, "out": _string("Optional Markdown output path; relative paths go under agent/findings.")}, ["id"]))
@@ -265,7 +283,7 @@ class OffSecToolRegistry:
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
         self.register_tool("safety_preflight", self.safety_preflight, _spec("safety_preflight", "Run a read-only engagement/runtime readiness preflight and write a redacted Markdown report.", {"out": _string("Optional Markdown output path; relative paths go under agent/preflight.")}, []))
         self.register_tool("guardrail_selftest", self.guardrail_selftest, _spec("guardrail_selftest", "Run a read-only guardrail simulator over representative allow/confirm/block cases; writes a redacted Markdown report and performs no target activity.", {"target": _string("Optional in-scope host/IP/URL to use for synthetic allow/confirm cases."), "host": _string("Alias for target."), "url": _string("Alias for target."), "out": _string("Optional Markdown output path; relative paths go under agent/guardrails.")}, []))
-        self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string("image/audio/video/file; inferred when omitted.")}, ["path"]))
+        self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string_enum("image/audio/voice/video/file; inferred when omitted.", _MEDIA_KIND_VALUES)}, ["path"]))
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": {"type": "integer"}}, []))
         self.register_tool("media_get", self.media_get, _spec("media_get", "Get one current-session media/artifact metadata record by id without reading file contents.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
@@ -275,7 +293,7 @@ class OffSecToolRegistry:
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
         self.register_tool("audit_log", self.audit_log, _spec("audit_log", "List recent redacted audit log entries.", {"limit": {"type": "integer"}}))
         self.register_tool("get_audit", self.get_audit, _spec("get_audit", "Return one current-session audit log entry with redacted payload metadata.", {"id": {"type": "integer"}, "audit_id": {"type": "integer"}}, ["id"]))
-        self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string("desc or asc; default desc."), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
+        self.register_tool("evidence_timeline", self.evidence_timeline, _spec("evidence_timeline", "Assemble a redacted operator timeline across tool runs, findings, approvals, tasks, processes, media, delegations, and selected audit events.", {"limit": {"type": "integer"}, "category": _string("Optional comma-separated category filter."), "order": _string_enum("desc/asc/newest/newest-first/oldest/oldest-first; default desc.", _TIMELINE_ORDER_VALUES), "include_audit": {"type": "boolean"}, "out": _string("Optional Markdown output path; relative paths go under agent/timelines.")}, []))
         self.register_tool("evidence_manifest", self.evidence_manifest, _spec("evidence_manifest", "Create a read-only SHA-256 inventory of engagement evidence artifacts without reading or emitting file contents.", {"limit": {"type": "integer"}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 50000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_manifest_verify", self.evidence_manifest_verify, _spec("evidence_manifest_verify", "Verify a prior evidence manifest against current local artifacts, reporting missing/changed/new files without target activity.", {"path": _string("Manifest JSON path under agent/manifests; defaults to latest evidence manifest."), "manifest": _string("Alias for path."), "max_bytes": {"type": "integer", "description": "Skip current files larger than this many bytes; default 50000000."}, "limit": {"type": "integer", "description": "Maximum new-artifact rows to include; default 1000."}, "detect_new": {"type": "boolean", "description": "Report artifacts not present in the source manifest; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/manifests.")}, []))
         self.register_tool("evidence_secret_scan", self.evidence_secret_scan, _spec("evidence_secret_scan", "Read-only local evidence-root scan for secret-like material; emits redacted previews only and performs no target activity.", {"limit": {"type": "integer", "description": "Maximum finding rows to return/write; default 200."}, "max_bytes": {"type": "integer", "description": "Skip files larger than this many bytes; default 2000000."}, "include_agent": {"type": "boolean", "description": "Include agent-generated artifacts; default true."}, "out": _string("Optional JSON output path; relative paths go under agent/secret-scans.")}, []))
@@ -286,10 +304,10 @@ class OffSecToolRegistry:
         self.register_tool("operator_briefing", self.operator_briefing, _spec("operator_briefing", "Create a Hermes-like operator briefing from context, tasks, approvals, jobs, processes, and recent evidence.", {"query": _string("Optional recall query for relevant memory."), "out": _string("Optional Markdown output path.")}))
         self.register_tool("export_session", self.export_session, _spec("export_session", "Export a redacted portable session handoff JSON bundle.", {"out": _string("Optional JSON output path; relative paths are written under agent/session-exports."), "message_limit": {"type": "integer"}}))
         self.register_tool("import_session", self.import_session, _spec("import_session", "Import memories and context summary from a portable session handoff JSON bundle; no commands are executed.", {"path": _string("Path to exported session JSON."), "merge_memories": {"type": "boolean"}}, ["path"]))
-        self.register_tool("list_tasks", self.list_tasks, _spec("list_tasks", "List the current session task board.", {"status": _string("Filter by pending/in_progress/completed/cancelled/all."), "limit": {"type": "integer"}}))
+        self.register_tool("list_tasks", self.list_tasks, _spec("list_tasks", "List the current session task board.", {"status": _string_enum("Filter by pending/in_progress/completed/cancelled/all.", _TASK_LIST_STATUS_VALUES), "limit": {"type": "integer"}}))
         self.register_tool("get_task", self.get_task, _spec("get_task", "Get one current-session task board item by id with redacted content.", {"id": {"type": "integer"}}, ["id"]))
-        self.register_tool("add_task", self.add_task, _spec("add_task", "Add an item to the current session task board.", {"content": _string("Task description."), "status": _string("pending/in_progress/completed/cancelled; default pending.")}, ["content"]))
-        self.register_tool("update_task", self.update_task, _spec("update_task", "Update a task board item by id.", {"id": {"type": "integer"}, "content": _string("Optional replacement content."), "status": _string("pending/in_progress/completed/cancelled.")}, ["id"]))
+        self.register_tool("add_task", self.add_task, _spec("add_task", "Add an item to the current session task board.", {"content": _string("Task description."), "status": _string_enum("pending/in_progress/completed/cancelled; default pending.", _TASK_STATUS_VALUES)}, ["content"]))
+        self.register_tool("update_task", self.update_task, _spec("update_task", "Update a task board item by id.", {"id": {"type": "integer"}, "content": _string("Optional replacement content."), "status": _string_enum("pending/in_progress/completed/cancelled.", _TASK_STATUS_VALUES)}, ["id"]))
 
     def assess_action(self, args: dict[str, Any]) -> ToolResult:
         request = _request_from_args(args)
@@ -4727,6 +4745,30 @@ def _parse_schema_bool(value: Any) -> tuple[bool, bool]:
     return False, False
 
 
+def _schema_enum_key(value: Any) -> str:
+    return str(value).strip().lower().replace("_", "-")
+
+
+def _parse_schema_enum(value: Any, enum_values: list[Any], aliases: Any = None) -> tuple[Any, bool]:
+    """Return (canonical_value, ok) for schema-declared enum strings."""
+
+    if value is None or isinstance(value, bool):
+        return value, False
+    key = _schema_enum_key(value)
+    alias_map = aliases if isinstance(aliases, dict) else {}
+    for alias, canonical in alias_map.items():
+        if _schema_enum_key(alias) == key:
+            return canonical, True
+    for candidate in enum_values:
+        if _schema_enum_key(candidate) == key:
+            return candidate, True
+    return value, False
+
+
+def _schema_enum_error_values(enum_values: list[Any]) -> str:
+    return ", ".join(str(item) for item in enum_values)
+
+
 def _truthy_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -4738,6 +4780,13 @@ def _truthy_bool(value: Any, *, default: bool = False) -> bool:
 
 def _string(description: str) -> dict[str, str]:
     return {"type": "string", "description": description}
+
+
+def _string_enum(description: str, values: tuple[str, ...], aliases: dict[str, str] | None = None) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "string", "description": description, "enum": list(values)}
+    if aliases:
+        schema["x-aliases"] = dict(aliases)
+    return schema
 
 
 def _spec(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> ToolSpec:

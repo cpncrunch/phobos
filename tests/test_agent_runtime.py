@@ -199,6 +199,10 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
                     ("run_command", {"execute": "maybe"}, "execute must be a boolean."),
                     ("workspace_write", {"path": "notes/bad.md", "content": "bad", "append": "sometimes"}, "append must be a boolean."),
+                    ("create_finding", {"title": "Bad enum finding", "status": "client-ready"}, "status must be one of: draft, needs-evidence, confirmed, resolved, accepted-risk, false-positive."),
+                    ("evidence_timeline", {"order": "sideways"}, "order must be one of: desc, asc, newest, newest-first, oldest, oldest-first."),
+                    ("media_import", {"path": str(Path(tmp) / "missing-media.txt"), "kind": "screenshot"}, "kind must be one of: image, audio, voice, video, file."),
+                    ("nmap_scan", {"target": "app.example.test", "profile": "loud"}, "profile must be one of: safe, version, quick."),
                 ]
                 for tool_name, tool_args, expected_message in invalid_cases:
                     with self.subTest(tool=tool_name):
@@ -226,12 +230,25 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual((runtime.registry.workspace_root / "notes" / "boolean.md").read_text(encoding="utf-8"), "new-tail")
                 self.assertFalse((runtime.registry.workspace_root / "notes" / "bad.md").exists())
 
+                valid_task = runtime.registry.run("add_task", {"content": "schema enum task", "status": "in-progress"})
+                valid_finding = runtime.registry.run("create_finding", {"title": "Schema enum finding", "severity": "med", "status": "needs_evidence"})
+                valid_filtered_findings = runtime.registry.run("list_findings", {"status": "needs_evidence"})
+                valid_timeline = runtime.registry.run("evidence_timeline", {"order": "oldest-first", "limit": "5"})
+                self.assertEqual(valid_task.status, "ok", valid_task.to_dict())
+                self.assertEqual(valid_task.data["task"]["status"], "in_progress")
+                self.assertEqual(valid_finding.status, "ok", valid_finding.to_dict())
+                self.assertEqual(valid_finding.data["finding"]["severity"], "Medium")
+                self.assertEqual(valid_finding.data["finding"]["status"], "needs-evidence")
+                self.assertEqual(valid_filtered_findings.status, "ok", valid_filtered_findings.to_dict())
+                self.assertTrue(any(item["title"] == "Schema enum finding" for item in valid_filtered_findings.data["findings"]))
+                self.assertEqual(valid_timeline.status, "ok", valid_timeline.to_dict())
+
                 confirm_runtime = OffSecAgentRuntime(
                     AgentRuntimeConfig(
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings", "workspace_write"),
+                        confirm_tools=("list_findings", "workspace_write", "add_task"),
                     )
                 )
                 try:
@@ -239,6 +256,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
+                    rejected_enum = confirm_runtime.registry.run("add_task", {"content": "queued enum task", "status": "sideways"})
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     self.assertEqual(rejected.status, "error")
                     self.assertEqual(rejected.message, "limit must be an integer.")
@@ -246,6 +264,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(rejected_required.status, "error")
                     self.assertEqual(rejected_required.message, "content is required.")
+                    self.assertEqual(rejected_enum.status, "error")
+                    self.assertEqual(rejected_enum.message, "status must be one of: pending, in_progress, completed, cancelled.")
                     self.assertEqual(before, after)
                 finally:
                     confirm_runtime.close()

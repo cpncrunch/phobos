@@ -260,6 +260,46 @@ def main(argv: list[str] | None = None) -> int:
             and not (runtime.registry.workspace_root / "notes" / "schema-required.md").exists()
             and "Traceback" not in json.dumps(required_validation_payload)
         )
+        invalid_tool_enum = runtime.registry.run("create_finding", {"title": "Schema enum invalid", "status": "client-ready"})
+        valid_tool_enum = runtime.registry.run("create_finding", {"title": "Schema enum valid", "severity": "med", "status": "needs_evidence"})
+        filtered_tool_enum = runtime.registry.run("list_findings", {"status": "needs_evidence"})
+        invalid_media_enum = runtime.registry.run("media_import", {"path": str(media_source), "kind": "screenshot"})
+        invalid_timeline_enum = runtime.registry.run("evidence_timeline", {"order": "sideways"})
+        enum_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("add_task")
+        try:
+            invalid_confirm_enum = runtime.registry.run("add_task", {"content": "schema enum queued", "status": "sideways"})
+        finally:
+            runtime.registry.confirm_tools.discard("add_task")
+        enum_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        enum_validation_payload = {
+            "invalid_status": invalid_tool_enum.to_dict(),
+            "valid_finding": valid_tool_enum.to_dict(),
+            "filtered": filtered_tool_enum.to_dict(),
+            "invalid_media_kind": invalid_media_enum.to_dict(),
+            "invalid_timeline_order": invalid_timeline_enum.to_dict(),
+            "invalid_confirm_tool": invalid_confirm_enum.to_dict(),
+            "approvals_before": enum_approval_count_before,
+            "approvals_after": enum_approval_count_after,
+        }
+        write("tool-schema-enum-validation.json", json.dumps(enum_validation_payload, indent=2))
+        checks["tool_schema_enum_validation_ok"] = (
+            invalid_tool_enum.status == "error"
+            and invalid_tool_enum.message == "status must be one of: draft, needs-evidence, confirmed, resolved, accepted-risk, false-positive."
+            and valid_tool_enum.status == "ok"
+            and valid_tool_enum.data["finding"]["severity"] == "Medium"
+            and valid_tool_enum.data["finding"]["status"] == "needs-evidence"
+            and filtered_tool_enum.status == "ok"
+            and any(item.get("title") == "Schema enum valid" for item in filtered_tool_enum.data.get("findings", []))
+            and invalid_media_enum.status == "error"
+            and invalid_media_enum.message == "kind must be one of: image, audio, voice, video, file."
+            and invalid_timeline_enum.status == "error"
+            and invalid_timeline_enum.message == "order must be one of: desc, asc, newest, newest-first, oldest, oldest-first."
+            and invalid_confirm_enum.status == "error"
+            and invalid_confirm_enum.message == "status must be one of: pending, in_progress, completed, cancelled."
+            and enum_approval_count_before == enum_approval_count_after
+            and "Traceback" not in json.dumps(enum_validation_payload)
+        )
 
         scope_summary = handle("scope-summary", "/scope")
         scope_allowed = handle("scope-allowed", '/scope target="https://app.example.test/login?token=supersecret"')
