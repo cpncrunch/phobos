@@ -1755,6 +1755,10 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("model_error_stop_enforced") is True
+            and native_status_data.get("provider_tool_result_echo_ignored") is True
+            and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
