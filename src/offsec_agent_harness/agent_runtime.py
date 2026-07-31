@@ -1103,6 +1103,10 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
     args = call.args if isinstance(call.args, dict) else {}
     data = result.data if isinstance(result.data, dict) else {}
     decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+    planned_validation = call.validation if isinstance(call.validation, dict) else {}
+    guardrail_status = decision.get("status") if isinstance(decision, dict) else None
+    if not guardrail_status:
+        guardrail_status = planned_validation.get("guardrail_status")
     status = str(result.status or "unknown")
     tool = str(call.tool or "")
     execution_requested = bool(args.get("execute", False)) if tool in _EXECUTION_CAPABLE_TOOLS else False
@@ -1124,6 +1128,7 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
         execution_state = "completed_without_command_execution"
     else:
         execution_state = "completed_status_not_command_execution"
+    tool_completed_or_executed = bool(status in {"ok", "parsed", "completed"} or actual_command_or_process_activity)
     ledger: dict[str, Any] = {
         "tool": tool,
         "result_status": status,
@@ -1135,15 +1140,15 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
         "approval_queued": approval_queued,
         "blocked": blocked,
         "dry_run": dry_run,
-        "safe_to_claim_tool_ran": not (approval_queued or blocked or dry_run),
+        "safe_to_claim_tool_ran": tool_completed_or_executed,
         "safe_to_claim_command_executed": actual_command_or_process_activity,
     }
     if step is not None:
         ledger["step"] = step
     if data.get("approval_id"):
         ledger["approval_id"] = data.get("approval_id")
-    if isinstance(decision, dict) and decision.get("status"):
-        ledger["guardrail_status"] = decision.get("status")
+    if guardrail_status:
+        ledger["guardrail_status"] = guardrail_status
     if result.artifacts:
         ledger["artifacts"] = result.artifacts
     return _redact_runtime_value(ledger)

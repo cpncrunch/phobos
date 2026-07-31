@@ -70,6 +70,39 @@ class FakeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallAllowedExecutionAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-allowed-execution"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('native-allowed-executed', encoding='utf-8')\""
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model selected an allowed command that still needs explicit execution intent",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native allowed execution ledger proof",
+                                "command": command,
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "low-risk in-scope command should execute only when /auto execute=true is explicit",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeToolCallGuardrailAdapter(BaseModelAdapter):
     provider = "fake-tool-call-guardrail"
 
@@ -2161,6 +2194,59 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_plan_executes_allowed_command_only_with_explicit_execute_and_ledgers_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Allowed Execution",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "native-allowed-execution.txt"
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-allowed-execution",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallAllowedExecutionAdapter(marker),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="native allowed execution token=allowed-secret"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertFalse(plan_payload["tool_calls"][0]["args"]["execute"])
+                self.assertEqual(plan_payload["tool_calls"][0]["validation"].get("guardrail_status"), "allow")
+                self.assertFalse(marker.exists())
+
+                dry_applied = runtime.handle_message('/auto apply=true model=true prompt="native allowed execution token=allowed-secret"')
+                dry_payload = json.loads(dry_applied.split("\n", 1)[1])
+                dry_ledger = dry_payload.get("execution_ledger", [])
+                self.assertEqual([item["result"]["status"] for item in dry_payload["results"]], ["dry_run"])
+                self.assertEqual(dry_ledger[0]["execution_state"], "dry_run_not_executed")
+                self.assertFalse(dry_ledger[0]["actual_command_or_process_activity"])
+                self.assertFalse(dry_ledger[0]["safe_to_claim_tool_ran"])
+                self.assertFalse(dry_ledger[0]["safe_to_claim_command_executed"])
+                self.assertFalse(marker.exists())
+
+                executed = runtime.handle_message('/auto apply=true model=true execute=true prompt="native allowed execution token=allowed-secret"')
+                executed_payload = json.loads(executed.split("\n", 1)[1])
+                ledger = executed_payload.get("execution_ledger", [])
+                self.assertEqual([item["result"]["status"] for item in executed_payload["results"]], ["executed"])
+                self.assertEqual(marker.read_text(encoding="utf-8"), "native-allowed-executed")
+                self.assertEqual(ledger[0]["execution_state"], "executed_or_started")
+                self.assertTrue(ledger[0]["actual_command_or_process_activity"])
+                self.assertTrue(ledger[0]["safe_to_claim_tool_ran"])
+                self.assertTrue(ledger[0]["safe_to_claim_command_executed"])
+                self.assertEqual(ledger[0]["guardrail_status"], "allow")
+                self.assertTrue(Path(ledger[0]["artifacts"]["execution"]).exists())
+                self.assertNotIn("allowed-secret", planned + dry_applied + executed)
+            finally:
+                runtime.close()
+
     def test_model_plan_previews_guardrails_and_apply_queues_confirm_without_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2307,6 +2393,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(statuses[:2], ["error", "ok"])
                 ledger = payload.get("execution_ledger", [])
                 self.assertEqual([item["execution_state"] for item in ledger[:2]], ["handler_error_no_target_execution_claimed", "completed_without_command_execution"])
+                self.assertFalse(ledger[0]["safe_to_claim_tool_ran"])
                 self.assertFalse(any(item["actual_command_or_process_activity"] for item in ledger))
                 self.assertNotIn("feedback-secret", json.dumps(payload))
                 recalled = runtime.handle_message('/recall query=feedback-recovered')

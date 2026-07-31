@@ -48,6 +48,39 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallAllowedExecutionAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-allowed-execution"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('native-allowed-executed', encoding='utf-8')\""
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "smoke model selected allowed explicit command execution",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native allowed execution smoke",
+                                "command": command,
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "prove native tool plans execute allowed commands only when execute=true is explicit",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeToolCallGuardrailAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-guardrail"
 
@@ -1071,6 +1104,55 @@ def main(argv: list[str] | None = None) -> int:
             and not pending_native_approvals_after_apply
         )
 
+        native_allowed_marker = root / "native-allowed-execution-ran.txt"
+        native_allowed_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-allowed-execution.db"),
+                session_name="native-tool-allowed-execution-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallAllowedExecutionAdapter(native_allowed_marker),
+        )
+        try:
+            native_allowed_plan = native_allowed_runtime.handle_message('/auto model=true prompt="native allowed execution smoke token=native-allowed-secret"')
+            native_allowed_plan_payload = json.loads(native_allowed_plan.split("\n", 1)[1])
+            native_allowed_dry = native_allowed_runtime.handle_message('/auto apply=true model=true prompt="native allowed execution smoke token=native-allowed-secret"')
+            native_allowed_dry_payload = json.loads(native_allowed_dry.split("\n", 1)[1])
+            native_allowed_marker_after_dry = native_allowed_marker.exists()
+            native_allowed_exec = native_allowed_runtime.handle_message('/auto apply=true model=true execute=true prompt="native allowed execution smoke token=native-allowed-secret"')
+            native_allowed_exec_payload = json.loads(native_allowed_exec.split("\n", 1)[1])
+            native_allowed_exec_ledger = native_allowed_exec_payload.get("execution_ledger", []) if isinstance(native_allowed_exec_payload.get("execution_ledger"), list) else []
+            native_allowed_dry_ledger = native_allowed_dry_payload.get("execution_ledger", []) if isinstance(native_allowed_dry_payload.get("execution_ledger"), list) else []
+            write("native-tool-allowed-execution.json", json.dumps({
+                "plan": native_allowed_plan_payload,
+                "dry_apply": native_allowed_dry_payload,
+                "execute_apply": native_allowed_exec_payload,
+                "marker_after_dry": native_allowed_marker_after_dry,
+                "marker_exists": native_allowed_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_allowed_runtime.close()
+        native_allowed_exec_statuses = [item.get("result", {}).get("status") for item in native_allowed_exec_payload.get("results", [])]
+        checks["native_tool_call_allowed_execution_ok"] = (
+            native_allowed_plan_payload.get("mode") == "plan_only"
+            and native_allowed_plan_payload.get("tool_calls", [{}])[0].get("args", {}).get("execute") is False
+            and native_allowed_plan_payload.get("tool_calls", [{}])[0].get("validation", {}).get("guardrail_status") == "allow"
+            and [item.get("result", {}).get("status") for item in native_allowed_dry_payload.get("results", [])] == ["dry_run"]
+            and native_allowed_dry_ledger[0].get("actual_command_or_process_activity") is False
+            and native_allowed_dry_ledger[0].get("safe_to_claim_tool_ran") is False
+            and native_allowed_marker_after_dry is False
+            and native_allowed_exec_statuses == ["executed"]
+            and native_allowed_marker.exists()
+            and native_allowed_marker.read_text(encoding="utf-8") == "native-allowed-executed"
+            and native_allowed_exec_ledger[0].get("execution_state") == "executed_or_started"
+            and native_allowed_exec_ledger[0].get("actual_command_or_process_activity") is True
+            and native_allowed_exec_ledger[0].get("safe_to_claim_tool_ran") is True
+            and native_allowed_exec_ledger[0].get("safe_to_claim_command_executed") is True
+            and native_allowed_exec_ledger[0].get("guardrail_status") == "allow"
+            and "native-allowed-secret" not in json.dumps(native_allowed_plan_payload) + json.dumps(native_allowed_dry_payload) + json.dumps(native_allowed_exec_payload)
+        )
+
         native_openai_captured = {}
 
         class NativeOpenAISmokeResponse:
@@ -1321,14 +1403,19 @@ def main(argv: list[str] | None = None) -> int:
             len(native_apply_ledger) >= 2
             and len(guardrail_apply_ledger) >= 2
             and len(feedback_ledger) >= 2
+            and len(native_allowed_exec_ledger) >= 1
             and [item.get("tool") for item in native_apply_ledger] == ["list_tasks", "run_command"]
             and native_apply_ledger[1].get("execution_state") == "dry_run_not_executed"
             and native_apply_ledger[1].get("actual_command_or_process_activity") is False
             and [item.get("execution_state") for item in guardrail_apply_ledger] == ["queued_for_approval", "blocked"]
             and all(item.get("actual_command_or_process_activity") is False for item in guardrail_apply_ledger)
             and [item.get("execution_state") for item in feedback_ledger[:2]] == ["handler_error_no_target_execution_claimed", "completed_without_command_execution"]
+            and feedback_ledger[0].get("safe_to_claim_tool_ran") is False
             and all(item.get("actual_command_or_process_activity") is False for item in feedback_ledger)
-            and "feedback-smoke-secret" not in json.dumps(native_apply_ledger + guardrail_apply_ledger + feedback_ledger)
+            and native_allowed_exec_ledger[0].get("execution_state") == "executed_or_started"
+            and native_allowed_exec_ledger[0].get("actual_command_or_process_activity") is True
+            and native_allowed_exec_ledger[0].get("safe_to_claim_command_executed") is True
+            and "feedback-smoke-secret" not in json.dumps(native_apply_ledger + guardrail_apply_ledger + feedback_ledger + native_allowed_exec_ledger)
         )
         checks["native_tool_call_gateway_chat_ok"] = (
             "/auto" in feedback_routes.get("paths", [])
