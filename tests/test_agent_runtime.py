@@ -2247,6 +2247,63 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_native_auto_slash_flags_parse_off_and_reject_ambiguous_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Slash Flag Safety",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "native-flag-should-not-execute.txt"
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-slash-flags",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallAllowedExecutionAdapter(marker),
+            )
+            try:
+                self.assertEqual(
+                    runtime.handle_message('/auto apply=maybe model=on prompt="native invalid apply flag"'),
+                    "apply must be a boolean.",
+                )
+                self.assertEqual(
+                    runtime.handle_message('/auto execute=maybe model=on prompt="native invalid execute flag"'),
+                    "execute must be a boolean.",
+                )
+                self.assertEqual(
+                    runtime.handle_message('/auto model=maybe prompt="native invalid model flag"'),
+                    "model must be a boolean.",
+                )
+                self.assertEqual(
+                    runtime.handle_message('/auto-loop steps=1.5 model=on prompt="native invalid steps flag"'),
+                    "steps must be an integer.",
+                )
+
+                dry_applied = runtime.handle_message('/auto apply=on model=on execute=off prompt="native flag safety token=flag-secret"')
+                dry_payload = json.loads(dry_applied.split("\n", 1)[1])
+                self.assertEqual(dry_payload["mode"], "applied")
+                self.assertFalse(dry_payload["execute"] if "execute" in dry_payload else dry_payload["tool_calls"][0]["args"].get("execute"))
+                self.assertEqual(dry_payload["results"][0]["result"]["status"], "dry_run")
+                self.assertFalse(dry_payload["execution_ledger"][0]["actual_command_or_process_activity"])
+                self.assertFalse(marker.exists())
+
+                looped = runtime.handle_message('/auto-loop steps=1 model=on execute=off prompt="native flag loop token=flag-secret"')
+                loop_payload = json.loads(looped.split("\n", 1)[1])
+                self.assertFalse(loop_payload["execute"])
+                self.assertEqual(loop_payload["steps_executed"], 1)
+                self.assertEqual(loop_payload["execution_ledger"][0]["execution_state"], "dry_run_not_executed")
+                self.assertFalse(loop_payload["execution_ledger"][0]["actual_command_or_process_activity"])
+                self.assertFalse(marker.exists())
+                self.assertNotIn("flag-secret", dry_applied + looped)
+            finally:
+                runtime.close()
+
     def test_model_plan_previews_guardrails_and_apply_queues_confirm_without_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

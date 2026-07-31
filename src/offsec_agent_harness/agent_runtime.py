@@ -254,13 +254,31 @@ class OffSecAgentRuntime:
             prompt = str(args.get("prompt") or args.get("query") or " ".join(args.get("_positional", []))).strip()
             if not prompt:
                 return "Usage: /auto prompt=<natural request> apply=false execute=false model=false"
-            plan = self._plan_actions(prompt, allow_command_execution=bool(args.get("execute", False)), use_model=bool(args.get("model", self.config.auto_model_planning)))
-            return self._execute_plan(plan, apply=bool(args.get("apply", False)))
+            execute, error = _slash_bool_arg(args, "execute", False)
+            if error:
+                return error
+            use_model, error = _slash_bool_arg(args, "model", self.config.auto_model_planning)
+            if error:
+                return error
+            apply_plan, error = _slash_bool_arg(args, "apply", False)
+            if error:
+                return error
+            plan = self._plan_actions(prompt, allow_command_execution=execute, use_model=use_model)
+            return self._execute_plan(plan, apply=apply_plan)
         if command in {"auto-loop", "loop", "task-run"}:
             prompt = str(args.get("prompt") or args.get("query") or " ".join(args.get("_positional", []))).strip()
             if not prompt:
                 return "Usage: /auto-loop prompt=<goal> steps=5 execute=false model=false"
-            return self._execute_auto_loop(prompt, steps=int(args.get("steps", self.config.max_auto_steps)), execute=bool(args.get("execute", False)), use_model=bool(args.get("model", self.config.auto_model_planning)))
+            steps, error = _slash_int_arg(args, "steps", self.config.max_auto_steps, minimum=1, maximum=10)
+            if error:
+                return error
+            execute, error = _slash_bool_arg(args, "execute", False)
+            if error:
+                return error
+            use_model, error = _slash_bool_arg(args, "model", self.config.auto_model_planning)
+            if error:
+                return error
+            return self._execute_auto_loop(prompt, steps=steps, execute=execute, use_model=use_model)
         if command == "sessions":
             data = {
                 "session_id": self.session_id,
@@ -1048,6 +1066,54 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("model JSON response was not an object")
     return parsed
+
+
+def _slash_bool_arg(args: dict[str, Any], name: str, default: bool) -> tuple[bool, str | None]:
+    """Parse safety-critical slash booleans without Python truthiness.
+
+    Native /auto and /auto-loop flags control model planning and command/process
+    execution.  Strings such as ``off`` or ``maybe`` must never become truthy
+    just because they are non-empty.
+    """
+
+    if name not in args or args.get(name) is None:
+        return bool(default), None
+    value = args.get(name)
+    if isinstance(value, bool):
+        return value, None
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value in {0, 1}:
+            return bool(value), None
+        return bool(default), f"{name} must be a boolean."
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "on", "1"}:
+            return True, None
+        if lowered in {"false", "no", "off", "0"}:
+            return False, None
+    return bool(default), f"{name} must be a boolean."
+
+
+def _slash_int_arg(args: dict[str, Any], name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> tuple[int, str | None]:
+    """Parse bounded slash integers with clean operator errors."""
+
+    if name not in args or args.get(name) is None:
+        value = int(default)
+    else:
+        raw = args.get(name)
+        if isinstance(raw, bool):
+            return int(default), f"{name} must be an integer."
+        if isinstance(raw, int):
+            value = raw
+        elif isinstance(raw, str) and re.fullmatch(r"[+-]?\d+", raw.strip()):
+            value = int(raw.strip())
+        else:
+            return int(default), f"{name} must be an integer."
+    if minimum is not None and value < minimum:
+        return value, f"{name} must be at least {minimum}."
+    if maximum is not None and value > maximum:
+        return value, f"{name} must be at most {maximum}."
+    return value, None
 
 
 def _parse_key_values(tokens: list[str]) -> dict[str, Any]:

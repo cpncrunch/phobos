@@ -1153,6 +1153,55 @@ def main(argv: list[str] | None = None) -> int:
             and "native-allowed-secret" not in json.dumps(native_allowed_plan_payload) + json.dumps(native_allowed_dry_payload) + json.dumps(native_allowed_exec_payload)
         )
 
+        native_flag_marker = root / "native-slash-flag-should-not-execute.txt"
+        native_flag_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-slash-flags.db"),
+                session_name="native-tool-slash-flags-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallAllowedExecutionAdapter(native_flag_marker),
+        )
+        try:
+            native_flag_invalid_apply = native_flag_runtime.handle_message('/auto apply=maybe model=on prompt="native invalid apply flag"')
+            native_flag_invalid_execute = native_flag_runtime.handle_message('/auto execute=maybe model=on prompt="native invalid execute flag"')
+            native_flag_invalid_model = native_flag_runtime.handle_message('/auto model=maybe prompt="native invalid model flag"')
+            native_flag_invalid_steps = native_flag_runtime.handle_message('/auto-loop steps=1.5 model=on prompt="native invalid steps flag"')
+            native_flag_dry = native_flag_runtime.handle_message('/auto apply=on model=on execute=off prompt="native slash flag token=native-flag-secret"')
+            native_flag_dry_payload = json.loads(native_flag_dry.split("\n", 1)[1])
+            native_flag_loop = native_flag_runtime.handle_message('/auto-loop steps=1 model=on execute=off prompt="native slash loop token=native-flag-secret"')
+            native_flag_loop_payload = json.loads(native_flag_loop.split("\n", 1)[1])
+            native_flag_dry_ledger = native_flag_dry_payload.get("execution_ledger", []) if isinstance(native_flag_dry_payload.get("execution_ledger"), list) else []
+            native_flag_loop_ledger = native_flag_loop_payload.get("execution_ledger", []) if isinstance(native_flag_loop_payload.get("execution_ledger"), list) else []
+            write("native-tool-slash-flag-safety.json", json.dumps({
+                "invalid_apply": native_flag_invalid_apply,
+                "invalid_execute": native_flag_invalid_execute,
+                "invalid_model": native_flag_invalid_model,
+                "invalid_steps": native_flag_invalid_steps,
+                "dry": native_flag_dry_payload,
+                "loop": native_flag_loop_payload,
+                "marker_exists": native_flag_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_flag_runtime.close()
+        checks["native_tool_call_slash_flag_safety_ok"] = (
+            native_flag_invalid_apply == "apply must be a boolean."
+            and native_flag_invalid_execute == "execute must be a boolean."
+            and native_flag_invalid_model == "model must be a boolean."
+            and native_flag_invalid_steps == "steps must be an integer."
+            and native_flag_dry_payload.get("mode") == "applied"
+            and native_flag_dry_payload.get("tool_calls", [{}])[0].get("args", {}).get("execute") is False
+            and native_flag_dry_payload.get("results", [{}])[0].get("result", {}).get("status") == "dry_run"
+            and bool(native_flag_dry_ledger) and native_flag_dry_ledger[0].get("actual_command_or_process_activity") is False
+            and native_flag_loop_payload.get("execute") is False
+            and native_flag_loop_payload.get("steps_executed") == 1
+            and bool(native_flag_loop_ledger) and native_flag_loop_ledger[0].get("execution_state") == "dry_run_not_executed"
+            and native_flag_loop_ledger[0].get("actual_command_or_process_activity") is False
+            and not native_flag_marker.exists()
+            and "native-flag-secret" not in native_flag_dry + native_flag_loop
+        )
+
         native_openai_captured = {}
 
         class NativeOpenAISmokeResponse:
