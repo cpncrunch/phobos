@@ -1124,10 +1124,26 @@ def main(argv: list[str] | None = None) -> int:
             native_allowed_exec_payload = json.loads(native_allowed_exec.split("\n", 1)[1])
             native_allowed_exec_ledger = native_allowed_exec_payload.get("execution_ledger", []) if isinstance(native_allowed_exec_payload.get("execution_ledger"), list) else []
             native_allowed_dry_ledger = native_allowed_dry_payload.get("execution_ledger", []) if isinstance(native_allowed_dry_payload.get("execution_ledger"), list) else []
+            native_allowed_artifacts = native_allowed_exec_payload.get("artifacts", {}) if isinstance(native_allowed_exec_payload.get("artifacts"), dict) else {}
+            native_allowed_json_path = Path(native_allowed_artifacts.get("json", ""))
+            native_allowed_md_path = Path(native_allowed_artifacts.get("markdown", ""))
+            native_allowed_transcript = ""
+            if native_allowed_json_path.is_file():
+                native_allowed_transcript += native_allowed_json_path.read_text(encoding="utf-8")
+            if native_allowed_md_path.is_file():
+                native_allowed_transcript += native_allowed_md_path.read_text(encoding="utf-8")
+            native_allowed_bridge = handle_bridge_message(
+                native_allowed_runtime,
+                BridgeMessage(platform="discord", text='!phobos /auto apply=true model=true execute=off prompt="native apply chat token=native-apply-secret"', channel_id="C-native-apply", user_id="U-native-apply", message_id="M-native-apply"),
+                BridgeConfig(platform="discord", allowed_channel_ids=("C-native-apply",), allowed_user_ids=("U-native-apply",), command_prefix="!phobos", max_response_chars=1200),
+            )
+            native_allowed_apply_audit_events = [row["event"] for row in native_allowed_runtime.store.list_audit(native_allowed_runtime.session_id, limit=30)]
             write("native-tool-allowed-execution.json", json.dumps({
                 "plan": native_allowed_plan_payload,
                 "dry_apply": native_allowed_dry_payload,
                 "execute_apply": native_allowed_exec_payload,
+                "apply_transcript_excerpt": native_allowed_transcript[:2000],
+                "apply_bridge": native_allowed_bridge.to_dict(),
                 "marker_after_dry": native_allowed_marker_after_dry,
                 "marker_exists": native_allowed_marker.exists(),
             }, indent=2, sort_keys=True))
@@ -1151,6 +1167,21 @@ def main(argv: list[str] | None = None) -> int:
             and native_allowed_exec_ledger[0].get("safe_to_claim_command_executed") is True
             and native_allowed_exec_ledger[0].get("guardrail_status") == "allow"
             and "native-allowed-secret" not in json.dumps(native_allowed_plan_payload) + json.dumps(native_allowed_dry_payload) + json.dumps(native_allowed_exec_payload)
+        )
+        checks["native_tool_call_apply_transcript_ok"] = (
+            native_allowed_exec_payload.get("transcript_artifact_written") is True
+            and native_allowed_json_path.is_file()
+            and native_allowed_md_path.is_file()
+            and "Phobos Native Tool-Calling Auto Plan" in native_allowed_transcript
+            and "Execution ledger" in native_allowed_transcript
+            and "actual_command_or_process_activity=`True`" in native_allowed_transcript
+            and "auto_plan_apply" in native_allowed_apply_audit_events
+            and native_allowed_bridge.status == "handled"
+            and "Auto plan applied through the guarded registry boundary" in native_allowed_bridge.response
+            and "dry_run=1" in native_allowed_bridge.response
+            and "actual_command_or_process_activity=0" in native_allowed_bridge.response
+            and "native-allowed-secret" not in native_allowed_transcript
+            and "native-apply-secret" not in json.dumps(native_allowed_bridge.to_dict()) + native_allowed_transcript
         )
 
         native_flag_marker = root / "native-slash-flag-should-not-execute.txt"

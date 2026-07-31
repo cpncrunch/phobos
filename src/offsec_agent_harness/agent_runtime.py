@@ -465,6 +465,30 @@ class OffSecAgentRuntime:
         payload["mode"] = "applied"
         payload["results"] = results
         payload["execution_ledger"] = _redact_runtime_value(execution_ledger)
+        payload["transcript_artifact_written"] = False
+        payload["secret_values_redacted"] = True
+        try:
+            artifacts = _write_auto_plan_artifacts(self.registry.harness.store.root, payload)
+            payload["artifacts"] = artifacts
+            payload["transcript_artifact_written"] = True
+        except Exception as exc:  # transcript failure must not change tool execution claims
+            payload["artifact_error"] = redact_secrets(str(exc)) or "auto-plan artifact write failed"
+        result_counts: dict[str, int] = {}
+        for item in results:
+            result_obj = item.get("result") if isinstance(item, dict) else None
+            status = str(result_obj.get("status") or "unknown") if isinstance(result_obj, dict) else "unknown"
+            result_counts[status] = result_counts.get(status, 0) + 1
+        self.store.audit(
+            self.session_id,
+            "auto_plan_apply",
+            {
+                "prompt_preview": str(plan.prompt or "")[:200],
+                "tool_count": len(plan.tool_calls),
+                "result_counts": result_counts,
+                "transcript_artifact_written": payload.get("transcript_artifact_written", False),
+                "artifacts": payload.get("artifacts", {}),
+            },
+        )
         return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
 
     def _validate_plan(self, plan: AgentPlan, *, allow_command_execution: bool) -> AgentPlan:
@@ -778,6 +802,8 @@ def _render_chat_response(response: str, *, message: str, platform: str, runtime
             return _render_count_list_chat(response, data, command)
     if response.startswith("Auto plan (no tools executed):"):
         return _render_auto_plan_chat(response)
+    if response.startswith("Auto plan applied:"):
+        return _render_auto_apply_chat(response)
     if response.startswith("Auto loop completed:"):
         return _render_auto_loop_chat(response)
     parsed = _parse_formatted_tool_response(response)
@@ -934,6 +960,46 @@ def _render_auto_plan_chat(response: str) -> str:
         lines.append(f"- `{call.get('tool')}` — {call.get('reason', 'planned step')}")
     if calls:
         lines.append("Run it with `/auto apply=true ...`; add `execute=true` only when guarded command execution is intended.")
+    return "\n".join(lines)
+
+
+def _render_auto_apply_chat(response: str) -> str:
+    raw = response.split("\n", 1)[1] if "\n" in response else "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return response
+    calls = data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
+    planned = [str(call.get("tool") or "").strip() for call in calls if isinstance(call, dict) and str(call.get("tool") or "").strip()]
+    counts: dict[str, int] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        raw_result = item.get("result")
+        result_obj = raw_result if isinstance(raw_result, dict) else {}
+        status = str(result_obj.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    lines = ["Auto plan applied through the guarded registry boundary."]
+    if planned:
+        lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
+    if counts:
+        lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
+    if ledger:
+        actual_activity = sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True)
+        queued = sum(1 for item in ledger if isinstance(item, dict) and item.get("approval_queued") is True)
+        blocked = sum(1 for item in ledger if isinstance(item, dict) and item.get("blocked") is True)
+        dry_runs = sum(1 for item in ledger if isinstance(item, dict) and item.get("dry_run") is True)
+        lines.append(f"- Execution ledger: actual_command_or_process_activity={actual_activity}, approval_queued={queued}, blocked={blocked}, dry_run={dry_runs}")
+    artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+    if data.get("transcript_artifact_written") and artifacts:
+        md_path = artifacts.get("markdown") or artifacts.get("json")
+        if md_path:
+            lines.append(f"- Redacted transcript: `{md_path}`")
+    if data.get("artifact_error"):
+        lines.append(f"- Transcript artifact warning: {data.get('artifact_error')}")
+    lines.append("No confirm-gated, blocked, or dry-run action is treated as executed unless the registry result proves it ran.")
     return "\n".join(lines)
 
 
@@ -1232,6 +1298,94 @@ def _redact_runtime_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_redact_runtime_value(item) for item in value]
     return value
+
+
+def _write_auto_plan_artifacts(evidence_root: Path, payload: dict[str, Any]) -> dict[str, str]:
+    """Persist a redacted one-shot native /auto application transcript."""
+
+    root = evidence_root.resolve(strict=False)
+    out_dir = (evidence_root / "agent" / "auto-plans").resolve(strict=False)
+    if not _runtime_path_is_relative_to(out_dir, root):
+        raise ValueError("auto-plan artifact directory escapes the engagement evidence root")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = utc_now().replace(":", "").replace("+00:00", "Z")
+    json_path = out_dir / f"auto-plan-{stamp}.json"
+    markdown_path = out_dir / f"auto-plan-{stamp}.md"
+    artifacts = {"json": str(json_path), "markdown": str(markdown_path)}
+    redacted_payload = _redact_runtime_value({**payload, "artifacts": artifacts})
+    json_path.write_text(json.dumps(redacted_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    markdown_path.write_text(_auto_plan_apply_markdown(redacted_payload), encoding="utf-8")
+    return artifacts
+
+
+def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Phobos Native Tool-Calling Auto Plan",
+        "",
+        f"Generated: {utc_now()}",
+        f"Mode: `{payload.get('mode', 'unknown')}`",
+        "Secret-like values redacted: `true`",
+        "",
+        "## Operator prompt",
+        "",
+        str(payload.get("prompt") or ""),
+        "",
+        "## Execution ledger",
+        "",
+    ]
+    raw_ledger = payload.get("execution_ledger")
+    ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
+    if not ledger:
+        lines.append("- No tool calls were dispatched.")
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"- `{item.get('tool')}`: state=`{item.get('execution_state')}`, "
+            f"result=`{item.get('result_status')}`, "
+            f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`, "
+            f"approval_queued=`{item.get('approval_queued', False)}`, "
+            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`"
+        )
+    lines.extend(["", "## Planned calls", ""])
+    raw_calls = payload.get("tool_calls")
+    calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
+    if not calls:
+        lines.append("- No planned calls were accepted.")
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        raw_validation = call.get("validation")
+        validation = raw_validation if isinstance(raw_validation, dict) else {}
+        lines.append(
+            f"- `{call.get('tool')}` — {call.get('reason', 'planned step')} "
+            f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')})"
+        )
+    raw_rejected = payload.get("rejected_tool_calls")
+    rejected: list[Any] = raw_rejected if isinstance(raw_rejected, list) else []
+    if rejected:
+        lines.extend(["", "## Rejected calls", ""])
+        for item in rejected:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('tool')}` — {item.get('reason')}")
+    lines.extend(["", "## Tool results", ""])
+    raw_results = payload.get("results")
+    results: list[Any] = raw_results if isinstance(raw_results, list) else []
+    if not results:
+        lines.append("- No registry results were recorded.")
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        raw_result = item.get("result")
+        result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+        lines.append(f"- `{item.get('tool')}` -> `{result.get('status', 'unknown')}`: {result.get('message', '')}")
+    lines.extend([
+        "",
+        "## Safety note",
+        "",
+        "Confirm-gated, blocked, and dry-run results are not treated as executed unless the registry result and execution ledger prove command/process activity occurred.",
+    ])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _write_auto_loop_artifacts(evidence_root: Path, payload: dict[str, Any]) -> dict[str, str]:

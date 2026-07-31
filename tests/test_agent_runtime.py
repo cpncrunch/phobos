@@ -2243,6 +2243,30 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(ledger[0]["safe_to_claim_command_executed"])
                 self.assertEqual(ledger[0]["guardrail_status"], "allow")
                 self.assertTrue(Path(ledger[0]["artifacts"]["execution"]).exists())
+                self.assertTrue(executed_payload["transcript_artifact_written"])
+                artifact_paths = executed_payload.get("artifacts", {})
+                json_path = Path(artifact_paths.get("json", ""))
+                md_path = Path(artifact_paths.get("markdown", ""))
+                self.assertTrue(json_path.exists())
+                self.assertTrue(md_path.exists())
+                transcript = json_path.read_text(encoding="utf-8") + md_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Native Tool-Calling Auto Plan", transcript)
+                self.assertIn("Execution ledger", transcript)
+                self.assertIn("actual_command_or_process_activity=`True`", transcript)
+                self.assertNotIn("allowed-secret", transcript)
+                audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
+                self.assertIn("auto_plan_apply", audit_events)
+
+                bridge = handle_bridge_message(
+                    runtime,
+                    BridgeMessage(platform="discord", text='!phobos /auto apply=true model=true execute=off prompt="native apply chat token=apply-secret"', channel_id="C-apply", user_id="U-apply", message_id="M-apply"),
+                    BridgeConfig(platform="discord", allowed_channel_ids=("C-apply",), allowed_user_ids=("U-apply",), command_prefix="!phobos", max_response_chars=1200),
+                )
+                self.assertEqual(bridge.status, "handled")
+                self.assertIn("Auto plan applied through the guarded registry boundary", bridge.response)
+                self.assertIn("dry_run=1", bridge.response)
+                self.assertIn("actual_command_or_process_activity=0", bridge.response)
+                self.assertNotIn("apply-secret", json.dumps(bridge.to_dict()))
                 self.assertNotIn("allowed-secret", planned + dry_applied + executed)
             finally:
                 runtime.close()
