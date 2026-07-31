@@ -331,7 +331,11 @@ def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
         if not config_path and (profile_dir / "agent.config.json").exists():
             config_path = str(profile_dir / "agent.config.json")
     if config_path:
-        cfg = AgentAppConfig.load(config_path).to_runtime_config(args.engagement, db_path, args.session, config_path=str(config_path))
+        try:
+            app_cfg = AgentAppConfig.load(config_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Invalid --config {config_path}: {exc}") from exc
+        cfg = app_cfg.to_runtime_config(args.engagement, db_path, args.session, config_path=str(config_path))
     else:
         cfg = AgentRuntimeConfig(
             engagement_path=args.engagement,

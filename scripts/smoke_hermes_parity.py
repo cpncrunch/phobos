@@ -123,6 +123,64 @@ def main(argv: list[str] | None = None) -> int:
     cfg.skill_bundles = {"smoke": ["smoke-skill"]}
     cfg.save(config_path)
     checks["config_written"] = config_path.exists() and cfg.auto_execute_natural is False and cfg.operator_name == "Caligo"
+    scalar_config_path = root / "agent.string-scalars.config.json"
+    scalar_bad_config_path = root / "agent.invalid-scalars.config.json"
+    scalar_bridge_bad_config_path = root / "agent.invalid-bridge-scalars.config.json"
+    scalar_config_path.write_text(json.dumps({
+        "workspace_dir": str(workspace),
+        "plugin_dirs": str(REPO / "examples" / "plugins"),
+        "max_context_messages": "8",
+        "tool_timeout": "11",
+        "auto_execute_natural": "false",
+        "auto_model_planning": "off",
+        "max_auto_steps": "3",
+        "blocked_tools": "export_pack",
+        "skill_bundles": {"smoke": "smoke-skill"},
+        "providers": {"provider": "heuristic", "model": "smoke"},
+        "bridges": {"discord": {"enabled": "true", "allow_all": "false", "allow_approval_actions": "0", "ignore_bots": "yes", "mention_required": "no", "import_attachments": "on", "max_attachment_bytes": "4096", "max_response_chars": "240", "max_message_chars": "500", "poll_interval": "0.5", "response_polish": "false", "discord_thread_continue_without_trigger": "false"}},
+    }, indent=2), encoding="utf-8")
+    scalar_bad_config_path.write_text(json.dumps({"auto_execute_natural": "maybe"}), encoding="utf-8")
+    scalar_bridge_bad_config_path.write_text(json.dumps({"bridges": {"discord": {"allow_all": "maybe"}}}), encoding="utf-8")
+    scalar_cfg = AgentAppConfig.load(scalar_config_path)
+    scalar_bridge = BridgeConfig.from_dict("discord", scalar_cfg.bridges["discord"])
+    invalid_config_error = ""
+    invalid_bridge_error = ""
+    try:
+        AgentAppConfig.load(scalar_bad_config_path)
+    except ValueError as exc:
+        invalid_config_error = str(exc)
+    try:
+        AgentAppConfig.load(scalar_bridge_bad_config_path)
+    except ValueError as exc:
+        invalid_bridge_error = str(exc)
+    config_scalar_payload = {
+        "auto_execute_natural": scalar_cfg.auto_execute_natural,
+        "auto_model_planning": scalar_cfg.auto_model_planning,
+        "max_auto_steps": scalar_cfg.max_auto_steps,
+        "plugin_dirs": scalar_cfg.plugin_dirs,
+        "blocked_tools": scalar_cfg.blocked_tools,
+        "skill_bundles": scalar_cfg.skill_bundles,
+        "bridge": scalar_bridge.sanitized(),
+        "invalid_config_error": invalid_config_error,
+        "invalid_bridge_error": invalid_bridge_error,
+    }
+    write("config-scalar-validation.json", json.dumps(config_scalar_payload, indent=2, sort_keys=True))
+    checks["config_scalar_validation_ok"] = (
+        scalar_cfg.auto_execute_natural is False
+        and scalar_cfg.auto_model_planning is False
+        and scalar_cfg.max_auto_steps == 3
+        and scalar_cfg.plugin_dirs == [str(REPO / "examples" / "plugins")]
+        and scalar_cfg.blocked_tools == ["export_pack"]
+        and scalar_cfg.skill_bundles == {"smoke": ["smoke-skill"]}
+        and scalar_bridge.enabled is True
+        and scalar_bridge.allow_all is False
+        and scalar_bridge.allow_approval_actions is False
+        and scalar_bridge.ignore_bots is True
+        and scalar_bridge.max_attachment_bytes == 4096
+        and scalar_bridge.extra.get("response_polish") is False
+        and "auto_execute_natural must be a boolean" in invalid_config_error
+        and "bridges.discord.allow_all must be a boolean" in invalid_bridge_error
+    )
 
     init_stdout = run_cmd(
         "agent-init",

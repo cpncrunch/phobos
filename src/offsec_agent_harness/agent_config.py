@@ -6,7 +6,8 @@ from typing import Any
 import json
 
 from .agent_runtime import AgentRuntimeConfig
-from .agent_bridges import default_bridge_configs
+from .agent_bridges import BridgeConfig, default_bridge_configs
+from .config_types import config_bool, config_int, config_optional_string, config_string, config_string_list, config_string_list_map
 
 
 @dataclass(slots=True)
@@ -18,13 +19,15 @@ class ModelProviderConfig:
     command_template: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ModelProviderConfig":
+    def from_dict(cls, data: dict[str, Any], *, field: str = "providers[]") -> "ModelProviderConfig":
+        if not isinstance(data, dict):
+            raise ValueError(f"{field} must be an object.")
         return cls(
-            provider=str(data.get("provider", "heuristic")),
-            model=str(data.get("model", "gpt-4o-mini")),
-            base_url=data.get("base_url"),
-            key_env=str(data.get("key_env", "OPENAI_API_KEY")),
-            command_template=data.get("command_template"),
+            provider=config_string(data.get("provider", "heuristic"), f"{field}.provider", default="heuristic"),
+            model=config_string(data.get("model", "gpt-4o-mini"), f"{field}.model", default="gpt-4o-mini"),
+            base_url=config_optional_string(data.get("base_url"), f"{field}.base_url"),
+            key_env=config_string(data.get("key_env", "OPENAI_API_KEY"), f"{field}.key_env", default="OPENAI_API_KEY"),
+            command_template=config_optional_string(data.get("command_template"), f"{field}.command_template"),
         )
 
 
@@ -61,24 +64,33 @@ class AgentAppConfig:
     @classmethod
     def load(cls, path: str | Path) -> "AgentAppConfig":
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        providers = [ModelProviderConfig.from_dict(item) for item in data.get("providers", [])]
+        if not isinstance(data, dict):
+            raise ValueError("agent config must be a JSON object.")
+        provider_items = data.get("providers", [])
+        if isinstance(provider_items, dict):
+            provider_items = [provider_items]
+        if provider_items is None:
+            provider_items = []
+        if not isinstance(provider_items, list):
+            raise ValueError("providers must be a list of objects.")
+        providers = [ModelProviderConfig.from_dict(item, field=f"providers[{idx}]") for idx, item in enumerate(provider_items)]
         if not providers:
             providers = [ModelProviderConfig()]
         return cls(
-            workspace_dir=str(data.get("workspace_dir", "agent-workspace")),
-            operator_name=str(data.get("operator_name", "operator")),
-            assistant_style=str(data.get("assistant_style", "direct, concise, practical, evidence-first")),
-            plugin_dirs=[str(p) for p in data.get("plugin_dirs", [])],
-            max_context_messages=int(data.get("max_context_messages", 12)),
-            tool_timeout=int(data.get("tool_timeout", 30)),
-            auto_execute_natural=bool(data.get("auto_execute_natural", False)),
-            auto_model_planning=bool(data.get("auto_model_planning", False)),
-            max_auto_steps=int(data.get("max_auto_steps", 5)),
-            blocked_tools=[str(item) for item in data.get("blocked_tools", [])],
-            confirm_tools=[str(item) for item in data.get("confirm_tools", [])],
-            skill_dirs=[str(item) for item in data.get("skill_dirs", [])],
-            preload_skills=[str(item) for item in data.get("preload_skills", [])],
-            skill_bundles={str(key): [str(item) for item in value] for key, value in dict(data.get("skill_bundles", {})).items()},
+            workspace_dir=config_string(data.get("workspace_dir", "agent-workspace"), "workspace_dir", default="agent-workspace"),
+            operator_name=config_string(data.get("operator_name", "operator"), "operator_name", default="operator"),
+            assistant_style=config_string(data.get("assistant_style", "direct, concise, practical, evidence-first"), "assistant_style", default="direct, concise, practical, evidence-first"),
+            plugin_dirs=config_string_list(data.get("plugin_dirs", []), "plugin_dirs"),
+            max_context_messages=config_int(data.get("max_context_messages", 12), "max_context_messages", default=12, minimum=1),
+            tool_timeout=config_int(data.get("tool_timeout", 30), "tool_timeout", default=30, minimum=1),
+            auto_execute_natural=config_bool(data.get("auto_execute_natural", False), "auto_execute_natural", default=False),
+            auto_model_planning=config_bool(data.get("auto_model_planning", False), "auto_model_planning", default=False),
+            max_auto_steps=config_int(data.get("max_auto_steps", 5), "max_auto_steps", default=5, minimum=1, maximum=10),
+            blocked_tools=config_string_list(data.get("blocked_tools", []), "blocked_tools"),
+            confirm_tools=config_string_list(data.get("confirm_tools", []), "confirm_tools"),
+            skill_dirs=config_string_list(data.get("skill_dirs", []), "skill_dirs"),
+            preload_skills=config_string_list(data.get("preload_skills", []), "preload_skills"),
+            skill_bundles=config_string_list_map(data.get("skill_bundles", {}), "skill_bundles"),
             bridges=_load_bridge_configs(data.get("bridges")),
             providers=providers,
         )
@@ -123,9 +135,17 @@ class AgentAppConfig:
 
 def _load_bridge_configs(value: Any) -> dict[str, dict[str, Any]]:
     configs = default_bridge_configs()
-    if not isinstance(value, dict):
+    if value is None:
         return configs
+    if not isinstance(value, dict):
+        raise ValueError("bridges must be an object.")
     for platform, data in value.items():
-        if isinstance(data, dict):
-            configs[str(platform)] = dict(configs.get(str(platform), {})) | dict(data)
+        platform_name = config_string(platform, "bridges key").strip()
+        if not platform_name:
+            continue
+        if not isinstance(data, dict):
+            raise ValueError(f"bridges.{platform_name} must be an object.")
+        merged = dict(configs.get(platform_name, {})) | dict(data)
+        BridgeConfig.from_dict(platform_name, merged)
+        configs[platform_name] = merged
     return configs

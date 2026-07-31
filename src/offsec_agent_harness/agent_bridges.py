@@ -17,6 +17,7 @@ import struct
 import time
 
 from .models import redact_secrets
+from .config_types import config_bool, config_float, config_int
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from .agent_runtime import OffSecAgentRuntime
@@ -106,6 +107,8 @@ class BridgeConfig:
 
     @classmethod
     def from_dict(cls, platform: str, data: dict[str, Any] | None = None) -> "BridgeConfig":
+        if data is not None and not isinstance(data, dict):
+            raise ValueError(f"bridges.{platform} must be an object.")
         defaults = dict(BRIDGE_DEFAULTS.get(platform, {}))
         merged = defaults | dict(data or {})
         known = {
@@ -127,24 +130,27 @@ class BridgeConfig:
             "poll_interval",
         }
         extra = {key: value for key, value in merged.items() if key not in known}
+        for bool_key in ("response_polish", "discord_thread_continue_without_trigger"):
+            if bool_key in extra:
+                extra[bool_key] = config_bool(extra[bool_key], f"bridges.{platform}.{bool_key}")
         return cls(
             platform=platform,
-            enabled=bool(merged.get("enabled", False)),
+            enabled=config_bool(merged.get("enabled", False), f"bridges.{platform}.enabled", default=False),
             token_env=str(merged.get("token_env", "")),
             bot_token_env=str(merged.get("bot_token_env", "")),
             app_token_env=str(merged.get("app_token_env", "")),
             allowed_channel_ids=_tuple_of_strings(merged.get("allowed_channel_ids", ())),
             allowed_user_ids=_tuple_of_strings(merged.get("allowed_user_ids", ())),
             command_prefix=str(merged.get("command_prefix", "")),
-            mention_required=bool(merged.get("mention_required", False)),
-            allow_all=bool(merged.get("allow_all", False)),
-            allow_approval_actions=bool(merged.get("allow_approval_actions", False)),
-            import_attachments=bool(merged.get("import_attachments", True)),
-            max_attachment_bytes=max(0, int(merged.get("max_attachment_bytes", 10_000_000))),
-            ignore_bots=bool(merged.get("ignore_bots", True)),
-            max_response_chars=max(200, int(merged.get("max_response_chars", 1800))),
-            max_message_chars=max(200, int(merged.get("max_message_chars", 4000))),
-            poll_interval=max(0.1, float(merged.get("poll_interval", 2.0))),
+            mention_required=config_bool(merged.get("mention_required", False), f"bridges.{platform}.mention_required", default=False),
+            allow_all=config_bool(merged.get("allow_all", False), f"bridges.{platform}.allow_all", default=False),
+            allow_approval_actions=config_bool(merged.get("allow_approval_actions", False), f"bridges.{platform}.allow_approval_actions", default=False),
+            import_attachments=config_bool(merged.get("import_attachments", True), f"bridges.{platform}.import_attachments", default=True),
+            max_attachment_bytes=config_int(merged.get("max_attachment_bytes", 10_000_000), f"bridges.{platform}.max_attachment_bytes", default=10_000_000, minimum=0),
+            ignore_bots=config_bool(merged.get("ignore_bots", True), f"bridges.{platform}.ignore_bots", default=True),
+            max_response_chars=config_int(merged.get("max_response_chars", 1800), f"bridges.{platform}.max_response_chars", default=1800, minimum=200),
+            max_message_chars=config_int(merged.get("max_message_chars", 4000), f"bridges.{platform}.max_message_chars", default=4000, minimum=200),
+            poll_interval=config_float(merged.get("poll_interval", 2.0), f"bridges.{platform}.poll_interval", default=2.0, minimum=0.1),
             extra=extra,
         )
 

@@ -188,6 +188,91 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_config_scalar_parsing_does_not_enable_unsafe_booleans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(name="Config Scalar Test", authorized=True, in_scope_targets=["app.example.test"], evidence_dir=str(tmp_path / "evidence")).save(engagement)
+            cfg_path = tmp_path / "agent.config.json"
+            cfg_path.write_text(json.dumps({
+                "workspace_dir": str(tmp_path / "workspace"),
+                "plugin_dirs": str(tmp_path / "plugins"),
+                "max_context_messages": "7",
+                "tool_timeout": "9",
+                "auto_execute_natural": "false",
+                "auto_model_planning": "off",
+                "max_auto_steps": "3",
+                "blocked_tools": "export_pack",
+                "confirm_tools": ["workspace_write"],
+                "skill_bundles": {"demo": "demo-skill"},
+                "providers": {"provider": "heuristic", "model": "unit"},
+                "bridges": {
+                    "discord": {
+                        "enabled": "true",
+                        "allow_all": "false",
+                        "allow_approval_actions": "0",
+                        "ignore_bots": "yes",
+                        "mention_required": "no",
+                        "import_attachments": "on",
+                        "max_attachment_bytes": "4096",
+                        "max_response_chars": "240",
+                        "max_message_chars": "500",
+                        "poll_interval": "0.5",
+                        "response_polish": "false",
+                        "discord_thread_continue_without_trigger": "false",
+                    }
+                },
+            }), encoding="utf-8")
+
+            cfg = AgentAppConfig.load(cfg_path)
+            self.assertFalse(cfg.auto_execute_natural)
+            self.assertFalse(cfg.auto_model_planning)
+            self.assertEqual(cfg.max_auto_steps, 3)
+            self.assertEqual(cfg.max_context_messages, 7)
+            self.assertEqual(cfg.tool_timeout, 9)
+            self.assertEqual(cfg.plugin_dirs, [str(tmp_path / "plugins")])
+            self.assertEqual(cfg.blocked_tools, ["export_pack"])
+            self.assertEqual(cfg.skill_bundles, {"demo": ["demo-skill"]})
+            bridge_cfg = BridgeConfig.from_dict("discord", cfg.bridges["discord"])
+            self.assertTrue(bridge_cfg.enabled)
+            self.assertFalse(bridge_cfg.allow_all)
+            self.assertFalse(bridge_cfg.allow_approval_actions)
+            self.assertTrue(bridge_cfg.ignore_bots)
+            self.assertFalse(bridge_cfg.mention_required)
+            self.assertTrue(bridge_cfg.import_attachments)
+            self.assertEqual(bridge_cfg.max_attachment_bytes, 4096)
+            self.assertEqual(bridge_cfg.max_response_chars, 240)
+            self.assertEqual(bridge_cfg.max_message_chars, 500)
+            self.assertEqual(bridge_cfg.poll_interval, 0.5)
+            self.assertIs(bridge_cfg.extra.get("response_polish"), False)
+            self.assertIs(bridge_cfg.extra.get("discord_thread_continue_without_trigger"), False)
+
+            runtime = OffSecAgentRuntime(cfg.to_runtime_config(str(engagement), str(tmp_path / "agent.db"), "config-scalar", config_path=str(cfg_path)))
+            try:
+                preflight = runtime.registry.run("safety_preflight", {})
+                self.assertEqual(preflight.status, "ok", preflight.to_dict())
+                serialized_preflight = json.dumps(preflight.to_dict())
+                self.assertIn("auto_execute_natural=False", serialized_preflight)
+                self.assertNotIn("allow_all=true", serialized_preflight)
+            finally:
+                runtime.close()
+
+            bad_cfg = tmp_path / "bad.config.json"
+            bad_cfg.write_text(json.dumps({"auto_execute_natural": "maybe"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "auto_execute_natural must be a boolean"):
+                AgentAppConfig.load(bad_cfg)
+            bad_bridge = tmp_path / "bad-bridge.config.json"
+            bad_bridge.write_text(json.dumps({"bridges": {"discord": {"allow_all": "maybe"}}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "bridges.discord.allow_all must be a boolean"):
+                AgentAppConfig.load(bad_bridge)
+
+            completed = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--config", str(bad_cfg), "--db", str(tmp_path / "bad.db"), "init", "--engagement", str(engagement),
+            ], text=True, capture_output=True, check=False)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Invalid --config", completed.stderr or completed.stdout)
+            self.assertNotIn("Traceback", completed.stderr + completed.stdout)
+
     def test_tool_registry_validates_schema_scalar_args_before_dispatch_or_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)

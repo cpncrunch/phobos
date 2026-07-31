@@ -12,6 +12,7 @@ from .agent_plugins import load_plugins
 from .agent_skills import LocalSkill, discover_skills, load_skill, render_loaded_skills
 from .agent_store import AgentStore
 from .agent_tools import OffSecToolRegistry, ToolResult
+from .agent_bridges import BridgeConfig
 from .model_adapters import BaseModelAdapter, build_adapter, build_fallback_adapter
 from .models import EngagementROE, redact_secrets
 
@@ -530,7 +531,11 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
     bridges: dict[str, dict[str, Any]] = {}
     for name, data in (config.bridges or {}).items():
         if isinstance(data, dict):
-            bridges[str(name)] = {key: data.get(key) for key in bridge_keys if key in data}
+            try:
+                normalized = BridgeConfig.from_dict(str(name), data).to_dict()
+            except ValueError:
+                normalized = dict(data)
+            bridges[str(name)] = {key: normalized.get(key) for key in bridge_keys if key in normalized}
     providers = []
     for provider in config.model_providers:
         if isinstance(provider, dict):
