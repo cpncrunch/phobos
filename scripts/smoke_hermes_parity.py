@@ -382,7 +382,10 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         invalid_tool_integer = runtime.registry.run("list_findings", {"limit": "not-an-int"})
+        invalid_tool_integer_fractional = runtime.registry.run("list_findings", {"limit": 1.5})
+        invalid_tool_integer_fractional_string = runtime.registry.run("list_findings", {"limit": "1.5"})
         valid_tool_integer = runtime.registry.run("list_findings", {"limit": "2"})
+        valid_tool_integer_float = runtime.registry.run("list_findings", {"limit": 2.0})
         invalid_tool_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
         invalid_tool_integer_ceiling = runtime.registry.run("list_findings", {"limit": 5001})
         invalid_tool_timeline_ceiling = runtime.registry.run("evidence_timeline", {"limit": 501})
@@ -395,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         integer_bound_approvals_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
         runtime.registry.confirm_tools.add("list_findings")
         try:
+            invalid_confirm_integer_fractional = runtime.registry.run("list_findings", {"limit": 1.5})
             invalid_confirm_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
             invalid_confirm_integer_ceiling = runtime.registry.run("list_findings", {"limit": 5001})
         finally:
@@ -402,7 +406,10 @@ def main(argv: list[str] | None = None) -> int:
         integer_bound_approvals_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
         integer_validation_payload = {
             "invalid": invalid_tool_integer.to_dict(),
+            "invalid_fractional": invalid_tool_integer_fractional.to_dict(),
+            "invalid_fractional_string": invalid_tool_integer_fractional_string.to_dict(),
             "valid": valid_tool_integer.to_dict(),
+            "valid_float": valid_tool_integer_float.to_dict(),
             "invalid_bound": invalid_tool_integer_bound.to_dict(),
             "invalid_ceiling": invalid_tool_integer_ceiling.to_dict(),
             "invalid_timeline_ceiling": invalid_tool_timeline_ceiling.to_dict(),
@@ -412,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
             "invalid_scanner_timeout_ceiling": invalid_tool_scanner_timeout_ceiling.to_dict(),
             "invalid_manifest_bytes_ceiling": invalid_tool_manifest_bytes_ceiling.to_dict(),
             "invalid_text_bytes_ceiling": invalid_tool_text_bytes_ceiling.to_dict(),
+            "invalid_confirm_fractional": invalid_confirm_integer_fractional.to_dict(),
             "invalid_confirm_bound": invalid_confirm_integer_bound.to_dict(),
             "invalid_confirm_ceiling": invalid_confirm_integer_ceiling.to_dict(),
             "approvals_before": integer_bound_approvals_before,
@@ -421,7 +429,15 @@ def main(argv: list[str] | None = None) -> int:
         checks["tool_schema_integer_validation_ok"] = (
             invalid_tool_integer.status == "error"
             and invalid_tool_integer.message == "limit must be an integer."
+            and invalid_tool_integer_fractional.status == "error"
+            and invalid_tool_integer_fractional.message == "limit must be an integer."
+            and invalid_tool_integer_fractional_string.status == "error"
+            and invalid_tool_integer_fractional_string.message == "limit must be an integer."
             and valid_tool_integer.status == "ok"
+            and valid_tool_integer_float.status == "ok"
+            and invalid_confirm_integer_fractional.status == "error"
+            and invalid_confirm_integer_fractional.message == "limit must be an integer."
+            and integer_bound_approvals_before == integer_bound_approvals_after
             and "invalid literal" not in json.dumps(integer_validation_payload)
             and "Traceback" not in json.dumps(integer_validation_payload)
         )

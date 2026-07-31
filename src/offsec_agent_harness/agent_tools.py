@@ -4755,6 +4755,28 @@ def _parse_schema_bool(value: Any) -> tuple[bool, bool]:
     return False, False
 
 
+def _parse_schema_integer(value: Any) -> tuple[int, bool]:
+    """Parse a JSON-schema integer without truncating fractional numbers."""
+
+    if value is None or isinstance(value, bool):
+        return 0, False
+    if isinstance(value, int):
+        return value, True
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value), True
+        return 0, False
+    if isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"[+-]?\d+", text):
+            return 0, False
+        try:
+            return int(text), True
+        except ValueError:
+            return 0, False
+    return 0, False
+
+
 def _parse_schema_number(value: Any) -> tuple[float, bool]:
     """Parse a JSON-schema number while rejecting booleans, blanks, NaN, and inf."""
 
@@ -4805,11 +4827,8 @@ def _validate_schema_value(
 
     arg_type = arg_schema.get("type")
     if arg_type == "integer":
-        if raw_value is None or isinstance(raw_value, bool):
-            return raw_value, ToolResult("error", f"{field_path} must be an integer.")
-        try:
-            parsed_int = int(raw_value)
-        except (TypeError, ValueError):
+        parsed_int, ok = _parse_schema_integer(raw_value)
+        if not ok:
             return raw_value, ToolResult("error", f"{field_path} must be an integer.")
         minimum = arg_schema.get("minimum")
         maximum = arg_schema.get("maximum")

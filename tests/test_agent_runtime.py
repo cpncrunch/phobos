@@ -410,6 +410,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 invalid_cases = [
                     ("get_job", {"id": "not-an-int"}, "id must be an integer."),
                     ("poll_process", {"id": "not-an-int"}, "id must be an integer."),
+                    ("poll_process", {"id": "1.5"}, "id must be an integer."),
                     ("poll_process", {"id": ""}, "id is required."),
                     ("poll_process", {"id": 0}, "id must be at least 1."),
                     ("schema_number_echo", {"threshold": "not-a-number"}, "threshold must be a number."),
@@ -503,7 +504,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(closed_dispatches, [{"label": "closed", "_policy_approved": True}])
 
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
+                valid_json_integer_number = runtime.registry.run("list_findings", {"limit": 2.0})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
+                self.assertEqual(valid_json_integer_number.status, "ok", valid_json_integer_number.to_dict())
                 dry_run = runtime.registry.run("run_command", {"target": "app.example.test", "type": "local", "purpose": "boolean dry-run regression", "command": "printf bool-validation-ok", "execute": "false"})
                 self.assertEqual(dry_run.status, "dry_run", dry_run.to_dict())
                 runtime.registry.run("workspace_write", {"path": "notes/boolean.md", "content": "old"})
@@ -543,6 +546,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     confirm_runtime.registry.register_tool("schema_closed_echo", schema_closed_echo, closed_tool_spec)
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
+                    rejected_fractional_integer = confirm_runtime.registry.run("list_findings", {"limit": 1.5})
                     rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
                     rejected_ceiling = confirm_runtime.registry.run("list_findings", {"limit": 5001})
                     rejected_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "nope"})
@@ -565,6 +569,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     self.assertEqual(rejected.status, "error")
                     self.assertEqual(rejected.message, "limit must be an integer.")
+                    self.assertEqual(rejected_fractional_integer.status, "error")
+                    self.assertEqual(rejected_fractional_integer.message, "limit must be an integer.")
                     self.assertEqual(rejected_bound.status, "error")
                     self.assertEqual(rejected_bound.message, "limit must be at least 1.")
                     self.assertEqual(rejected_ceiling.status, "error")
