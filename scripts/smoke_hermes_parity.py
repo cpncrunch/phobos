@@ -346,6 +346,30 @@ class SmokeToolCallDuplicatePlanAdapter(BaseModelAdapter):
         )
 
 
+class SmokeToolCallMaxStepsAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-max-steps"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        step = len(self.prompts)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": f"smoke model emitted bounded native step {step}",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": f"native-max-step-{step}", "value": f"native max-step budget ran step {step}"}, "reason": "unique safe local call keeps the native loop progressing until the max-step budget stops it"}
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class SmokeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-approval-action"
 
@@ -1672,6 +1696,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
+            and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
@@ -2264,6 +2289,34 @@ def main(argv: list[str] | None = None) -> int:
             write("native-tool-duplicate-plan-transcript.txt", duplicate_transcript)
         finally:
             duplicate_runtime.close()
+
+        max_steps_adapter = SmokeToolCallMaxStepsAdapter()
+        max_steps_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-max-steps-smoke",
+                auto_model_planning=True,
+                max_auto_steps=2,
+            ),
+            adapter=max_steps_adapter,
+        )
+        try:
+            max_steps_loop = max_steps_runtime.handle_message('/auto-loop model=true prompt="native max steps smoke token=maxsteps-smoke-secret"')
+            max_steps_payload = json.loads(max_steps_loop.split("\n", 1)[1])
+            max_steps_ledger = max_steps_payload.get("execution_ledger", []) if isinstance(max_steps_payload.get("execution_ledger"), list) else []
+            max_steps_artifacts = max_steps_payload.get("artifacts", {}) if isinstance(max_steps_payload.get("artifacts"), dict) else {}
+            max_steps_transcript = ""
+            for path_value in [max_steps_artifacts.get("json"), max_steps_artifacts.get("markdown")]:
+                if path_value:
+                    max_steps_transcript += Path(str(path_value)).read_text(encoding="utf-8")
+            max_steps_chat = max_steps_runtime.render_chat_response(max_steps_loop, message='/auto-loop model=true prompt="native max steps smoke"', platform="discord")
+            max_steps_status = max_steps_runtime.registry.run("runtime_status", {}).to_dict()
+            write("native-tool-max-steps-loop.txt", max_steps_loop)
+            write("native-tool-max-steps-transcript.txt", max_steps_transcript)
+            write("native-tool-max-steps-chat.txt", max_steps_chat)
+        finally:
+            max_steps_runtime.close()
         terminal_steps = terminal_payload.get("steps", []) if isinstance(terminal_payload.get("steps"), list) else []
         terminal_no_plan = terminal_steps[-1] if terminal_steps and isinstance(terminal_steps[-1], dict) else {}
         terminal_plan = terminal_no_plan.get("plan") if isinstance(terminal_no_plan.get("plan"), dict) else {}
@@ -2301,6 +2354,25 @@ def main(argv: list[str] | None = None) -> int:
             and "native duplicate stop ran once" in duplicate_recall
             and "Duplicate plan stop" in duplicate_transcript
             and "duplicate-stop-smoke-secret" not in json.dumps(duplicate_payload) + duplicate_recall + duplicate_transcript
+        )
+        checks["native_tool_call_max_steps_budget_ok"] = (
+            max_steps_payload.get("stop_reason") == "max_steps"
+            and max_steps_payload.get("steps_requested") == 2
+            and max_steps_payload.get("max_steps_budget") == 2
+            and max_steps_payload.get("max_steps_budget_exhausted") is True
+            and max_steps_payload.get("steps_executed") == 2
+            and max_steps_payload.get("feedback_history_entries") == 2
+            and len(max_steps_adapter.prompts) == 2
+            and len(max_steps_ledger) == 2
+            and [item.get("step") for item in max_steps_ledger] == [1, 2]
+            and not any(item.get("actual_command_or_process_activity") for item in max_steps_ledger)
+            and max_steps_status.get("data", {}).get("native_tool_calling", {}).get("max_steps_budget_stop_enforced") is True
+            and "Stop reason: `max_steps`" in max_steps_transcript
+            and "Max-step budget exhausted: `True`" in max_steps_transcript
+            and "Max-step budget reached" in max_steps_transcript
+            and "Max-step budget exhausted" in max_steps_chat
+            and "actual_command_or_process_activity=0" in max_steps_chat
+            and "maxsteps-smoke-secret" not in json.dumps(max_steps_payload) + max_steps_transcript + max_steps_chat
         )
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"

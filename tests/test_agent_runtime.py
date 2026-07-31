@@ -399,6 +399,34 @@ class FakeToolCallDuplicatePlanAdapter(BaseModelAdapter):
         )
 
 
+class FakeToolCallMaxStepsAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-max-steps"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        step = len(self.prompts)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": f"fake model emitted bounded native step {step}",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": f"max-step-{step}", "value": f"native max-step budget ran step {step}"},
+                        "reason": "unique safe local call keeps the loop progressing until the explicit max-step budget stops it",
+                    }
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "fake-tool-call-approval-action"
 
@@ -3392,6 +3420,58 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_auto_loop_enforces_max_step_budget_with_clear_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Max Step Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallMaxStepsAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-max-steps",
+                    auto_model_planning=True,
+                    max_auto_steps=2,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true prompt="native max steps token=maxstep-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "max_steps")
+                self.assertEqual(payload["steps_requested"], 2)
+                self.assertEqual(payload["max_steps_budget"], 2)
+                self.assertTrue(payload["max_steps_budget_exhausted"])
+                self.assertEqual(payload["steps_executed"], 2)
+                self.assertEqual(payload.get("feedback_history_entries"), 2)
+                self.assertEqual(len(adapter.prompts), 2)
+                self.assertIn("Max-step budget reached", payload.get("next_step", ""))
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(len(ledger), 2)
+                self.assertEqual([item["step"] for item in ledger], [1, 2])
+                self.assertEqual([item["execution_state"] for item in ledger], ["completed_without_command_execution", "completed_without_command_execution"])
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in ledger))
+                self.assertFalse(any(item["safe_to_claim_command_executed"] for item in ledger))
+                self.assertEqual([step["mode"] for step in payload["steps"]], ["applied", "applied"])
+                status = runtime.registry.run("runtime_status", {})
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("max_steps_budget_stop_enforced"), status.to_dict())
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Stop reason: `max_steps`", transcript)
+                self.assertIn("Max-step budget exhausted: `True`", transcript)
+                self.assertIn("Max-step budget reached", transcript)
+                self.assertNotIn("maxstep-secret", response + transcript)
+                chat = runtime.render_chat_response(response, message='/auto-loop model=true prompt="native max steps"', platform="discord")
+                self.assertIn("Max-step budget exhausted", chat)
+                self.assertIn("actual_command_or_process_activity=0", chat)
+            finally:
+                runtime.close()
+
     def test_native_auto_gateway_endpoints_and_bridge_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3471,6 +3551,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertFalse(native_status.get("natural_auto_execute_enabled"), native_status)
                 self.assertTrue(native_status.get("plan_only_default"), native_status)
                 self.assertTrue(native_status.get("execution_requires_operator_execute_true"), native_status)
+                self.assertTrue(native_status.get("max_steps_budget_stop_enforced"), native_status)
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("run_command", native_status.get("execution_capable_tools", []))

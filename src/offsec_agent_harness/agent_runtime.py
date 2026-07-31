@@ -810,6 +810,8 @@ class OffSecAgentRuntime:
         payload: dict[str, Any] = {
             "prompt": prompt,
             "steps_requested": steps,
+            "max_steps_budget": steps,
+            "max_steps_budget_exhausted": stop_reason == "max_steps",
             "steps_executed": sum(1 for item in loop_results if item.get("mode") == "applied"),
             "stop_reason": stop_reason,
             "execute": execute,
@@ -821,6 +823,10 @@ class OffSecAgentRuntime:
             "execution_ledger": _redact_runtime_value(execution_ledger),
             "steps": loop_results,
         }
+        if stop_reason == "max_steps":
+            payload["next_step"] = (
+                "Max-step budget reached. Review the redacted auto-loop transcript before rerunning with a larger explicit steps budget."
+            )
         try:
             artifacts = _write_auto_loop_artifacts(self.registry.harness.store.root, payload)
             payload["artifacts"] = artifacts
@@ -1030,6 +1036,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "max_auto_steps": int(config.max_auto_steps),
             "plan_only_default": True,
             "execution_requires_operator_execute_true": True,
+            "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "approval_control_tools_hidden_from_model": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
             "execution_capable_tools": sorted(_EXECUTION_CAPABLE_TOOLS),
@@ -1305,6 +1312,8 @@ def _render_auto_loop_chat(response: str) -> str:
     executed = int(data.get("steps_executed") or 0)
     requested = int(data.get("steps_requested") or executed or 0)
     lines = [f"Native tool loop stopped: `{stop_reason}` after {executed}/{requested} applied step(s)."]
+    if data.get("max_steps_budget_exhausted") is True:
+        lines.append("- Max-step budget exhausted; review the redacted transcript before rerunning with a larger explicit steps budget.")
     if planned:
         lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
     if counts:
@@ -1686,17 +1695,23 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         f"Generated: {utc_now()}",
         f"Stop reason: `{payload.get('stop_reason', 'unknown')}`",
         f"Steps executed: {payload.get('steps_executed', 0)} / {payload.get('steps_requested', 0)}",
+        f"Max-step budget exhausted: `{payload.get('max_steps_budget_exhausted', False)}`",
         f"Model planning: `{payload.get('model', False)}`",
         f"Command execution enabled for loop: `{payload.get('execute', False)}`",
         "Secret-like values redacted: `true`",
         "",
+    ]
+    next_step = str(payload.get("next_step") or "").strip()
+    if next_step:
+        lines.extend(["Next step: " + next_step, ""])
+    lines.extend([
         "## Operator prompt",
         "",
         str(payload.get("prompt") or ""),
         "",
         "## Execution ledger",
         "",
-    ]
+    ])
     raw_ledger = payload.get("execution_ledger")
     ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
     if not ledger:
