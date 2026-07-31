@@ -193,6 +193,49 @@ class FakeToolCallGuardrailAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallLoopApprovalStopAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-loop-approval-stop"
+
+    def __init__(self, confirm_marker: Path):
+        self.confirm_marker = confirm_marker
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        if len(self.prompts) > 1:
+            payload = {
+                "summary": "unsafe continuation should not be requested after approval is queued",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "approval-stop-bypass", "value": "loop continued after approval"},
+                        "reason": "this would prove the approval boundary was bypassed",
+                    }
+                ],
+                "warnings": [],
+            }
+        else:
+            payload = {
+                "summary": "first step queues a confirm-level command",
+                "tool_calls": [
+                    {
+                        "tool": "run_command",
+                        "args": {
+                            "target": "app.example.test",
+                            "purpose": "native loop approval stop boundary",
+                            "command": f"curl -X POST https://app.example.test/api/native-loop-stop && touch {self.confirm_marker}",
+                            "execute": True,
+                        },
+                        "reason": "state-changing HTTP should queue approval and stop the native loop",
+                    }
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 class FakeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "fake-tool-call-feedback"
 
@@ -2536,6 +2579,52 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(pending[0]["tool_name"], "run_command")
                 self.assertFalse(confirm_marker.exists())
                 self.assertFalse(block_marker.exists())
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_stops_after_approval_queue_without_feedback_continuation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Loop Approval Stop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            confirm_marker = tmp_path / "loop-confirm-should-not-run.txt"
+            adapter = FakeToolCallLoopApprovalStopAdapter(confirm_marker)
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-loop-approval-stop",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true execute=true steps=4 prompt="native loop approval stop token=loop-stop-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "approval_required")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(payload.get("feedback_history_entries"), 1)
+                self.assertEqual(len(adapter.prompts), 1)
+                self.assertEqual(payload["steps"][0].get("terminal_result_statuses"), ["needs_approval"])
+                self.assertEqual(payload["results"] if "results" in payload else [], [])
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(ledger[0]["execution_state"], "queued_for_approval")
+                self.assertTrue(ledger[0]["approval_queued"])
+                self.assertFalse(ledger[0]["actual_command_or_process_activity"])
+                pending = runtime.store.list_approvals(runtime.session_id, status="pending")
+                self.assertEqual(len(pending), 1)
+                self.assertFalse(confirm_marker.exists())
+                recall = runtime.handle_message('/recall query=approval-stop-bypass')
+                self.assertNotIn("loop continued after approval", recall)
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("approval_required", transcript)
+                self.assertIn("queued_for_approval", transcript)
+                self.assertNotIn("loop-stop-secret", response + transcript)
             finally:
                 runtime.close()
 

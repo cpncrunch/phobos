@@ -160,9 +160,11 @@ class SmokeToolCallGuardrailAdapter(BaseModelAdapter):
     def __init__(self, confirm_marker: Path, block_marker: Path):
         self.confirm_marker = confirm_marker
         self.block_marker = block_marker
+        self.prompts: list[str] = []
 
     def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
         if "Return ONLY JSON" in prompt:
+            self.prompts.append(prompt)
             return ModelResponse(
                 provider=self.provider,
                 role=role,
@@ -1519,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
         native_block_marker = root / "native-block-should-not-run.txt"
+        guardrail_adapter = SmokeToolCallGuardrailAdapter(native_confirm_marker, native_block_marker)
         guardrail_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
                 engagement_path=str(engagement_path),
@@ -1526,7 +1529,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_name="native-tool-guardrail-smoke",
                 auto_model_planning=True,
             ),
-            adapter=SmokeToolCallGuardrailAdapter(native_confirm_marker, native_block_marker),
+            adapter=guardrail_adapter,
         )
         try:
             guardrail_plan = guardrail_runtime.handle_message('/auto model=true execute=true prompt="native guardrail smoke plan"')
@@ -1537,13 +1540,20 @@ def main(argv: list[str] | None = None) -> int:
             guardrail_apply_payload = json.loads(guardrail_apply.split("\n", 1)[1])
             guardrail_apply_ledger = guardrail_apply_payload.get("execution_ledger", []) if isinstance(guardrail_apply_payload.get("execution_ledger"), list) else []
             pending_guardrail_after_apply = guardrail_runtime.store.list_approvals(guardrail_runtime.session_id, status="pending")
+            guardrail_loop = guardrail_runtime.handle_message('/auto-loop model=true execute=true steps=4 prompt="native guardrail smoke loop stop"')
+            guardrail_loop_payload = json.loads(guardrail_loop.split("\n", 1)[1])
+            guardrail_loop_ledger = guardrail_loop_payload.get("execution_ledger", []) if isinstance(guardrail_loop_payload.get("execution_ledger"), list) else []
+            pending_guardrail_after_loop = guardrail_runtime.store.list_approvals(guardrail_runtime.session_id, status="pending")
             write("native-tool-guardrail-plan.txt", guardrail_plan)
             write("native-tool-guardrail-apply.txt", guardrail_apply)
+            write("native-tool-guardrail-loop-stop.txt", guardrail_loop)
         finally:
             guardrail_runtime.close()
         guardrail_plan_statuses = [call.get("validation", {}).get("guardrail_status") for call in guardrail_plan_payload.get("tool_calls", [])]
         guardrail_previews = [call.get("validation", {}).get("guardrail_preview", {}) for call in guardrail_plan_payload.get("tool_calls", [])]
         guardrail_result_statuses = [item.get("result", {}).get("status") for item in guardrail_apply_payload.get("results", [])]
+        guardrail_loop_statuses = [item.get("result_status") for item in guardrail_loop_ledger]
+        guardrail_loop_terminal = guardrail_loop_payload.get("steps", [{}])[0].get("terminal_result_statuses") if guardrail_loop_payload.get("steps") else []
         checks["native_tool_call_guardrail_approval_ok"] = (
             guardrail_plan_payload.get("mode") == "plan_only"
             and guardrail_plan_statuses == ["confirm", "block"]
@@ -1556,6 +1566,18 @@ def main(argv: list[str] | None = None) -> int:
             and guardrail_result_statuses == ["needs_approval", "blocked"]
             and len(pending_guardrail_after_apply) == 1
             and pending_guardrail_after_apply[0].get("tool_name") == "run_command"
+            and not native_confirm_marker.exists()
+            and not native_block_marker.exists()
+        )
+        checks["native_tool_call_loop_approval_stop_ok"] = (
+            guardrail_loop_payload.get("stop_reason") == "approval_or_blocked_result"
+            and guardrail_loop_payload.get("steps_executed") == 1
+            and guardrail_loop_terminal == ["blocked", "needs_approval"]
+            and guardrail_loop_statuses == ["needs_approval", "blocked"]
+            and len(guardrail_adapter.prompts) == 3
+            and len(pending_guardrail_after_loop) == 2
+            and not any(item.get("actual_command_or_process_activity") for item in guardrail_loop_ledger)
+            and not any(item.get("safe_to_claim_command_executed") for item in guardrail_loop_ledger)
             and not native_confirm_marker.exists()
             and not native_block_marker.exists()
         )

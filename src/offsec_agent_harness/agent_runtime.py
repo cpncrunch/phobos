@@ -745,8 +745,29 @@ class OffSecAgentRuntime:
                 execution_ledger.append(execution)
                 step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict(), "execution": execution}))
             step_record = _redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results})
+            terminal_status_values: list[str] = []
+            for item in step_results:
+                if not isinstance(item, dict):
+                    continue
+                result_obj = item.get("result")
+                if not isinstance(result_obj, dict):
+                    continue
+                result_status = str(result_obj.get("status") or "")
+                if result_status in {"needs_approval", "blocked"}:
+                    terminal_status_values.append(result_status)
+            terminal_statuses = sorted(set(terminal_status_values))
+            if terminal_statuses and isinstance(step_record, dict):
+                step_record["terminal_result_statuses"] = terminal_statuses
             loop_results.append(step_record)
             feedback_history.append(_redact_runtime_value({"step": step, "results": step_results}))
+            if terminal_statuses:
+                if terminal_statuses == ["needs_approval"]:
+                    stop_reason = "approval_required"
+                elif terminal_statuses == ["blocked"]:
+                    stop_reason = "blocked_result"
+                else:
+                    stop_reason = "approval_or_blocked_result"
+                break
             if not use_model:
                 stop_reason = "deterministic_plan_applied"
                 break
