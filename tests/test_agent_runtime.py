@@ -392,8 +392,19 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("schema_closed_echo", {"label": "okay", "alpha": 1, "zulu": 2}, "Unexpected arguments: alpha, zulu."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("list_findings", {"limit": 0}, "limit must be at least 1."),
+                    ("list_findings", {"limit": 5001}, "limit must be at most 5000."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
+                    ("evidence_timeline", {"limit": 501}, "limit must be at most 500."),
                     ("evidence_manifest", {"max_bytes": 0}, "max_bytes must be at least 1."),
+                    ("evidence_manifest", {"max_bytes": 500000001}, "max_bytes must be at most 500000000."),
+                    ("evidence_secret_scan", {"max_bytes": 50000001}, "max_bytes must be at most 50000000."),
+                    ("workspace_read", {"path": "notes/too-large.md", "limit": 1000001}, "limit must be at most 1000000."),
+                    ("workspace_search", {"query": "unit", "limit": 1001}, "limit must be at most 1000."),
+                    ("process_log", {"id": 1, "limit": 200001}, "limit must be at most 200000."),
+                    ("wait_process", {"id": 1, "timeout": 301}, "timeout must be at most 300."),
+                    ("run_command", {"timeout": 601}, "timeout must be at most 600."),
+                    ("nmap_scan", {"target": "app.example.test", "timeout": 301}, "timeout must be at most 300."),
+                    ("ffuf_scan", {"url": "https://app.example.test/FUZZ", "rate": 51}, "rate must be at most 50."),
                     ("run_command", {"execute": "maybe"}, "execute must be a boolean."),
                     ("workspace_write", {"path": ["notes/bad-string.md"], "content": "bad"}, "path must be a string."),
                     ("scope_check", {"target": {"host": "app.example.test"}}, "target must be a string."),
@@ -478,6 +489,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
+                    rejected_ceiling = confirm_runtime.registry.run("list_findings", {"limit": 5001})
                     rejected_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "nope"})
                     rejected_blank_required_scalar = confirm_runtime.registry.run("schema_number_echo", {"threshold": ""})
                     accepted_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "2.5"})
@@ -497,6 +509,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected.message, "limit must be an integer.")
                     self.assertEqual(rejected_bound.status, "error")
                     self.assertEqual(rejected_bound.message, "limit must be at least 1.")
+                    self.assertEqual(rejected_ceiling.status, "error")
+                    self.assertEqual(rejected_ceiling.message, "limit must be at most 5000.")
                     self.assertEqual(rejected_number.status, "error")
                     self.assertEqual(rejected_number.message, "threshold must be a number.")
                     self.assertEqual(rejected_blank_required_scalar.status, "error")

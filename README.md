@@ -617,6 +617,7 @@ schema_returned=True
 plugin_loaded_and_executed=True
 tool_schema_integer_validation_ok=True
 tool_schema_integer_bounds_validation_ok=True
+tool_schema_resource_ceiling_ok=True
 tool_schema_boolean_validation_ok=True
 tool_schema_string_validation_ok=True
 tool_schema_number_validation_ok=True

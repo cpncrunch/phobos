@@ -346,10 +346,19 @@ def main(argv: list[str] | None = None) -> int:
         invalid_tool_integer = runtime.registry.run("list_findings", {"limit": "not-an-int"})
         valid_tool_integer = runtime.registry.run("list_findings", {"limit": "2"})
         invalid_tool_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
+        invalid_tool_integer_ceiling = runtime.registry.run("list_findings", {"limit": 5001})
+        invalid_tool_timeline_ceiling = runtime.registry.run("evidence_timeline", {"limit": 501})
+        invalid_tool_log_ceiling = runtime.registry.run("process_log", {"id": 1, "limit": 200001})
+        invalid_tool_wait_ceiling = runtime.registry.run("wait_process", {"id": 1, "timeout": 301})
+        invalid_tool_command_timeout_ceiling = runtime.registry.run("run_command", {"timeout": 601})
+        invalid_tool_scanner_timeout_ceiling = runtime.registry.run("nmap_scan", {"target": "app.example.test", "timeout": 301})
+        invalid_tool_manifest_bytes_ceiling = runtime.registry.run("evidence_manifest", {"max_bytes": 500000001})
+        invalid_tool_text_bytes_ceiling = runtime.registry.run("evidence_secret_scan", {"max_bytes": 50000001})
         integer_bound_approvals_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
         runtime.registry.confirm_tools.add("list_findings")
         try:
             invalid_confirm_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
+            invalid_confirm_integer_ceiling = runtime.registry.run("list_findings", {"limit": 5001})
         finally:
             runtime.registry.confirm_tools.discard("list_findings")
         integer_bound_approvals_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
@@ -357,7 +366,16 @@ def main(argv: list[str] | None = None) -> int:
             "invalid": invalid_tool_integer.to_dict(),
             "valid": valid_tool_integer.to_dict(),
             "invalid_bound": invalid_tool_integer_bound.to_dict(),
+            "invalid_ceiling": invalid_tool_integer_ceiling.to_dict(),
+            "invalid_timeline_ceiling": invalid_tool_timeline_ceiling.to_dict(),
+            "invalid_log_ceiling": invalid_tool_log_ceiling.to_dict(),
+            "invalid_wait_ceiling": invalid_tool_wait_ceiling.to_dict(),
+            "invalid_command_timeout_ceiling": invalid_tool_command_timeout_ceiling.to_dict(),
+            "invalid_scanner_timeout_ceiling": invalid_tool_scanner_timeout_ceiling.to_dict(),
+            "invalid_manifest_bytes_ceiling": invalid_tool_manifest_bytes_ceiling.to_dict(),
+            "invalid_text_bytes_ceiling": invalid_tool_text_bytes_ceiling.to_dict(),
             "invalid_confirm_bound": invalid_confirm_integer_bound.to_dict(),
+            "invalid_confirm_ceiling": invalid_confirm_integer_ceiling.to_dict(),
             "approvals_before": integer_bound_approvals_before,
             "approvals_after": integer_bound_approvals_after,
         }
@@ -374,6 +392,28 @@ def main(argv: list[str] | None = None) -> int:
             and invalid_tool_integer_bound.message == "limit must be at least 1."
             and invalid_confirm_integer_bound.status == "error"
             and invalid_confirm_integer_bound.message == "limit must be at least 1."
+            and integer_bound_approvals_before == integer_bound_approvals_after
+            and "Traceback" not in json.dumps(integer_validation_payload)
+        )
+        checks["tool_schema_resource_ceiling_ok"] = (
+            invalid_tool_integer_ceiling.status == "error"
+            and invalid_tool_integer_ceiling.message == "limit must be at most 5000."
+            and invalid_tool_timeline_ceiling.status == "error"
+            and invalid_tool_timeline_ceiling.message == "limit must be at most 500."
+            and invalid_tool_log_ceiling.status == "error"
+            and invalid_tool_log_ceiling.message == "limit must be at most 200000."
+            and invalid_tool_wait_ceiling.status == "error"
+            and invalid_tool_wait_ceiling.message == "timeout must be at most 300."
+            and invalid_tool_command_timeout_ceiling.status == "error"
+            and invalid_tool_command_timeout_ceiling.message == "timeout must be at most 600."
+            and invalid_tool_scanner_timeout_ceiling.status == "error"
+            and invalid_tool_scanner_timeout_ceiling.message == "timeout must be at most 300."
+            and invalid_tool_manifest_bytes_ceiling.status == "error"
+            and invalid_tool_manifest_bytes_ceiling.message == "max_bytes must be at most 500000000."
+            and invalid_tool_text_bytes_ceiling.status == "error"
+            and invalid_tool_text_bytes_ceiling.message == "max_bytes must be at most 50000000."
+            and invalid_confirm_integer_ceiling.status == "error"
+            and invalid_confirm_integer_ceiling.message == "limit must be at most 5000."
             and integer_bound_approvals_before == integer_bound_approvals_after
             and "Traceback" not in json.dumps(integer_validation_payload)
         )
