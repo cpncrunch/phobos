@@ -198,6 +198,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
                     ("run_command", {"execute": "maybe"}, "execute must be a boolean."),
+                    ("workspace_write", {"path": ["notes/bad-string.md"], "content": "bad"}, "path must be a string."),
+                    ("scope_check", {"target": {"host": "app.example.test"}}, "target must be a string."),
                     ("workspace_write", {"path": "notes/bad.md", "content": "bad", "append": "sometimes"}, "append must be a boolean."),
                     ("create_finding", {"title": "Bad enum finding", "status": "client-ready"}, "status must be one of: draft, needs-evidence, confirmed, resolved, accepted-risk, false-positive."),
                     ("evidence_timeline", {"order": "sideways"}, "order must be one of: desc, asc, newest, newest-first, oldest, oldest-first."),
@@ -255,6 +257,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
+                    rejected_string = confirm_runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
                     rejected_enum = confirm_runtime.registry.run("add_task", {"content": "queued enum task", "status": "sideways"})
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
@@ -262,6 +265,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected.message, "limit must be an integer.")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
+                    self.assertEqual(rejected_string.status, "error")
+                    self.assertEqual(rejected_string.message, "path must be a string.")
                     self.assertEqual(rejected_required.status, "error")
                     self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(rejected_enum.status, "error")

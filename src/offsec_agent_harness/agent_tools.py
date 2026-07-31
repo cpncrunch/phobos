@@ -146,8 +146,8 @@ class OffSecToolRegistry:
         missing-key errors, or queued approval replay.  The registry owns the
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
         integer/boolean strings, normalize schema-declared enum aliases, and reject
-        ambiguous, out-of-set, or missing required values with clean operator
-        errors before policy confirm queues are created.
+        ambiguous, out-of-set, missing required, or non-string string-typed values
+        with clean operator errors before policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -161,9 +161,16 @@ class OffSecToolRegistry:
             if not isinstance(arg_schema, dict):
                 continue
             arg_type = arg_schema.get("type")
+            enum_values = arg_schema.get("enum")
             if arg_name not in validated or validated.get(arg_name) in (None, ""):
                 continue
             raw_value = validated.get(arg_name)
+            if isinstance(enum_values, list) and enum_values:
+                parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
+                if not ok:
+                    return validated, ToolResult("error", f"{arg_name} must be one of: {_schema_enum_error_values(enum_values)}.")
+                validated[arg_name] = parsed_enum
+                continue
             if arg_type == "integer":
                 if raw_value is None or isinstance(raw_value, bool):
                     return validated, ToolResult("error", f"{arg_name} must be an integer.")
@@ -178,12 +185,10 @@ class OffSecToolRegistry:
                     return validated, ToolResult("error", f"{arg_name} must be a boolean.")
                 validated[arg_name] = parsed
                 continue
-            enum_values = arg_schema.get("enum")
-            if isinstance(enum_values, list) and enum_values:
-                parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
-                if not ok:
-                    return validated, ToolResult("error", f"{arg_name} must be one of: {_schema_enum_error_values(enum_values)}.")
-                validated[arg_name] = parsed_enum
+            if arg_type == "string":
+                if not isinstance(raw_value, str) and not arg_schema.get("x-allow-non-string", False):
+                    return validated, ToolResult("error", f"{arg_name} must be a string.")
+                continue
         if isinstance(required, list):
             for arg_name in required:
                 if not isinstance(arg_name, str):
@@ -238,8 +243,8 @@ class OffSecToolRegistry:
         self.register_tool("ffuf_scan", self.ffuf_scan, _spec("ffuf_scan", "ROE-gated ffuf-style content discovery wrapper with conservative rate limits and structured evidence.", {"url": _string("In-scope URL containing FUZZ or base URL where /FUZZ is appended."), "wordlist": _string("Wordlist path required for execution."), "rate": {"type": "integer"}, "stdout": _string("Optional captured JSON output to parse without executing."), "input_file": _string("Optional output file to parse without executing."), "execute": {"type": "boolean"}, "timeout": {"type": "integer"}}, ["url"]))
         self.register_tool("list_tool_runs", self.list_tool_runs, _spec("list_tool_runs", "List structured wrapper runs and their parsed evidence artifacts.", {"limit": {"type": "integer"}, "tool_name": _string("Optional wrapper tool name filter.")}, []))
         self.register_tool("get_tool_run", self.get_tool_run, _spec("get_tool_run", "Get one structured wrapper run by id.", {"id": {"type": "integer"}}, ["id"]))
-        self.register_tool("create_finding", self.create_finding, _spec("create_finding", "Create a finding lifecycle record linked to evidence/tool runs.", {"title": _string("Finding title."), "severity": _string_enum("Informational/Low/Medium/High/Critical.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("draft/needs-evidence/confirmed/resolved/accepted-risk/false-positive.", _FINDING_STATUS_VALUES), "description": _string("Technical description."), "impact": _string("Impact statement."), "recommendation": _string("Remediation guidance."), "tool_run_ids": _string("Comma-separated structured tool run IDs to link."), "evidence": _string("Additional evidence refs as JSON/list/text."), "tags": _string("Comma-separated tags.")}, ["title"]))
-        self.register_tool("update_finding", self.update_finding, _spec("update_finding", "Update a finding lifecycle record and optionally append evidence.", {"id": {"type": "integer"}, "title": _string("Optional title."), "severity": _string_enum("Optional severity.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("Optional status.", _FINDING_STATUS_VALUES), "description": _string("Optional description."), "impact": _string("Optional impact."), "recommendation": _string("Optional recommendation."), "tool_run_ids": _string("Additional linked tool run IDs."), "evidence": _string("Replacement or appended evidence refs."), "append_evidence": {"type": "boolean"}, "tags": _string("Optional tags.")}, ["id"]))
+        self.register_tool("create_finding", self.create_finding, _spec("create_finding", "Create a finding lifecycle record linked to evidence/tool runs.", {"title": _string("Finding title."), "severity": _string_enum("Informational/Low/Medium/High/Critical.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("draft/needs-evidence/confirmed/resolved/accepted-risk/false-positive.", _FINDING_STATUS_VALUES), "description": _string("Technical description."), "impact": _string("Impact statement."), "recommendation": _string("Remediation guidance."), "tool_run_ids": _string("Comma-separated structured tool run IDs to link.", allow_non_string=True), "evidence": _string("Additional evidence refs as JSON/list/text.", allow_non_string=True), "tags": _string("Comma-separated tags.")}, ["title"]))
+        self.register_tool("update_finding", self.update_finding, _spec("update_finding", "Update a finding lifecycle record and optionally append evidence.", {"id": {"type": "integer"}, "title": _string("Optional title."), "severity": _string_enum("Optional severity.", _FINDING_SEVERITY_VALUES, _FINDING_SEVERITY_ALIASES), "status": _string_enum("Optional status.", _FINDING_STATUS_VALUES), "description": _string("Optional description."), "impact": _string("Optional impact."), "recommendation": _string("Optional recommendation."), "tool_run_ids": _string("Additional linked tool run IDs.", allow_non_string=True), "evidence": _string("Replacement or appended evidence refs.", allow_non_string=True), "append_evidence": {"type": "boolean"}, "tags": _string("Optional tags.")}, ["id"]))
         self.register_tool("list_findings", self.list_findings, _spec("list_findings", "List finding lifecycle records.", {"status": _string_enum("draft/needs-evidence/confirmed/resolved/accepted-risk/false-positive/all; default all.", _FINDING_LIST_STATUS_VALUES), "limit": {"type": "integer"}}, []))
         self.register_tool("get_finding", self.get_finding, _spec("get_finding", "Get one finding lifecycle record by id.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("finding_export", self.finding_export, _spec("finding_export", "Export a stored finding lifecycle record to report-ready Markdown.", {"id": {"type": "integer"}, "out": _string("Optional output path; relative paths go under agent/findings.")}, ["id"]))
@@ -277,7 +282,7 @@ class OffSecToolRegistry:
         self.register_tool("disable_job", self.disable_job, _spec("disable_job", "Disable a current-session scheduled job without deleting audit history.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due current-session jobs from tool-only context; runtime executes them.", {}))
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
-        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts."), "roles": _string("Comma roles when tasks is omitted."), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
+        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts.", allow_non_string=True), "roles": _string("Comma roles when tasks is omitted.", allow_non_string=True), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": {"type": "integer"}}, []))
         self.register_tool("get_delegation", self.get_delegation, _spec("get_delegation", "Get one current-session delegation batch by id, including child-session metadata and artifact paths.", {"id": {"type": "integer"}}, ["id"]))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
@@ -4778,8 +4783,11 @@ def _truthy_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _string(description: str) -> dict[str, str]:
-    return {"type": "string", "description": description}
+def _string(description: str, *, allow_non_string: bool = False) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "string", "description": description}
+    if allow_non_string:
+        schema["x-allow-non-string"] = True
+    return schema
 
 
 def _string_enum(description: str, values: tuple[str, ...], aliases: dict[str, str] | None = None) -> dict[str, Any]:

@@ -236,6 +236,33 @@ def main(argv: list[str] | None = None) -> int:
             and boolean_workspace_text == "new-tail"
             and "Traceback" not in json.dumps(boolean_validation_payload)
         )
+        invalid_tool_string = runtime.registry.run("workspace_write", {"path": ["notes/schema-string.md"], "content": "bad"})
+        valid_tool_string = runtime.registry.run("workspace_write", {"path": "notes/schema-string.md", "content": "string-ok"})
+        string_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("workspace_write")
+        try:
+            invalid_confirm_string = runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
+        finally:
+            runtime.registry.confirm_tools.discard("workspace_write")
+        string_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        string_validation_payload = {
+            "invalid": invalid_tool_string.to_dict(),
+            "valid": valid_tool_string.to_dict(),
+            "invalid_confirm_tool": invalid_confirm_string.to_dict(),
+            "approvals_before": string_approval_count_before,
+            "approvals_after": string_approval_count_after,
+        }
+        write("tool-schema-string-validation.json", json.dumps(string_validation_payload, indent=2))
+        checks["tool_schema_string_validation_ok"] = (
+            invalid_tool_string.status == "error"
+            and invalid_tool_string.message == "path must be a string."
+            and valid_tool_string.status == "ok"
+            and invalid_confirm_string.status == "error"
+            and invalid_confirm_string.message == "path must be a string."
+            and string_approval_count_before == string_approval_count_after
+            and (runtime.registry.workspace_root / "notes" / "schema-string.md").read_text(encoding="utf-8") == "string-ok"
+            and "Traceback" not in json.dumps(string_validation_payload)
+        )
         missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
         approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
         runtime.registry.confirm_tools.add("workspace_write")
