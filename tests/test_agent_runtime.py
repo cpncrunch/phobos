@@ -193,6 +193,43 @@ class FakeToolCallGuardrailAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeToolCallOperatorApprovalReplayAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-operator-approval-replay"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = (
+                "python -c \"from pathlib import Path; "
+                f"Path({str(self.marker)!r}).write_text('native-approval-replayed', encoding='utf-8')\" "
+                "# curl -X POST https://app.example.test/api/native-approval-replay"
+            )
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "fake model proposed a confirm-gated command that needs direct operator approval before execution",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native operator approval replay boundary",
+                                "command": command,
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "state-changing-looking native plan must queue, then execute only after explicit /approve",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeToolCallLoopApprovalStopAdapter(BaseModelAdapter):
     provider = "fake-tool-call-loop-approval-stop"
 
@@ -2671,6 +2708,72 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(pending[0]["tool_name"], "run_command")
                 self.assertFalse(confirm_marker.exists())
                 self.assertFalse(block_marker.exists())
+            finally:
+                runtime.close()
+
+    def test_native_confirm_plan_requires_direct_operator_approve_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Operator Approval Replay",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "native-approval-replay.txt"
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-approval-replay",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeToolCallOperatorApprovalReplayAdapter(marker),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true execute=true prompt="native approval replay token=approval-replay-secret"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual(plan_payload["tool_calls"][0]["tool"], "run_command")
+                self.assertTrue(plan_payload["tool_calls"][0]["args"]["execute"])
+                self.assertEqual(plan_payload["tool_calls"][0]["validation"].get("guardrail_status"), "confirm")
+                preview = plan_payload["tool_calls"][0]["validation"].get("guardrail_preview", {})
+                self.assertTrue(preview.get("no_target_activity"))
+                self.assertFalse(preview.get("approval_queued"))
+                self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                self.assertFalse(marker.exists())
+
+                applied = runtime.handle_message('/auto apply=true model=true execute=true prompt="native approval replay token=approval-replay-secret"')
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(apply_payload["mode"], "applied")
+                self.assertEqual(apply_payload["results"][0]["result"]["status"], "needs_approval")
+                ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual(ledger[0]["execution_state"], "queued_for_approval")
+                self.assertTrue(ledger[0]["approval_queued"])
+                self.assertFalse(ledger[0]["actual_command_or_process_activity"])
+                self.assertFalse(ledger[0]["safe_to_claim_command_executed"])
+                approval_id = int(ledger[0]["approval_id"])
+                pending = runtime.store.list_approvals(runtime.session_id, status="pending")
+                self.assertEqual([row["id"] for row in pending], [approval_id])
+                self.assertFalse(marker.exists())
+
+                transcript = Path(apply_payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(apply_payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("queued_for_approval", transcript)
+                self.assertIn("actual_command_or_process_activity=`False`", transcript)
+                self.assertNotIn("approval-replay-secret", planned + applied + transcript)
+
+                detail_before = runtime.handle_message(f"/approval id={approval_id}")
+                self.assertIn("native operator approval replay boundary", detail_before)
+                approved = runtime.handle_message(f"/approve id={approval_id}")
+                self.assertIn("[executed]", approved)
+                self.assertEqual(marker.read_text(encoding="utf-8"), "native-approval-replayed")
+                approval_row = runtime.store.get_approval(approval_id, session_id=runtime.session_id)
+                self.assertIsNotNone(approval_row)
+                self.assertEqual((approval_row or {}).get("status"), "approved_executed")
+                detail_after = runtime.handle_message(f"/approval id={approval_id}")
+                self.assertIn("approved_executed", detail_after)
+                self.assertNotIn("approval-replay-secret", detail_before + approved + detail_after)
             finally:
                 runtime.close()
 

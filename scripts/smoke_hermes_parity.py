@@ -198,6 +198,43 @@ class SmokeToolCallGuardrailAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallOperatorApprovalReplayAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-operator-approval-replay"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = (
+                "python -c \"from pathlib import Path; "
+                f"Path({str(self.marker)!r}).write_text('native-approval-replayed', encoding='utf-8')\" "
+                "# curl -X POST https://app.example.test/api/native-approval-replay"
+            )
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=json.dumps({
+                    "summary": "smoke model queued a confirm-gated command for direct operator replay approval",
+                    "tool_calls": [
+                        {
+                            "tool": "run_command",
+                            "args": {
+                                "target": "app.example.test",
+                                "purpose": "native operator approval replay smoke",
+                                "command": command,
+                                "execute": True,
+                                "timeout": "5",
+                            },
+                            "reason": "native confirm-level plans must execute only after an explicit /approve command",
+                        }
+                    ],
+                    "warnings": [],
+                }),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-feedback"
 
@@ -1669,6 +1706,79 @@ def main(argv: list[str] | None = None) -> int:
             and not any(item.get("safe_to_claim_command_executed") for item in guardrail_loop_ledger)
             and not native_confirm_marker.exists()
             and not native_block_marker.exists()
+        )
+
+        approval_replay_marker = root / "native-approval-replay.txt"
+        approval_replay_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-approval-replay.db"),
+                session_name="native-tool-approval-replay-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallOperatorApprovalReplayAdapter(approval_replay_marker),
+        )
+        try:
+            approval_replay_plan = approval_replay_runtime.handle_message('/auto model=true execute=true prompt="native approval replay token=approval-replay-smoke-secret"')
+            approval_replay_plan_payload = json.loads(approval_replay_plan.split("\n", 1)[1])
+            approval_replay_plan_pending = approval_replay_runtime.store.list_approvals(approval_replay_runtime.session_id, status="pending")
+            approval_replay_apply = approval_replay_runtime.handle_message('/auto apply=true model=true execute=true prompt="native approval replay token=approval-replay-smoke-secret"')
+            approval_replay_apply_payload = json.loads(approval_replay_apply.split("\n", 1)[1])
+            approval_replay_ledger = approval_replay_apply_payload.get("execution_ledger", []) if isinstance(approval_replay_apply_payload.get("execution_ledger"), list) else []
+            approval_replay_approval_id = int(approval_replay_ledger[0].get("approval_id", 0) or 0) if approval_replay_ledger else 0
+            approval_replay_pending = approval_replay_runtime.store.list_approvals(approval_replay_runtime.session_id, status="pending")
+            approval_replay_artifacts = approval_replay_apply_payload.get("artifacts", {}) if isinstance(approval_replay_apply_payload.get("artifacts"), dict) else {}
+            approval_replay_json_path = Path(approval_replay_artifacts.get("json", ""))
+            approval_replay_md_path = Path(approval_replay_artifacts.get("markdown", ""))
+            approval_replay_transcript = ""
+            if approval_replay_json_path.is_file():
+                approval_replay_transcript += approval_replay_json_path.read_text(encoding="utf-8")
+            if approval_replay_md_path.is_file():
+                approval_replay_transcript += approval_replay_md_path.read_text(encoding="utf-8")
+            approval_replay_detail_before = approval_replay_runtime.handle_message(f"/approval id={approval_replay_approval_id}") if approval_replay_approval_id else ""
+            approval_replay_approved = approval_replay_runtime.handle_message(f"/approve id={approval_replay_approval_id}") if approval_replay_approval_id else ""
+            approval_replay_detail_after = approval_replay_runtime.handle_message(f"/approval id={approval_replay_approval_id}") if approval_replay_approval_id else ""
+            approval_replay_row = approval_replay_runtime.store.get_approval(approval_replay_approval_id, session_id=approval_replay_runtime.session_id) if approval_replay_approval_id else None
+            write("native-tool-operator-approval-replay.json", json.dumps({
+                "plan": approval_replay_plan_payload,
+                "apply": approval_replay_apply_payload,
+                "detail_before": approval_replay_detail_before,
+                "approved": approval_replay_approved,
+                "detail_after": approval_replay_detail_after,
+                "marker_exists": approval_replay_marker.exists(),
+                "approval_status": (approval_replay_row or {}).get("status"),
+            }, indent=2, sort_keys=True))
+        finally:
+            approval_replay_runtime.close()
+        approval_replay_plan_calls = approval_replay_plan_payload.get("tool_calls", []) if isinstance(approval_replay_plan_payload.get("tool_calls"), list) else []
+        approval_replay_blob = json.dumps({
+            "plan": approval_replay_plan_payload,
+            "apply": approval_replay_apply_payload,
+            "detail_before": approval_replay_detail_before,
+            "approved": approval_replay_approved,
+            "detail_after": approval_replay_detail_after,
+            "transcript": approval_replay_transcript,
+        }, sort_keys=True)
+        checks["native_tool_call_operator_approval_replay_ok"] = (
+            approval_replay_plan_payload.get("mode") == "plan_only"
+            and approval_replay_plan_calls[0].get("validation", {}).get("guardrail_status") == "confirm"
+            and approval_replay_plan_calls[0].get("validation", {}).get("guardrail_preview", {}).get("no_target_activity") is True
+            and approval_replay_plan_calls[0].get("validation", {}).get("guardrail_preview", {}).get("approval_queued") is False
+            and not approval_replay_plan_pending
+            and approval_replay_apply_payload.get("mode") == "applied"
+            and approval_replay_apply_payload.get("results", [{}])[0].get("result", {}).get("status") == "needs_approval"
+            and approval_replay_ledger[0].get("execution_state") == "queued_for_approval"
+            and approval_replay_ledger[0].get("approval_queued") is True
+            and approval_replay_ledger[0].get("actual_command_or_process_activity") is False
+            and len(approval_replay_pending) == 1
+            and (approval_replay_row or {}).get("status") == "approved_executed"
+            and "[executed]" in approval_replay_approved
+            and approval_replay_marker.exists()
+            and approval_replay_marker.read_text(encoding="utf-8") == "native-approval-replayed"
+            and "queued_for_approval" in approval_replay_transcript
+            and "actual_command_or_process_activity=`False`" in approval_replay_transcript
+            and "approved_executed" in approval_replay_detail_after
+            and "approval-replay-smoke-secret" not in approval_replay_blob
         )
 
         approval_action_marker = root / "native-approval-action-should-not-run.txt"
