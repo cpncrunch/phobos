@@ -372,6 +372,33 @@ class FakeToolCallTerminalNoToolAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class FakeToolCallDuplicatePlanAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-duplicate-plan"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "fake model repeated the same native tool call",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "duplicate-loop-marker", "value": "native duplicate loop ran once"},
+                        "reason": "repeated safe local call should stop the loop before re-dispatch",
+                    }
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "fake-tool-call-approval-action"
 
@@ -3317,6 +3344,51 @@ class AgentRuntimeTests(unittest.TestCase):
                 recalled = runtime.handle_message('/recall query=terminal-stop-marker')
                 self.assertIn("model ran exactly once", recalled)
                 self.assertNotIn("terminal-secret", response + recalled)
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_stops_duplicate_plans_without_second_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Duplicate Plan Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallDuplicatePlanAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-duplicate-plan",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native duplicate loop token=duplicate-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "duplicate_plan")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(payload.get("feedback_history_entries"), 1)
+                self.assertEqual(len(adapter.prompts), 2)
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(len(ledger), 1)
+                self.assertEqual(ledger[0]["execution_state"], "completed_without_command_execution")
+                self.assertFalse(ledger[0]["actual_command_or_process_activity"])
+                duplicate_step = payload["steps"][-1]
+                self.assertEqual(duplicate_step["mode"], "stopped_duplicate_plan")
+                self.assertTrue(duplicate_step["no_tools_executed"])
+                self.assertEqual(duplicate_step["execution_ledger_delta"], [])
+                self.assertEqual(duplicate_step["duplicate_tool_call_count"], 1)
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Duplicate plan stop", transcript)
+                self.assertNotIn("duplicate-secret", response + transcript)
+                recalled = runtime.handle_message('/recall query=duplicate-loop-marker')
+                self.assertIn("native duplicate loop ran once", recalled)
+                self.assertNotIn("duplicate-secret", recalled)
             finally:
                 runtime.close()
 

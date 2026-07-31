@@ -762,7 +762,14 @@ class OffSecAgentRuntime:
             signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
             if all(signature in seen for signature in signatures):
                 stop_reason = "duplicate_plan"
-                loop_results.append(_redact_runtime_value({"step": step, "mode": "stopped_duplicate_plan", "plan": plan.to_dict()}))
+                loop_results.append(_redact_runtime_value({
+                    "step": step,
+                    "mode": "stopped_duplicate_plan",
+                    "plan": plan.to_dict(),
+                    "duplicate_tool_call_count": len(signatures),
+                    "no_tools_executed": True,
+                    "execution_ledger_delta": [],
+                }))
                 break
             for signature in signatures:
                 seen.add(signature)
@@ -1023,6 +1030,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "max_auto_steps": int(config.max_auto_steps),
             "plan_only_default": True,
             "execution_requires_operator_execute_true": True,
+            "duplicate_plan_stop_enforced": True,
             "approval_control_tools_hidden_from_model": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
             "execution_capable_tools": sorted(_EXECUTION_CAPABLE_TOOLS),
             "target_affecting_tools": sorted(_TARGET_AFFECTING_PLANNED_TOOLS),
@@ -1722,6 +1730,11 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         summary = str(plan.get("summary") or "").strip()
         if summary:
             lines.extend([f"Plan summary: {summary}", ""])
+        if step.get("mode") == "stopped_duplicate_plan":
+            lines.extend([
+                f"Duplicate plan stop: {step.get('duplicate_tool_call_count', 0)} repeated call(s); no tools were dispatched for this step.",
+                "",
+            ])
         raw_calls = plan.get("tool_calls")
         calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
         if calls:

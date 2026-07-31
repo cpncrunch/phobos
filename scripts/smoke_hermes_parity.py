@@ -323,6 +323,29 @@ class SmokeToolCallTerminalNoToolAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class SmokeToolCallDuplicatePlanAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-duplicate-plan"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "smoke model repeated a native tool call",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-duplicate-stop", "value": "native duplicate stop ran once"}, "reason": "duplicate tool calls must stop before second dispatch"}
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class SmokeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-approval-action"
 
@@ -1649,6 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
+            and native_status_data.get("duplicate_plan_stop_enforced") is True
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -2216,11 +2240,38 @@ def main(argv: list[str] | None = None) -> int:
             write("native-tool-terminal-no-tool-loop.txt", terminal_loop)
         finally:
             terminal_runtime.close()
+
+        duplicate_adapter = SmokeToolCallDuplicatePlanAdapter()
+        duplicate_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-duplicate-plan-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=duplicate_adapter,
+        )
+        try:
+            duplicate_loop = duplicate_runtime.handle_message('/auto-loop model=true steps=4 prompt="remember native duplicate loop token=duplicate-stop-smoke-secret"')
+            duplicate_payload = json.loads(duplicate_loop.split("\n", 1)[1])
+            duplicate_recall = duplicate_runtime.handle_message('/recall query=native-duplicate-stop')
+            duplicate_transcript = ""
+            duplicate_artifacts = duplicate_payload.get("artifacts", {}) if isinstance(duplicate_payload.get("artifacts"), dict) else {}
+            for path_value in [duplicate_artifacts.get("json"), duplicate_artifacts.get("markdown")]:
+                if path_value:
+                    duplicate_transcript += Path(str(path_value)).read_text(encoding="utf-8")
+            write("native-tool-duplicate-plan-loop.txt", duplicate_loop)
+            write("native-tool-duplicate-plan-transcript.txt", duplicate_transcript)
+        finally:
+            duplicate_runtime.close()
         terminal_steps = terminal_payload.get("steps", []) if isinstance(terminal_payload.get("steps"), list) else []
         terminal_no_plan = terminal_steps[-1] if terminal_steps and isinstance(terminal_steps[-1], dict) else {}
         terminal_plan = terminal_no_plan.get("plan") if isinstance(terminal_no_plan.get("plan"), dict) else {}
         terminal_metadata = terminal_plan.get("metadata") if isinstance(terminal_plan.get("metadata"), dict) else {}
         terminal_ledger = terminal_payload.get("execution_ledger", []) if isinstance(terminal_payload.get("execution_ledger"), list) else []
+        duplicate_steps = duplicate_payload.get("steps", []) if isinstance(duplicate_payload.get("steps"), list) else []
+        duplicate_stop_step = duplicate_steps[-1] if duplicate_steps and isinstance(duplicate_steps[-1], dict) else {}
+        duplicate_ledger = duplicate_payload.get("execution_ledger", []) if isinstance(duplicate_payload.get("execution_ledger"), list) else []
         checks["native_tool_call_terminal_no_tool_stop_ok"] = (
             terminal_payload.get("stop_reason") == "no_tool_calls"
             and terminal_payload.get("steps_executed") == 1
@@ -2234,6 +2285,22 @@ def main(argv: list[str] | None = None) -> int:
             and terminal_metadata.get("deterministic_fallback_suppressed") is True
             and "native terminal no-tool stop ran once" in terminal_recall
             and "terminal-stop-smoke-secret" not in json.dumps(terminal_payload) + terminal_recall
+        )
+        checks["native_tool_call_duplicate_loop_stop_ok"] = (
+            duplicate_payload.get("stop_reason") == "duplicate_plan"
+            and duplicate_payload.get("steps_executed") == 1
+            and duplicate_payload.get("feedback_history_entries") == 1
+            and len(duplicate_adapter.prompts) == 2
+            and len(duplicate_ledger) == 1
+            and duplicate_ledger[0].get("execution_state") == "completed_without_command_execution"
+            and duplicate_ledger[0].get("actual_command_or_process_activity") is False
+            and duplicate_stop_step.get("mode") == "stopped_duplicate_plan"
+            and duplicate_stop_step.get("no_tools_executed") is True
+            and duplicate_stop_step.get("execution_ledger_delta") == []
+            and duplicate_stop_step.get("duplicate_tool_call_count") == 1
+            and "native duplicate stop ran once" in duplicate_recall
+            and "Duplicate plan stop" in duplicate_transcript
+            and "duplicate-stop-smoke-secret" not in json.dumps(duplicate_payload) + duplicate_recall + duplicate_transcript
         )
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"
