@@ -454,7 +454,30 @@ class OffSecAgentRuntime:
         if not apply:
             payload["mode"] = "plan_only"
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
-            return "Auto plan (no tools executed):\n" + json.dumps(payload, indent=2)
+            payload["results"] = []
+            payload["execution_ledger"] = []
+            payload["transcript_artifact_written"] = False
+            payload["secret_values_redacted"] = True
+            payload["no_tools_executed"] = True
+            try:
+                artifacts = _write_auto_plan_artifacts(self.registry.harness.store.root, payload)
+                payload["artifacts"] = artifacts
+                payload["transcript_artifact_written"] = True
+            except Exception as exc:  # transcript failure must not create execution claims
+                payload["artifact_error"] = redact_secrets(str(exc)) or "auto-plan preview artifact write failed"
+            self.store.audit(
+                self.session_id,
+                "auto_plan_preview",
+                {
+                    "prompt_preview": redact_secrets(str(plan.prompt or "")[:200]),
+                    "tool_count": len(plan.tool_calls),
+                    "rejected_tool_count": len(plan.rejected_tool_calls),
+                    "transcript_artifact_written": payload.get("transcript_artifact_written", False),
+                    "artifacts": payload.get("artifacts", {}),
+                    "no_tools_executed": True,
+                },
+            )
+            return "Auto plan (no tools executed):\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
         results = []
         execution_ledger = []
         for call in plan.tool_calls:
@@ -1301,7 +1324,7 @@ def _redact_runtime_value(value: Any) -> Any:
 
 
 def _write_auto_plan_artifacts(evidence_root: Path, payload: dict[str, Any]) -> dict[str, str]:
-    """Persist a redacted one-shot native /auto application transcript."""
+    """Persist a redacted one-shot native /auto plan or application transcript."""
 
     root = evidence_root.resolve(strict=False)
     out_dir = (evidence_root / "agent" / "auto-plans").resolve(strict=False)

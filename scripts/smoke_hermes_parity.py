@@ -1077,12 +1077,21 @@ def main(argv: list[str] | None = None) -> int:
             adapter=SmokeToolCallValidationAdapter(),
         )
         try:
-            native_plan = model_tool_runtime.handle_message('/auto model=true prompt="mixed native tool call plan"')
+            native_plan = model_tool_runtime.handle_message('/auto model=true prompt="mixed native tool call plan token=native-plan-secret"')
             native_plan_payload = json.loads(native_plan.split("\n", 1)[1])
+            native_plan_artifacts = native_plan_payload.get("artifacts", {}) if isinstance(native_plan_payload.get("artifacts"), dict) else {}
+            native_plan_json_path = Path(native_plan_artifacts.get("json", ""))
+            native_plan_md_path = Path(native_plan_artifacts.get("markdown", ""))
+            native_plan_transcript = ""
+            if native_plan_json_path.is_file():
+                native_plan_transcript += native_plan_json_path.read_text(encoding="utf-8")
+            if native_plan_md_path.is_file():
+                native_plan_transcript += native_plan_md_path.read_text(encoding="utf-8")
             pending_native_approvals_after_plan = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
             plan_audit_events = [row["event"] for row in model_tool_runtime.store.list_audit(model_tool_runtime.session_id, limit=20)]
-            native_apply = model_tool_runtime.handle_message('/auto apply=true model=true prompt="mixed native tool call plan"')
+            native_apply = model_tool_runtime.handle_message('/auto apply=true model=true prompt="mixed native tool call plan token=native-plan-secret"')
             write("native-tool-call-plan.txt", native_plan)
+            write("native-tool-call-plan-transcript.txt", native_plan_transcript)
             write("native-tool-call-apply.txt", native_apply)
             native_apply_payload = json.loads(native_apply.split("\n", 1)[1])
             native_apply_ledger = native_apply_payload.get("execution_ledger", []) if isinstance(native_apply_payload.get("execution_ledger"), list) else []
@@ -1102,6 +1111,19 @@ def main(argv: list[str] | None = None) -> int:
             and native_apply_payload.get("mode") == "applied"
             and "dry_run" in [item.get("result", {}).get("status") for item in native_apply_payload.get("results", [])]
             and not pending_native_approvals_after_apply
+        )
+        checks["native_tool_call_plan_transcript_ok"] = (
+            native_plan_payload.get("mode") == "plan_only"
+            and native_plan_payload.get("transcript_artifact_written") is True
+            and native_plan_payload.get("no_tools_executed") is True
+            and native_plan_payload.get("execution_ledger") == []
+            and native_plan_json_path.is_file()
+            and native_plan_md_path.is_file()
+            and "Phobos Native Tool-Calling Auto Plan" in native_plan_transcript
+            and "Mode: `plan_only`" in native_plan_transcript
+            and "No registry results were recorded" in native_plan_transcript
+            and "auto_plan_preview" in plan_audit_events
+            and "native-plan-secret" not in native_plan + native_plan_transcript + json.dumps(plan_audit_events)
         )
 
         native_allowed_marker = root / "native-allowed-execution-ran.txt"

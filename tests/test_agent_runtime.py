@@ -2069,9 +2069,22 @@ class AgentRuntimeTests(unittest.TestCase):
                 adapter=FakeToolCallValidationAdapter(),
             )
             try:
-                planned = runtime.handle_message('/auto model=true prompt="mixed fake model plan"')
+                planned = runtime.handle_message('/auto model=true prompt="mixed fake model plan token=plan-secret"')
                 payload = json.loads(planned.split("\n", 1)[1])
                 self.assertEqual(payload["mode"], "plan_only")
+                self.assertTrue(payload["transcript_artifact_written"])
+                self.assertTrue(payload["no_tools_executed"])
+                self.assertEqual(payload["execution_ledger"], [])
+                plan_artifacts = payload.get("artifacts", {})
+                plan_json_path = Path(plan_artifacts.get("json", ""))
+                plan_md_path = Path(plan_artifacts.get("markdown", ""))
+                self.assertTrue(plan_json_path.exists())
+                self.assertTrue(plan_md_path.exists())
+                plan_transcript = plan_json_path.read_text(encoding="utf-8") + plan_md_path.read_text(encoding="utf-8")
+                self.assertIn("Phobos Native Tool-Calling Auto Plan", plan_transcript)
+                self.assertIn("Mode: `plan_only`", plan_transcript)
+                self.assertIn("No registry results were recorded", plan_transcript)
+                self.assertNotIn("plan-secret", planned + plan_transcript)
                 self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["list_tasks", "run_command"])
                 self.assertEqual(payload["tool_calls"][0]["args"]["limit"], 2)
                 self.assertTrue(payload["tool_calls"][0]["validation"]["schema_validated"])
@@ -2080,10 +2093,12 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("Unknown tool: missing_tool", rejected_blob)
                 self.assertIn("value is required", rejected_blob)
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+                audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
+                self.assertIn("auto_plan_preview", audit_events)
                 raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT event FROM audit_log").fetchall())
                 self.assertNotIn("tool_call", raw_audit)
 
-                applied = runtime.handle_message('/auto apply=true model=true prompt="mixed fake model plan"')
+                applied = runtime.handle_message('/auto apply=true model=true prompt="mixed fake model plan token=plan-secret"')
                 applied_payload = json.loads(applied.split("\n", 1)[1])
                 self.assertEqual(applied_payload["mode"], "applied")
                 result_statuses = [item["result"]["status"] for item in applied_payload["results"]]
