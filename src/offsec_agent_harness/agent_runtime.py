@@ -601,7 +601,11 @@ class OffSecAgentRuntime:
                         prompt=prompt,
                         summary="Model planner failed after tool feedback; native loop stopped before deterministic re-planning.",
                         warnings=[f"Model planner failed after tool feedback; deterministic fallback suppressed: {safe_error}"],
-                        metadata={"deterministic_fallback_suppressed": True},
+                        metadata={
+                            "deterministic_fallback_suppressed": True,
+                            "model_planner_failed": True,
+                            "model_error": safe_error,
+                        },
                     ),
                     allow_command_execution=allow_command_execution,
                 )
@@ -756,8 +760,19 @@ class OffSecAgentRuntime:
                 allow_deterministic_model_fallback=not feedback_history,
             )
             if not plan.tool_calls:
-                stop_reason = "no_tool_calls"
-                loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
+                metadata = plan.metadata if isinstance(plan.metadata, dict) else {}
+                if use_model and metadata.get("model_planner_failed") is True:
+                    stop_reason = "model_error"
+                    loop_results.append(_redact_runtime_value({
+                        "step": step,
+                        "mode": "model_error",
+                        "plan": plan.to_dict(),
+                        "no_tools_executed": True,
+                        "execution_ledger_delta": [],
+                    }))
+                else:
+                    stop_reason = "no_tool_calls"
+                    loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
                 break
             signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
             if all(signature in seen for signature in signatures):
@@ -826,6 +841,10 @@ class OffSecAgentRuntime:
         if stop_reason == "max_steps":
             payload["next_step"] = (
                 "Max-step budget reached. Review the redacted auto-loop transcript before rerunning with a larger explicit steps budget."
+            )
+        elif stop_reason == "model_error":
+            payload["next_step"] = (
+                "Model tool planning failed after prior tool feedback. Review the redacted transcript and provider health before rerunning."
             )
         try:
             artifacts = _write_auto_loop_artifacts(self.registry.harness.store.root, payload)
@@ -1038,6 +1057,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "execution_requires_operator_execute_true": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
+            "model_error_stop_enforced": True,
             "approval_control_tools_hidden_from_model": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
             "execution_capable_tools": sorted(_EXECUTION_CAPABLE_TOOLS),
             "target_affecting_tools": sorted(_TARGET_AFFECTING_PLANNED_TOOLS),
@@ -1314,6 +1334,9 @@ def _render_auto_loop_chat(response: str) -> str:
     lines = [f"Native tool loop stopped: `{stop_reason}` after {executed}/{requested} applied step(s)."]
     if data.get("max_steps_budget_exhausted") is True:
         lines.append("- Max-step budget exhausted; review the redacted transcript before rerunning with a larger explicit steps budget.")
+    next_step = str(data.get("next_step") or "").strip()
+    if next_step and data.get("max_steps_budget_exhausted") is not True:
+        lines.append(f"- Next: {next_step}")
     if planned:
         lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
     if counts:

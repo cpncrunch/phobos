@@ -296,6 +296,31 @@ class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class SmokeToolCallModelErrorAfterFeedbackAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-model-error-after-feedback"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            raise RuntimeError("smoke native planner failed after feedback token=model-error-smoke-secret")
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "smoke first step writes a local marker before model error stop",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-model-error-stop", "value": "native model error first step ran"}, "reason": "prove model-error stops do not trigger deterministic re-planning after feedback"}
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class SmokeToolCallTerminalNoToolAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-terminal-no-tool"
 
@@ -1698,6 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("execution_requires_operator_execute_true") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
+            and native_status_data.get("model_error_stop_enforced") is True
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -2248,6 +2274,37 @@ def main(argv: list[str] | None = None) -> int:
                 feedback_gateway.shutdown()
             feedback_runtime.close()
 
+        model_error_adapter = SmokeToolCallModelErrorAfterFeedbackAdapter()
+        model_error_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-model-error-stop.db"),
+                session_name="native-tool-model-error-stop-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=model_error_adapter,
+        )
+        try:
+            model_error_loop = model_error_runtime.handle_message('/auto-loop model=true steps=4 prompt="native model error stop token=model-error-smoke-secret"')
+            model_error_payload = json.loads(model_error_loop.split("\n", 1)[1])
+            model_error_ledger = model_error_payload.get("execution_ledger", []) if isinstance(model_error_payload.get("execution_ledger"), list) else []
+            model_error_steps = model_error_payload.get("steps", []) if isinstance(model_error_payload.get("steps"), list) else []
+            model_error_step = model_error_steps[-1] if model_error_steps and isinstance(model_error_steps[-1], dict) else {}
+            model_error_plan = model_error_step.get("plan") if isinstance(model_error_step.get("plan"), dict) else {}
+            model_error_metadata = model_error_plan.get("metadata") if isinstance(model_error_plan.get("metadata"), dict) else {}
+            model_error_recall = model_error_runtime.handle_message('/recall query=native-model-error-stop')
+            model_error_artifacts = model_error_payload.get("artifacts", {}) if isinstance(model_error_payload.get("artifacts"), dict) else {}
+            model_error_transcript = ""
+            for path_value in [model_error_artifacts.get("json"), model_error_artifacts.get("markdown")]:
+                if path_value:
+                    model_error_transcript += Path(str(path_value)).read_text(encoding="utf-8")
+            model_error_chat = model_error_runtime.render_chat_response(model_error_loop, message='/auto-loop model=true prompt="native model error stop"', platform="discord")
+            write("native-tool-model-error-stop.txt", model_error_loop)
+            write("native-tool-model-error-stop-transcript.txt", model_error_transcript)
+            write("native-tool-model-error-stop-chat.txt", model_error_chat)
+        finally:
+            model_error_runtime.close()
+
         terminal_adapter = SmokeToolCallTerminalNoToolAdapter()
         terminal_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
@@ -2367,12 +2424,34 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("step") for item in max_steps_ledger] == [1, 2]
             and not any(item.get("actual_command_or_process_activity") for item in max_steps_ledger)
             and max_steps_status.get("data", {}).get("native_tool_calling", {}).get("max_steps_budget_stop_enforced") is True
+            and max_steps_status.get("data", {}).get("native_tool_calling", {}).get("model_error_stop_enforced") is True
             and "Stop reason: `max_steps`" in max_steps_transcript
             and "Max-step budget exhausted: `True`" in max_steps_transcript
             and "Max-step budget reached" in max_steps_transcript
             and "Max-step budget exhausted" in max_steps_chat
             and "actual_command_or_process_activity=0" in max_steps_chat
             and "maxsteps-smoke-secret" not in json.dumps(max_steps_payload) + max_steps_transcript + max_steps_chat
+        )
+        checks["native_tool_call_model_error_stop_ok"] = (
+            model_error_payload.get("stop_reason") == "model_error"
+            and model_error_payload.get("steps_executed") == 1
+            and model_error_payload.get("feedback_history_entries") == 1
+            and len(model_error_adapter.prompts) == 2
+            and model_error_step.get("mode") == "model_error"
+            and model_error_step.get("no_tools_executed") is True
+            and model_error_step.get("execution_ledger_delta") == []
+            and model_error_metadata.get("model_planner_failed") is True
+            and model_error_metadata.get("deterministic_fallback_suppressed") is True
+            and "token=<REDACTED>" in json.dumps(model_error_metadata)
+            and len(model_error_ledger) == 1
+            and model_error_ledger[0].get("execution_state") == "completed_without_command_execution"
+            and model_error_ledger[0].get("actual_command_or_process_activity") is False
+            and "native model error first step ran" in model_error_recall
+            and "Stop reason: `model_error`" in model_error_transcript
+            and "Model planner failed after tool feedback" in model_error_transcript
+            and "Native tool loop stopped: `model_error`" in model_error_chat
+            and "Model tool planning failed" in model_error_chat
+            and "model-error-smoke-secret" not in json.dumps(model_error_payload) + model_error_transcript + model_error_chat + model_error_recall
         )
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"

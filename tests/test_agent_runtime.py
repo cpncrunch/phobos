@@ -341,6 +341,35 @@ class FakeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class FakeToolCallModelErrorAfterFeedbackAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-model-error-after-feedback"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            raise RuntimeError("native planner failed after feedback token=model-error-secret")
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "first step writes a local marker before the model fails on feedback",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-model-error-stop", "value": "native model error first step ran"},
+                        "reason": "safe local marker proves the loop stops after a later model error without replaying tools",
+                    }
+                ],
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallTerminalNoToolAdapter(BaseModelAdapter):
     provider = "fake-tool-call-terminal-no-tool"
 
@@ -3333,6 +3362,60 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_auto_loop_stops_on_model_error_after_feedback_without_deterministic_replan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Model Error Stop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallModelErrorAfterFeedbackAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-model-error-stop",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native model error stop token=model-error-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "model_error")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(payload.get("feedback_history_entries"), 1)
+                self.assertEqual(len(adapter.prompts), 2)
+                self.assertIn("Model tool planning failed", payload.get("next_step", ""))
+                steps = payload.get("steps", [])
+                self.assertEqual(steps[-1].get("mode"), "model_error")
+                self.assertTrue(steps[-1].get("no_tools_executed"))
+                self.assertEqual(steps[-1].get("execution_ledger_delta"), [])
+                model_error_plan = steps[-1].get("plan", {})
+                metadata = model_error_plan.get("metadata", {})
+                self.assertTrue(metadata.get("model_planner_failed"), metadata)
+                self.assertTrue(metadata.get("deterministic_fallback_suppressed"), metadata)
+                self.assertIn("token=<REDACTED>", json.dumps(metadata))
+                self.assertIn("deterministic fallback suppressed", json.dumps(model_error_plan.get("warnings", [])))
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(len(ledger), 1)
+                self.assertEqual(ledger[0]["execution_state"], "completed_without_command_execution")
+                self.assertFalse(ledger[0]["actual_command_or_process_activity"])
+                recalled = runtime.handle_message('/recall query=native-model-error-stop')
+                self.assertIn("native model error first step ran", recalled)
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("Stop reason: `model_error`", transcript)
+                self.assertIn("Model planner failed after tool feedback", transcript)
+                chat = runtime.render_chat_response(response, message='/auto-loop model=true prompt="native model error stop"', platform="discord")
+                self.assertIn("Native tool loop stopped: `model_error`", chat)
+                self.assertIn("Model tool planning failed", chat)
+                self.assertNotIn("model-error-secret", response + transcript + chat + recalled)
+            finally:
+                runtime.close()
+
     def test_model_auto_loop_respects_terminal_no_tool_response_after_feedback(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3461,6 +3544,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual([step["mode"] for step in payload["steps"]], ["applied", "applied"])
                 status = runtime.registry.run("runtime_status", {})
                 self.assertTrue(status.data.get("native_tool_calling", {}).get("max_steps_budget_stop_enforced"), status.to_dict())
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("model_error_stop_enforced"), status.to_dict())
                 transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
                 self.assertIn("Stop reason: `max_steps`", transcript)
                 self.assertIn("Max-step budget exhausted: `True`", transcript)
@@ -3552,6 +3636,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(native_status.get("plan_only_default"), native_status)
                 self.assertTrue(native_status.get("execution_requires_operator_execute_true"), native_status)
                 self.assertTrue(native_status.get("max_steps_budget_stop_enforced"), native_status)
+                self.assertTrue(native_status.get("model_error_stop_enforced"), native_status)
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("run_command", native_status.get("execution_capable_tools", []))
