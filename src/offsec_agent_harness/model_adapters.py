@@ -346,6 +346,13 @@ def _message_content_text(content: Any) -> str:
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict):
+                block_type = str(item.get("type") or "").strip()
+                if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES | _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES:
+                    # Provider-side tool-call/result blocks are planner state,
+                    # not assistant summary text.  In particular, ``tool_result``
+                    # content may contain raw tool output from an upstream model
+                    # loop and must never be copied into Phobos plan summaries.
+                    continue
                 text = item.get("text") or item.get("content")
                 if isinstance(text, str):
                     parts.append(text)
@@ -432,7 +439,10 @@ def _parse_native_content_tool_blocks(
         if not isinstance(item, dict):
             continue
         block_type = str(item.get("type") or "").strip()
-        if block_type not in {"tool_use", "tool_call", "function_call"}:
+        if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
+            warnings.append("Native provider tool_result content ignored; Phobos only accepts model-requested tool calls at this boundary.")
+            continue
+        if block_type not in _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES:
             continue
         parsed, rejected_item, warning = _parse_native_content_tool_block(item, index=index, block_type=block_type)
         if warning:
@@ -475,6 +485,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     if not isinstance(item, dict):
         return None, {"tool": None, "reason": "Native tool call must be an object.", "args": {"value_type": type(item).__name__}}, "Native tool call was not an object; skipped."
     native_type = item.get("type")
+    if native_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
+        return None, None, "Native provider tool_result entry ignored; Phobos only accepts model-requested tool calls at this boundary."
     if native_type not in {None, "function", "tool_call", "tool_use"}:
         return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
     function = item.get("function")
@@ -496,6 +508,10 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label="native provider flat tool_call",
         )
     return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
+
+
+_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
+_NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {"tool_result", "function_result"}
 
 
 def _parse_native_function_call(

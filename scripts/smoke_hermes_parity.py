@@ -1993,6 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
             and "native-flat-secret" not in native_flat_plan + native_flat_apply + native_flat_recall + json.dumps(native_flat_plan_payload) + json.dumps(native_flat_apply_payload)
         )
 
+        native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
         native_edge_captured = {}
 
         class NativeOpenAIEdgeSmokeResponse:
@@ -2013,6 +2014,7 @@ def main(argv: list[str] | None = None) -> int:
                                     {"id": "edge_non_function", "type": "file_search", "function": {"name": "remember", "arguments": "{}"}},
                                     {"id": "edge_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=native-edge-secret}"}},
                                     {"id": "edge_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
+                                    {"id": "edge_tool_result", "type": "tool_result", "content": native_provider_result_marker},
                                     {
                                         "id": "edge_memory",
                                         "type": "function",
@@ -2062,6 +2064,7 @@ def main(argv: list[str] | None = None) -> int:
             native_edge_runtime.close()
         native_edge_calls = native_edge_plan_payload.get("tool_calls", []) if isinstance(native_edge_plan_payload.get("tool_calls"), list) else []
         native_edge_rejected = json.dumps(native_edge_plan_payload.get("rejected_tool_calls", []))
+        native_edge_warnings = json.dumps(native_edge_plan_payload.get("warnings", []))
         native_edge_metadata = native_edge_plan_payload.get("metadata", {}) if isinstance(native_edge_plan_payload.get("metadata"), dict) else {}
         checks["native_provider_tool_call_edge_cases_ok"] = (
             native_edge_plan_payload.get("mode") == "plan_only"
@@ -2110,7 +2113,7 @@ def main(argv: list[str] | None = None) -> int:
                                         "arguments": json.dumps({"status": "all", "limit": "1"}),
                                     },
                                     {"type": "tool_use", "id": "content_bad", "name": "remember", "input": ["not", "object"]},
-                                    {"type": "tool_result", "content": "ignored provider-side result block"},
+                                    {"type": "tool_result", "content": native_provider_result_marker},
                                 ],
                             }
                         }
@@ -2151,6 +2154,7 @@ def main(argv: list[str] | None = None) -> int:
             native_content_runtime.close()
         native_content_calls = native_content_plan_payload.get("tool_calls", []) if isinstance(native_content_plan_payload.get("tool_calls"), list) else []
         native_content_rejected = json.dumps(native_content_plan_payload.get("rejected_tool_calls", []))
+        native_content_warnings = json.dumps(native_content_plan_payload.get("warnings", []))
         native_content_metadata = native_content_plan_payload.get("metadata", {}) if isinstance(native_content_plan_payload.get("metadata"), dict) else {}
         checks["native_provider_content_block_tool_call_ok"] = (
             native_content_plan_payload.get("mode") == "plan_only"
@@ -2166,6 +2170,14 @@ def main(argv: list[str] | None = None) -> int:
             and native_content_block_captured.get("tool_choice") == "auto"
             and native_content_block_captured.get("tool_count", 0) > 0
             and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
+        )
+        checks["native_provider_tool_result_ignore_ok"] = (
+            "tool_result" in native_edge_warnings.lower()
+            and "tool_result" in native_content_warnings.lower()
+            and native_provider_result_marker not in native_edge_plan + native_edge_apply + native_edge_recall
+            and native_provider_result_marker not in native_content_plan + native_content_apply + native_content_recall
+            and native_provider_result_marker not in json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
+            and native_provider_result_marker not in json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
         )
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"

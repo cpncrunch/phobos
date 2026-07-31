@@ -2621,6 +2621,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"id": "call_non_function", "type": "file_search", "function": {"name": "remember", "arguments": "{}"}},
                                         {"id": "call_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=edge-secret}"}},
                                         {"id": "call_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
+                                        {"id": "call_tool_result", "type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
                                         {
                                             "id": "call_valid_memory",
                                             "type": "function",
@@ -2663,6 +2664,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("Only function tool calls are supported", rejected_blob)
                     self.assertIn("Native tool arguments were not valid JSON", rejected_blob)
                     self.assertIn("Native tool arguments must decode to a JSON object", rejected_blob)
+                    self.assertIn("tool_result", json.dumps(plan_payload.get("warnings", [])).lower())
+                    self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(plan_payload))
                     metadata = plan_payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
@@ -2814,7 +2817,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                             "arguments": json.dumps({"status": "all", "limit": "1"}),
                                         },
                                         {"type": "tool_use", "id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
-                                        {"type": "tool_result", "content": "ignored provider result block"},
+                                        {"type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
                                     ],
                                 }
                             }
@@ -2844,6 +2847,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("native content-block function_call", payload["tool_calls"][1]["reason"])
                     rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
                     self.assertIn("Native tool arguments must be a JSON object", rejected_blob)
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(payload))
                     metadata = payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
