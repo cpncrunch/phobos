@@ -148,9 +148,10 @@ class OffSecToolRegistry:
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
         integer/number/boolean strings, normalize schema-declared enum aliases, and reject
         ambiguous, out-of-set, missing required, blank required scalar, non-string
-        string-typed values, malformed collection values, and schema-declared
-        string/collection size-bound violations with clean operator errors before
-        policy confirm queues are created.
+        string-typed values, malformed collection values, schema-declared
+        string/collection size-bound violations, and closed-schema unexpected
+        arguments with clean operator errors before policy confirm queues are
+        created.
         """
 
         spec = self.tool_specs.get(name)
@@ -160,6 +161,10 @@ class OffSecToolRegistry:
         if not isinstance(properties, dict):
             return dict(args), None
         validated = dict(args)
+        if isinstance(schema, dict) and schema.get("additionalProperties") is False:
+            unexpected = _schema_unexpected_args(validated, properties)
+            if unexpected:
+                return validated, ToolResult("error", _schema_unexpected_args_message(unexpected))
         for arg_name, arg_schema in properties.items():
             if not isinstance(arg_schema, dict):
                 continue
@@ -4874,6 +4879,29 @@ def _schema_size_bound(value: Any) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+def _schema_unexpected_args(args: dict[str, Any], properties: dict[str, Any]) -> list[str]:
+    """Return non-internal args not declared by a closed object schema."""
+
+    expected = {str(key) for key in properties}
+    unexpected: list[str] = []
+    for key in args:
+        key_text = str(key)
+        if key_text.startswith("_"):
+            continue
+        if key_text not in expected:
+            unexpected.append(key_text)
+    return sorted(unexpected)
+
+
+def _schema_unexpected_args_message(unexpected: list[str]) -> str:
+    if len(unexpected) == 1:
+        return f"{unexpected[0]} is not an allowed argument."
+    preview = ", ".join(unexpected[:5])
+    if len(unexpected) > 5:
+        preview += ", ..."
+    return f"Unexpected arguments: {preview}."
 
 
 def _format_schema_count(noun: str, count: int) -> str:

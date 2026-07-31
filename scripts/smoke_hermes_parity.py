@@ -261,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         number_dispatches: list[dict[str, object]] = []
         collection_dispatches: list[dict[str, object]] = []
         size_dispatches: list[dict[str, object]] = []
+        closed_dispatches: list[dict[str, object]] = []
 
         def schema_number_echo(args: dict[str, object]) -> ToolResult:
             number_dispatches.append(dict(args))
@@ -273,6 +274,10 @@ def main(argv: list[str] | None = None) -> int:
         def schema_size_echo(args: dict[str, object]) -> ToolResult:
             size_dispatches.append(dict(args))
             return ToolResult("ok", "size ok", {"label": args.get("label"), "items": args.get("items"), "options": args.get("options")})
+
+        def schema_closed_echo(args: dict[str, object]) -> ToolResult:
+            closed_dispatches.append(dict(args))
+            return ToolResult("ok", "closed ok", {"label": args.get("label"), "args": dict(args)})
 
         runtime.registry.register_tool(
             "schema_number_echo",
@@ -320,6 +325,21 @@ def main(argv: list[str] | None = None) -> int:
                     },
                     "required": ["label", "items", "options"],
                     "additionalProperties": True,
+                },
+            },
+        )
+        runtime.registry.register_tool(
+            "schema_closed_echo",
+            schema_closed_echo,
+            {
+                "description": "Smoke-only JSON-schema closed-object validation boundary.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Closed-schema smoke label."},
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
                 },
             },
         )
@@ -553,6 +573,39 @@ def main(argv: list[str] | None = None) -> int:
             and size_approval_count_after == size_approval_count_before
             and size_dispatches == [{"label": "bounded", "items": ["one", "two"], "options": {"mode": "safe", "phase": "smoke"}}]
             and "Traceback" not in json.dumps(size_validation_payload)
+        )
+        invalid_closed_extra = runtime.registry.run("schema_closed_echo", {"label": "closed", "typo": "unexpected"})
+        invalid_closed_many = runtime.registry.run("schema_closed_echo", {"label": "closed", "alpha": 1, "zulu": 2})
+        valid_closed = runtime.registry.run("schema_closed_echo", {"label": "closed", "_policy_approved": True})
+        closed_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("schema_closed_echo")
+        try:
+            invalid_confirm_closed = runtime.registry.run("schema_closed_echo", {"label": "queued", "extra": "nope"})
+        finally:
+            runtime.registry.confirm_tools.discard("schema_closed_echo")
+        closed_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        closed_validation_payload = {
+            "invalid_extra": invalid_closed_extra.to_dict(),
+            "invalid_many": invalid_closed_many.to_dict(),
+            "valid": valid_closed.to_dict(),
+            "invalid_confirm": invalid_confirm_closed.to_dict(),
+            "approvals_before": closed_approval_count_before,
+            "approvals_after": closed_approval_count_after,
+            "dispatches": closed_dispatches,
+        }
+        write("tool-schema-additional-properties-validation.json", json.dumps(closed_validation_payload, indent=2))
+        checks["tool_schema_additional_properties_validation_ok"] = (
+            invalid_closed_extra.status == "error"
+            and invalid_closed_extra.message == "typo is not an allowed argument."
+            and invalid_closed_many.status == "error"
+            and invalid_closed_many.message == "Unexpected arguments: alpha, zulu."
+            and valid_closed.status == "ok"
+            and valid_closed.data.get("label") == "closed"
+            and invalid_confirm_closed.status == "error"
+            and invalid_confirm_closed.message == "extra is not an allowed argument."
+            and closed_approval_count_after == closed_approval_count_before
+            and closed_dispatches == [{"label": "closed", "_policy_approved": True}]
+            and "Traceback" not in json.dumps(closed_validation_payload)
         )
         missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
         approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
