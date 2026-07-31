@@ -259,10 +259,15 @@ def main(argv: list[str] | None = None) -> int:
         plugin = handle("plugin-echo", "/tool name=example_echo value=plugin-ok")
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
         number_dispatches: list[dict[str, object]] = []
+        collection_dispatches: list[dict[str, object]] = []
 
         def schema_number_echo(args: dict[str, object]) -> ToolResult:
             number_dispatches.append(dict(args))
             return ToolResult("ok", "number ok", {"threshold": args.get("threshold"), "threshold_type": type(args.get("threshold")).__name__})
+
+        def schema_collection_echo(args: dict[str, object]) -> ToolResult:
+            collection_dispatches.append(dict(args))
+            return ToolResult("ok", "collection ok", {"items": args.get("items"), "options": args.get("options")})
 
         runtime.registry.register_tool(
             "schema_number_echo",
@@ -276,6 +281,22 @@ def main(argv: list[str] | None = None) -> int:
                         "label": {"type": "string", "description": "Optional label."},
                     },
                     "required": ["threshold"],
+                    "additionalProperties": True,
+                },
+            },
+        )
+        runtime.registry.register_tool(
+            "schema_collection_echo",
+            schema_collection_echo,
+            {
+                "description": "Smoke-only JSON-schema array/object validation boundary.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "items": {"type": "array", "description": "Ordered smoke items."},
+                        "options": {"type": "object", "description": "Structured smoke options."},
+                    },
+                    "required": ["items"],
                     "additionalProperties": True,
                 },
             },
@@ -419,6 +440,48 @@ def main(argv: list[str] | None = None) -> int:
             and invalid_confirm_blank_number.message == "threshold is required."
             and number_approval_count_after == number_approval_count_before
             and "Traceback" not in json.dumps(number_validation_payload)
+        )
+        invalid_tool_array = runtime.registry.run("schema_collection_echo", {"items": "not-an-array"})
+        invalid_tool_object = runtime.registry.run("schema_collection_echo", {"items": [], "options": ["not-an-object"]})
+        blank_required_array = runtime.registry.run("schema_collection_echo", {"items": ""})
+        valid_tool_collection = runtime.registry.run("schema_collection_echo", {"items": ["alpha", "beta"], "options": {"mode": "safe"}})
+        collection_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("schema_collection_echo")
+        try:
+            invalid_confirm_array = runtime.registry.run("schema_collection_echo", {"items": "queued-string"})
+            invalid_confirm_object = runtime.registry.run("schema_collection_echo", {"items": [], "options": "queued-string"})
+        finally:
+            runtime.registry.confirm_tools.discard("schema_collection_echo")
+        collection_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        collection_validation_payload = {
+            "invalid_array": invalid_tool_array.to_dict(),
+            "invalid_object": invalid_tool_object.to_dict(),
+            "blank_required_array": blank_required_array.to_dict(),
+            "valid": valid_tool_collection.to_dict(),
+            "invalid_confirm_array": invalid_confirm_array.to_dict(),
+            "invalid_confirm_object": invalid_confirm_object.to_dict(),
+            "approvals_before": collection_approval_count_before,
+            "approvals_after": collection_approval_count_after,
+            "dispatches": collection_dispatches,
+        }
+        write("tool-schema-array-object-validation.json", json.dumps(collection_validation_payload, indent=2))
+        checks["tool_schema_array_object_validation_ok"] = (
+            invalid_tool_array.status == "error"
+            and invalid_tool_array.message == "items must be an array."
+            and invalid_tool_object.status == "error"
+            and invalid_tool_object.message == "options must be an object."
+            and blank_required_array.status == "error"
+            and blank_required_array.message == "items is required."
+            and valid_tool_collection.status == "ok"
+            and valid_tool_collection.data.get("items") == ["alpha", "beta"]
+            and valid_tool_collection.data.get("options") == {"mode": "safe"}
+            and invalid_confirm_array.status == "error"
+            and invalid_confirm_array.message == "items must be an array."
+            and invalid_confirm_object.status == "error"
+            and invalid_confirm_object.message == "options must be an object."
+            and collection_approval_count_before == collection_approval_count_after
+            and collection_dispatches == [{"items": ["alpha", "beta"], "options": {"mode": "safe"}}]
+            and "Traceback" not in json.dumps(collection_validation_payload)
         )
         missing_required_tool = runtime.registry.run("workspace_write", {"path": "notes/schema-required.md"})
         approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))

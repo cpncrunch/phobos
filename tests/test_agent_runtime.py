@@ -274,15 +274,20 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertIn("Invalid --config", completed.stderr or completed.stdout)
             self.assertNotIn("Traceback", completed.stderr + completed.stdout)
 
-    def test_tool_registry_validates_schema_scalar_args_before_dispatch_or_approval(self):
+    def test_tool_registry_validates_schema_args_before_dispatch_or_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, engagement = self.make_runtime(tmp)
             try:
                 number_dispatches: list[dict[str, object]] = []
+                collection_dispatches: list[dict[str, object]] = []
 
                 def schema_number_echo(args: dict[str, object]) -> ToolResult:
                     number_dispatches.append(dict(args))
                     return ToolResult("ok", "number ok", {"threshold": args.get("threshold"), "threshold_type": type(args.get("threshold")).__name__})
+
+                def schema_collection_echo(args: dict[str, object]) -> ToolResult:
+                    collection_dispatches.append(dict(args))
+                    return ToolResult("ok", "collection ok", {"items": args.get("items"), "options": args.get("options")})
 
                 number_tool_spec = {
                     "description": "Unit-only JSON-schema number validation boundary.",
@@ -296,11 +301,28 @@ class AgentRuntimeTests(unittest.TestCase):
                         "additionalProperties": True,
                     },
                 }
+                collection_tool_spec = {
+                    "description": "Unit-only JSON-schema array/object validation boundary.",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "items": {"type": "array", "description": "Ordered unit items."},
+                            "options": {"type": "object", "description": "Structured unit options."},
+                        },
+                        "required": ["items"],
+                        "additionalProperties": True,
+                    },
+                }
 
                 runtime.registry.register_tool(
                     "schema_number_echo",
                     schema_number_echo,
                     number_tool_spec,
+                )
+                runtime.registry.register_tool(
+                    "schema_collection_echo",
+                    schema_collection_echo,
+                    collection_tool_spec,
                 )
                 invalid_cases = [
                     ("get_job", {"id": "not-an-int"}, "id must be an integer."),
@@ -313,6 +335,9 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("schema_number_echo", {"threshold": "0.05"}, "threshold must be at least 0.1."),
                     ("schema_number_echo", {"threshold": 11}, "threshold must be at most 10."),
                     ("schema_number_echo", {"threshold": ""}, "threshold is required."),
+                    ("schema_collection_echo", {"items": "not-an-array"}, "items must be an array."),
+                    ("schema_collection_echo", {"items": [], "options": ["not-an-object"]}, "options must be an object."),
+                    ("schema_collection_echo", {"items": ""}, "items is required."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
                     ("list_findings", {"limit": 0}, "limit must be at least 1."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
@@ -340,12 +365,18 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(missing_required.message, "content is required.")
                 self.assertFalse((runtime.registry.workspace_root / "notes" / "missing-required.md").exists())
                 self.assertEqual(number_dispatches, [])
+                self.assertEqual(collection_dispatches, [])
 
                 valid_number = runtime.registry.run("schema_number_echo", {"threshold": "1.25", "label": "unit"})
+                valid_collection = runtime.registry.run("schema_collection_echo", {"items": ["alpha", "beta"], "options": {"mode": "safe"}})
                 self.assertEqual(valid_number.status, "ok", valid_number.to_dict())
                 self.assertEqual(valid_number.data["threshold"], 1.25)
                 self.assertEqual(valid_number.data["threshold_type"], "float")
                 self.assertEqual(number_dispatches, [{"threshold": 1.25, "label": "unit"}])
+                self.assertEqual(valid_collection.status, "ok", valid_collection.to_dict())
+                self.assertEqual(valid_collection.data["items"], ["alpha", "beta"])
+                self.assertEqual(valid_collection.data["options"], {"mode": "safe"})
+                self.assertEqual(collection_dispatches, [{"items": ["alpha", "beta"], "options": {"mode": "safe"}}])
 
                 valid_limit = runtime.registry.run("list_findings", {"limit": "2"})
                 self.assertEqual(valid_limit.status, "ok", valid_limit.to_dict())
@@ -377,17 +408,21 @@ class AgentRuntimeTests(unittest.TestCase):
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo"),
+                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo", "schema_collection_echo"),
                     )
                 )
                 try:
                     confirm_runtime.registry.register_tool("schema_number_echo", schema_number_echo, number_tool_spec)
+                    confirm_runtime.registry.register_tool("schema_collection_echo", schema_collection_echo, collection_tool_spec)
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
                     rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
                     rejected_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "nope"})
                     rejected_blank_required_scalar = confirm_runtime.registry.run("schema_number_echo", {"threshold": ""})
                     accepted_number = confirm_runtime.registry.run("schema_number_echo", {"threshold": "2.5"})
+                    rejected_array = confirm_runtime.registry.run("schema_collection_echo", {"items": "queued-string"})
+                    rejected_object = confirm_runtime.registry.run("schema_collection_echo", {"items": [], "options": "queued-string"})
+                    accepted_collection = confirm_runtime.registry.run("schema_collection_echo", {"items": ["queued"], "options": {"mode": "safe"}})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     rejected_string = confirm_runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
@@ -403,6 +438,12 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_blank_required_scalar.message, "threshold is required.")
                     self.assertEqual(accepted_number.status, "needs_approval", accepted_number.to_dict())
                     self.assertEqual(accepted_number.data.get("tool"), "schema_number_echo")
+                    self.assertEqual(rejected_array.status, "error")
+                    self.assertEqual(rejected_array.message, "items must be an array.")
+                    self.assertEqual(rejected_object.status, "error")
+                    self.assertEqual(rejected_object.message, "options must be an object.")
+                    self.assertEqual(accepted_collection.status, "needs_approval", accepted_collection.to_dict())
+                    self.assertEqual(accepted_collection.data.get("tool"), "schema_collection_echo")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(rejected_string.status, "error")
@@ -411,7 +452,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(rejected_enum.status, "error")
                     self.assertEqual(rejected_enum.message, "status must be one of: pending, in_progress, completed, cancelled.")
-                    self.assertEqual(after, before + 1)
+                    self.assertEqual(after, before + 2)
                 finally:
                     confirm_runtime.close()
             finally:

@@ -139,7 +139,7 @@ class OffSecToolRegistry:
         return result
 
     def _validated_tool_args(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
-        """Validate schema-declared scalar arguments before dispatch/approval.
+        """Validate schema-declared arguments before dispatch/approval.
 
         Tool handlers are still defensive, but malformed or incomplete
         operator-controlled schema fields should not fall through to Python
@@ -147,9 +147,9 @@ class OffSecToolRegistry:
         missing-key errors, or queued approval replay.  The registry owns the
         generic ``/tool`` and gateway dispatch boundary, so normalize safe
         integer/number/boolean strings, normalize schema-declared enum aliases, and reject
-        ambiguous, out-of-set, missing required, blank required scalar, or non-string
-        string-typed values with clean operator errors before policy confirm queues
-        are created.
+        ambiguous, out-of-set, missing required, blank required scalar, non-string
+        string-typed values, and malformed collection values with clean operator
+        errors before policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -209,6 +209,14 @@ class OffSecToolRegistry:
             if arg_type == "string":
                 if not isinstance(raw_value, str) and not arg_schema.get("x-allow-non-string", False):
                     return validated, ToolResult("error", f"{arg_name} must be a string.")
+                continue
+            if arg_type == "array":
+                if not isinstance(raw_value, list):
+                    return validated, ToolResult("error", f"{arg_name} must be an array.")
+                continue
+            if arg_type == "object":
+                if not isinstance(raw_value, dict):
+                    return validated, ToolResult("error", f"{arg_name} must be an object.")
                 continue
         if isinstance(required, list):
             for arg_name in required:
@@ -4797,7 +4805,7 @@ def _parse_schema_number(value: Any) -> tuple[float, bool]:
 
 
 def _blank_required_value_is_missing(arg_schema: Any) -> bool:
-    """Treat blank required scalar values as missing unless an empty string is intentional."""
+    """Treat blank required values as missing unless an empty string is intentional."""
 
     if not isinstance(arg_schema, dict):
         return True
@@ -4806,7 +4814,7 @@ def _blank_required_value_is_missing(arg_schema: Any) -> bool:
     arg_type = arg_schema.get("type")
     if isinstance(arg_schema.get("enum"), list):
         return True
-    return arg_type in {"integer", "number", "boolean"}
+    return arg_type in {"integer", "number", "boolean", "array", "object"}
 
 
 def _schema_enum_key(value: Any) -> str:

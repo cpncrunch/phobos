@@ -619,6 +619,9 @@ tool_schema_integer_validation_ok=True
 tool_schema_integer_bounds_validation_ok=True
 tool_schema_boolean_validation_ok=True
 tool_schema_string_validation_ok=True
+tool_schema_number_validation_ok=True
+tool_schema_blank_required_validation_ok=True
+tool_schema_array_object_validation_ok=True
 tool_schema_required_validation_ok=True
 tool_schema_enum_validation_ok=True
 scope_check_read_only_ok=True
@@ -695,7 +698,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=311
+artifact_count=313
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
