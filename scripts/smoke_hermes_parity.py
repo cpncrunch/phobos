@@ -1987,6 +1987,92 @@ def main(argv: list[str] | None = None) -> int:
             and "native-edge-secret" not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
         )
 
+        native_content_block_captured = {}
+
+        class NativeOpenAIContentBlockSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "native content-block smoke token=native-content-block-secret"},
+                                    {
+                                        "type": "tool_use",
+                                        "id": "content_memory",
+                                        "name": "remember",
+                                        "input": {"key": "native-content-block-smoke", "value": "content-block native tool call translated"},
+                                    },
+                                    {
+                                        "type": "function_call",
+                                        "name": "list_tasks",
+                                        "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                    },
+                                    {"type": "tool_use", "id": "content_bad", "name": "remember", "input": ["not", "object"]},
+                                    {"type": "tool_result", "content": "ignored provider-side result block"},
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_content_block_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_content_block_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_content_block_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIContentBlockSmokeResponse()
+
+        native_content_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-content-block.db"),
+                session_name="native-provider-content-block-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-content-block-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_content_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_content_block_urlopen
+            native_content_plan = native_content_runtime.handle_message('/auto model=true prompt="native content block smoke token=native-content-block-secret"')
+            native_content_plan_payload = json.loads(native_content_plan.split("\n", 1)[1])
+            native_content_apply = native_content_runtime.handle_message('/auto apply=true model=true prompt="native content block smoke token=native-content-block-secret"')
+            native_content_apply_payload = json.loads(native_content_apply.split("\n", 1)[1])
+            native_content_recall = native_content_runtime.handle_message('/recall query=native-content-block-smoke')
+            write("native-provider-content-block-tool-calls.json", json.dumps({
+                "plan": native_content_plan_payload,
+                "apply": native_content_apply_payload,
+                "captured": native_content_block_captured,
+                "recall": native_content_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_content_original_urlopen
+            native_content_runtime.close()
+        native_content_calls = native_content_plan_payload.get("tool_calls", []) if isinstance(native_content_plan_payload.get("tool_calls"), list) else []
+        native_content_rejected = json.dumps(native_content_plan_payload.get("rejected_tool_calls", []))
+        native_content_metadata = native_content_plan_payload.get("metadata", {}) if isinstance(native_content_plan_payload.get("metadata"), dict) else {}
+        checks["native_provider_content_block_tool_call_ok"] = (
+            native_content_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_content_calls] == ["remember", "list_tasks"]
+            and "native content-block tool_use" in native_content_calls[0].get("reason", "")
+            and "native content-block function_call" in native_content_calls[1].get("reason", "")
+            and "Native tool arguments must be a JSON object" in native_content_rejected
+            and native_content_metadata.get("native_tool_calls") is True
+            and native_content_metadata.get("native_tool_call_count") == 2
+            and int(native_content_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 1
+            and [item.get("result", {}).get("status") for item in native_content_apply_payload.get("results", [])] == ["ok", "ok"]
+            and "content-block native tool call translated" in native_content_recall
+            and native_content_block_captured.get("tool_choice") == "auto"
+            and native_content_block_captured.get("tool_count", 0) > 0
+            and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
+        )
+
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
         native_block_marker = root / "native-block-should-not-run.txt"
         guardrail_adapter = SmokeToolCallGuardrailAdapter(native_confirm_marker, native_block_marker)

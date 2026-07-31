@@ -356,7 +356,8 @@ def _message_content_text(content: Any) -> str:
 
 
 def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    content_text = _message_content_text(message.get("content", "")).strip()
+    content_value = message.get("content", "")
+    content_text = _message_content_text(content_value).strip()
     calls: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -370,6 +371,13 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
                 calls.append(parsed)
             if rejected_item:
                 rejected.append(rejected_item)
+    content_calls, content_rejected, content_warnings = _parse_native_content_tool_blocks(
+        content_value,
+        start_index=len(calls) + len(rejected) + 1,
+    )
+    calls.extend(content_calls)
+    rejected.extend(content_rejected)
+    warnings.extend(content_warnings)
     legacy_function = message.get("function_call")
     if isinstance(legacy_function, dict):
         parsed, rejected_item, warning = _parse_native_function_call(legacy_function, index=len(calls) + len(rejected) + 1, legacy=True)
@@ -401,6 +409,68 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
     }
 
 
+def _parse_native_content_tool_blocks(
+    content: Any,
+    *,
+    start_index: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Translate content-block tool-call variants into the common plan shape.
+
+    Some OpenAI-compatible shims and provider bridges surface native tool calls
+    inside ``message.content`` blocks rather than the top-level ``tool_calls``
+    array.  Treat these as planner proposals only: the runtime still performs
+    schema validation, runtime policy, ROE preview, and guarded dispatch later.
+    """
+
+    if not isinstance(content, list):
+        return [], [], []
+    calls: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    index = max(1, start_index)
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        block_type = str(item.get("type") or "").strip()
+        if block_type not in {"tool_use", "tool_call", "function_call"}:
+            continue
+        parsed, rejected_item, warning = _parse_native_content_tool_block(item, index=index, block_type=block_type)
+        if warning:
+            warnings.append(warning)
+        if parsed:
+            calls.append(parsed)
+        if rejected_item:
+            rejected.append(rejected_item)
+        index += 1
+    return calls, rejected, warnings
+
+
+def _parse_native_content_tool_block(
+    item: dict[str, Any],
+    *,
+    index: int,
+    block_type: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    function = item.get("function")
+    call_id = str(item.get("id") or "")
+    if isinstance(function, dict):
+        return _parse_native_function_call(
+            function,
+            index=index,
+            legacy=False,
+            call_id=call_id,
+            label=f"native content-block {block_type}",
+        )
+    arguments = item.get("input", item.get("arguments", {}))
+    return _parse_native_function_call(
+        {"name": item.get("name"), "arguments": arguments},
+        index=index,
+        legacy=False,
+        call_id=call_id,
+        label=f"native content-block {block_type}",
+    )
+
+
 def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     if not isinstance(item, dict):
         return None, {"tool": None, "reason": "Native tool call must be an object.", "args": {"value_type": type(item).__name__}}, "Native tool call was not an object; skipped."
@@ -418,6 +488,7 @@ def _parse_native_function_call(
     index: int,
     legacy: bool,
     call_id: str = "",
+    label: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     name = str(function.get("name") or "").strip()
     if not name:
@@ -425,7 +496,7 @@ def _parse_native_function_call(
     args, error = _parse_native_arguments(function.get("arguments"))
     if error:
         return None, {"tool": name, "reason": error, "args": {}}, f"Native arguments for {name} were invalid; skipped."
-    label = "legacy native function_call" if legacy else "native provider tool_call"
+    label = label or ("legacy native function_call" if legacy else "native provider tool_call")
     suffix = f" ({call_id})" if call_id else f" #{index}"
     return {"tool": name, "args": args, "reason": f"Model requested {label}{suffix}."}, None, None
 

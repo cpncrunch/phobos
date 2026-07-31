@@ -2683,6 +2683,91 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_content_block_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Content Block Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeContentBlockHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": [
+                                        {"type": "text", "text": "native content-block plan token=content-secret"},
+                                        {
+                                            "type": "tool_use",
+                                            "id": "toolu_memory",
+                                            "name": "remember",
+                                            "input": {"key": "native-content-block", "value": "content block native tool call accepted"},
+                                        },
+                                        {
+                                            "type": "function_call",
+                                            "name": "list_tasks",
+                                            "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                        },
+                                        {"type": "tool_use", "id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
+                                        {"type": "tool_result", "content": "ignored provider result block"},
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeContentBlockHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-content-blocks",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-content-blocks", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native content block token=content-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertIn("native content-block tool_use", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native content-block function_call", payload["tool_calls"][1]["reason"])
+                    rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
+                    self.assertIn("Native tool arguments must be a JSON object", rejected_blob)
+                    metadata = payload.get("metadata", {})
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 1)
+                    self.assertNotIn("content-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native content block token=content-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                recall = runtime.handle_message('/recall query=native-content-block')
+                self.assertIn("content block native tool call accepted", recall)
+                self.assertNotIn("content-secret", applied + recall)
+                self.assertTrue(captured_payloads)
+                self.assertIn("tools", captured_payloads[0])
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
