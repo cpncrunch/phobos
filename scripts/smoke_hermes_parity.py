@@ -1519,6 +1519,95 @@ def main(argv: list[str] | None = None) -> int:
             and "api_key" not in json.dumps(native_openai_response.raw).lower()
         )
 
+        native_edge_captured = {}
+
+        class NativeOpenAIEdgeSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native edge smoke token=native-edge-secret",
+                                "tool_calls": [
+                                    "not-an-object",
+                                    {"id": "edge_non_function", "type": "file_search", "function": {"name": "remember", "arguments": "{}"}},
+                                    {"id": "edge_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=native-edge-secret}"}},
+                                    {"id": "edge_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
+                                    {
+                                        "id": "edge_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-provider-edge", "value": "legacy/native edge accepted"}),
+                                        },
+                                    },
+                                ],
+                                "function_call": {"name": "list_tasks", "arguments": json.dumps({"status": "all", "limit": "1"})},
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_edge_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_edge_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_edge_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIEdgeSmokeResponse()
+
+        native_edge_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-edge.db"),
+                session_name="native-provider-edge-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-edge-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_edge_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_edge_urlopen
+            native_edge_plan = native_edge_runtime.handle_message('/auto model=true prompt="native provider edge smoke token=native-edge-secret"')
+            native_edge_plan_payload = json.loads(native_edge_plan.split("\n", 1)[1])
+            native_edge_apply = native_edge_runtime.handle_message('/auto apply=true model=true prompt="native provider edge smoke token=native-edge-secret"')
+            native_edge_apply_payload = json.loads(native_edge_apply.split("\n", 1)[1])
+            native_edge_recall = native_edge_runtime.handle_message('/recall query=native-provider-edge')
+            write("native-provider-tool-call-edge-cases.json", json.dumps({
+                "plan": native_edge_plan_payload,
+                "apply": native_edge_apply_payload,
+                "captured": native_edge_captured,
+                "recall": native_edge_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_edge_original_urlopen
+            native_edge_runtime.close()
+        native_edge_calls = native_edge_plan_payload.get("tool_calls", []) if isinstance(native_edge_plan_payload.get("tool_calls"), list) else []
+        native_edge_rejected = json.dumps(native_edge_plan_payload.get("rejected_tool_calls", []))
+        native_edge_metadata = native_edge_plan_payload.get("metadata", {}) if isinstance(native_edge_plan_payload.get("metadata"), dict) else {}
+        checks["native_provider_tool_call_edge_cases_ok"] = (
+            native_edge_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_edge_calls] == ["remember", "list_tasks"]
+            and "native provider tool_call" in native_edge_calls[0].get("reason", "")
+            and "legacy native function_call" in native_edge_calls[1].get("reason", "")
+            and "Native tool call must be an object" in native_edge_rejected
+            and "Only function tool calls are supported" in native_edge_rejected
+            and "Native tool arguments were not valid JSON" in native_edge_rejected
+            and "Native tool arguments must decode to a JSON object" in native_edge_rejected
+            and native_edge_metadata.get("native_tool_calls") is True
+            and native_edge_metadata.get("native_tool_call_count") == 2
+            and int(native_edge_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 4
+            and [item.get("result", {}).get("status") for item in native_edge_apply_payload.get("results", [])] == ["ok", "ok"]
+            and "legacy/native edge accepted" in native_edge_recall
+            and native_edge_captured.get("tool_choice") == "auto"
+            and native_edge_captured.get("tool_count", 0) > 0
+            and "native-edge-secret" not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
+        )
+
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
         native_block_marker = root / "native-block-should-not-run.txt"
         guardrail_adapter = SmokeToolCallGuardrailAdapter(native_confirm_marker, native_block_marker)

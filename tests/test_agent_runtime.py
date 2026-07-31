@@ -2340,6 +2340,98 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_tool_call_edge_cases_keep_rejected_calls_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Tool Call Edges",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeEdgeHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native provider edge response token=edge-secret",
+                                    "tool_calls": [
+                                        "not-an-object",
+                                        {"id": "call_non_function", "type": "file_search", "function": {"name": "remember", "arguments": "{}"}},
+                                        {"id": "call_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=edge-secret}"}},
+                                        {"id": "call_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
+                                        {
+                                            "id": "call_valid_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-edge", "value": "legacy/native edge case accepted"}),
+                                            },
+                                        },
+                                    ],
+                                    "function_call": {"name": "list_tasks", "arguments": json.dumps({"status": "all", "limit": "1"})},
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeEdgeHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-edge-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-edge-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native provider edge cases token=edge-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertIn("native provider tool_call", plan_payload["tool_calls"][0]["reason"])
+                    self.assertIn("legacy native function_call", plan_payload["tool_calls"][1]["reason"])
+                    self.assertTrue(plan_payload["tool_calls"][1]["validation"].get("schema_validated"))
+                    rejected_blob = json.dumps(plan_payload.get("rejected_tool_calls", []))
+                    self.assertIn("Native tool call must be an object", rejected_blob)
+                    self.assertIn("Only function tool calls are supported", rejected_blob)
+                    self.assertIn("Native tool arguments were not valid JSON", rejected_blob)
+                    self.assertIn("Native tool arguments must decode to a JSON object", rejected_blob)
+                    metadata = plan_payload.get("metadata", {})
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 4)
+                    self.assertNotIn("edge-secret", planned)
+                    self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native provider edge cases token=edge-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "ok"])
+                recall = runtime.handle_message('/recall query=native-edge')
+                self.assertIn("legacy/native edge case accepted", recall)
+                self.assertNotIn("edge-secret", applied + recall)
+                self.assertTrue(captured_payloads)
+                self.assertIn("tools", captured_payloads[0])
+                self.assertNotIn("approve", [item["function"]["name"] for item in captured_payloads[0].get("tools", [])])
+                self.assertNotIn("deny", [item["function"]["name"] for item in captured_payloads[0].get("tools", [])])
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
