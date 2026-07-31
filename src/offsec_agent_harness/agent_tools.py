@@ -59,6 +59,7 @@ _SCHEMA_WAIT_TIMEOUT_MAX = 300
 _SCHEMA_SCANNER_RATE_MAX = 50
 _SCHEMA_MANIFEST_MAX_BYTES = 500_000_000
 _SCHEMA_LOCAL_TEXT_MAX_BYTES = 50_000_000
+_ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 
 
 @dataclass(slots=True)
@@ -165,9 +166,9 @@ class OffSecToolRegistry:
         integer/number/boolean strings, normalize schema-declared enum aliases, and reject
         ambiguous, out-of-set, missing required, blank required scalar, non-string
         string-typed values, malformed collection values, schema-declared
-        string/collection size-bound violations, and closed-schema unexpected
-        arguments with clean operator errors before policy confirm queues are
-        created.
+        string/collection size-bound and string-pattern violations, and
+        closed-schema unexpected arguments with clean operator errors before
+        policy confirm queues are created.
         """
 
         spec = self.tool_specs.get(name)
@@ -186,9 +187,11 @@ class OffSecToolRegistry:
                 continue
             arg_type = arg_schema.get("type")
             enum_values = arg_schema.get("enum")
-            if arg_name not in validated or validated.get(arg_name) in (None, ""):
+            if arg_name not in validated or validated.get(arg_name) is None:
                 continue
             raw_value = validated.get(arg_name)
+            if raw_value == "" and _schema_blank_value_skips_validation(arg_schema):
+                continue
             if isinstance(enum_values, list) and enum_values:
                 parsed_enum, ok = _parse_schema_enum(raw_value, enum_values, arg_schema.get("x-aliases"))
                 if not ok:
@@ -238,6 +241,14 @@ class OffSecToolRegistry:
                         return validated, ToolResult("error", f"{arg_name} must be at least {_format_schema_count('character', min_length)}.")
                     if max_length is not None and len(raw_value) > max_length:
                         return validated, ToolResult("error", f"{arg_name} must be at most {_format_schema_count('character', max_length)}.")
+                    pattern = arg_schema.get("pattern")
+                    if isinstance(pattern, str) and pattern:
+                        try:
+                            matched = re.search(pattern, raw_value) is not None
+                        except re.error:
+                            return validated, ToolResult("error", f"{arg_name} has an invalid schema pattern.")
+                        if not matched:
+                            return validated, ToolResult("error", _schema_pattern_error_message(arg_name, arg_schema))
                 continue
             if arg_type == "array":
                 if not isinstance(raw_value, list):
@@ -364,8 +375,8 @@ class OffSecToolRegistry:
         self.register_tool("media_import", self.media_import, _spec("media_import", "Copy an operator-supplied local media/artifact file into evidence with hash metadata.", {"path": _string("Source file path."), "kind": _string_enum("image/audio/voice/video/file; inferred when omitted.", _MEDIA_KIND_VALUES)}, ["path"]))
         self.register_tool("media_list", self.media_list, _spec("media_list", "List imported media/artifact files for this session.", {"limit": _integer("Maximum rows to return.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}, []))
         self.register_tool("media_get", self.media_get, _spec("media_get", "Get one current-session media/artifact metadata record by id without reading file contents.", {"id": _integer("Current-session media id.", minimum=1)}, ["id"]))
-        self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _string("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
-        self.register_tool("sealed_import", self.sealed_import, _spec("sealed_import", "Decrypt a sealed session snapshot and import its handoff data; no commands are executed.", {"path": _string("Sealed snapshot path."), "passphrase_env": _string("Environment variable containing passphrase."), "merge_memories": {"type": "boolean"}}, ["path", "passphrase_env"]))
+        self.register_tool("sealed_export", self.sealed_export, _spec("sealed_export", "Create an authenticated encrypted portable snapshot from a session handoff or pack.", {"passphrase_env": _env_var_name("Environment variable containing passphrase."), "out": _string("Optional output .sealed.json path."), "include_pack": {"type": "boolean"}}, ["passphrase_env"]))
+        self.register_tool("sealed_import", self.sealed_import, _spec("sealed_import", "Decrypt a sealed session snapshot and import its handoff data; no commands are executed.", {"path": _string("Sealed snapshot path."), "passphrase_env": _env_var_name("Environment variable containing passphrase."), "merge_memories": {"type": "boolean"}}, ["path", "passphrase_env"]))
         self.register_tool("list_approvals", self.list_approvals, _spec("list_approvals", "List approvals for the current session with redacted arguments/decisions.", {"status": _string("Approval status; default pending; use all for resolved approvals too."), "limit": _integer("Maximum rows to return.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}))
         self.register_tool("get_approval", self.get_approval, _spec("get_approval", "Return one current-session approval with redacted arguments, decision, and replay result.", {"id": _integer("Current-session approval id.", minimum=1)}, ["id"]))
         self.register_tool("tool_schemas", self.tool_schemas, _spec("tool_schemas", "Return JSON-style schemas for available tools.", {"name": _string("Optional tool name.")}))
@@ -4858,6 +4869,30 @@ def _blank_required_value_is_missing(arg_schema: Any) -> bool:
     return arg_type in {"integer", "number", "boolean", "array", "object"}
 
 
+def _schema_blank_value_skips_validation(arg_schema: Any) -> bool:
+    """Return True when an optional blank string should keep legacy handler behavior."""
+
+    if not isinstance(arg_schema, dict):
+        return True
+    if isinstance(arg_schema.get("enum"), list):
+        return False
+    if arg_schema.get("type") == "string":
+        has_min_length = _schema_size_bound(arg_schema.get("minLength")) is not None
+        has_pattern = isinstance(arg_schema.get("pattern"), str) and bool(arg_schema.get("pattern"))
+        return not (has_min_length or has_pattern)
+    return True
+
+
+def _schema_pattern_error_message(arg_name: str, arg_schema: dict[str, Any]) -> str:
+    custom = arg_schema.get("x-pattern-error") or arg_schema.get("patternDescription")
+    if isinstance(custom, str) and custom.strip():
+        text = custom.strip().rstrip(".")
+        if text.lower().startswith(arg_name.lower()):
+            return f"{text}."
+        return f"{arg_name} {text}."
+    return f"{arg_name} must match the required pattern."
+
+
 def _schema_enum_key(value: Any) -> str:
     return str(value).strip().lower().replace("_", "-")
 
@@ -4949,11 +4984,31 @@ def _integer(description: str, *, minimum: int | None = None, maximum: int | Non
     return schema
 
 
-def _string(description: str, *, allow_non_string: bool = False) -> dict[str, Any]:
+def _string(
+    description: str,
+    *,
+    allow_non_string: bool = False,
+    min_length: int | None = None,
+    max_length: int | None = None,
+    pattern: str | None = None,
+    pattern_error: str | None = None,
+) -> dict[str, Any]:
     schema: dict[str, Any] = {"type": "string", "description": description}
     if allow_non_string:
         schema["x-allow-non-string"] = True
+    if min_length is not None:
+        schema["minLength"] = min_length
+    if max_length is not None:
+        schema["maxLength"] = max_length
+    if pattern is not None:
+        schema["pattern"] = pattern
+    if pattern_error:
+        schema["x-pattern-error"] = pattern_error
     return schema
+
+
+def _env_var_name(description: str) -> dict[str, Any]:
+    return _string(description, min_length=1, max_length=128, pattern=_ENV_VAR_NAME_PATTERN, pattern_error="must be an environment variable name")
 
 
 def _string_enum(description: str, values: tuple[str, ...], aliases: dict[str, str] | None = None) -> dict[str, Any]:

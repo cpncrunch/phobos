@@ -281,6 +281,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 number_dispatches: list[dict[str, object]] = []
                 collection_dispatches: list[dict[str, object]] = []
                 size_dispatches: list[dict[str, object]] = []
+                pattern_dispatches: list[dict[str, object]] = []
                 closed_dispatches: list[dict[str, object]] = []
 
                 def schema_number_echo(args: dict[str, object]) -> ToolResult:
@@ -294,6 +295,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 def schema_size_echo(args: dict[str, object]) -> ToolResult:
                     size_dispatches.append(dict(args))
                     return ToolResult("ok", "size ok", {"label": args.get("label"), "items": args.get("items"), "options": args.get("options")})
+
+                def schema_pattern_echo(args: dict[str, object]) -> ToolResult:
+                    pattern_dispatches.append(dict(args))
+                    return ToolResult("ok", "pattern ok", {"label": args.get("label")})
 
                 def schema_closed_echo(args: dict[str, object]) -> ToolResult:
                     closed_dispatches.append(dict(args))
@@ -336,6 +341,22 @@ class AgentRuntimeTests(unittest.TestCase):
                         "additionalProperties": True,
                     },
                 }
+                pattern_tool_spec = {
+                    "description": "Unit-only JSON-schema string pattern validation boundary.",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "pattern": r"^[A-Z][A-Z0-9_-]{2,7}$",
+                                "x-pattern-error": "must be an uppercase safe label",
+                                "description": "Pattern-bounded unit label.",
+                            },
+                        },
+                        "required": ["label"],
+                        "additionalProperties": True,
+                    },
+                }
                 closed_tool_spec = {
                     "description": "Unit-only JSON-schema closed-object validation boundary.",
                     "schema": {
@@ -364,6 +385,11 @@ class AgentRuntimeTests(unittest.TestCase):
                     size_tool_spec,
                 )
                 runtime.registry.register_tool(
+                    "schema_pattern_echo",
+                    schema_pattern_echo,
+                    pattern_tool_spec,
+                )
+                runtime.registry.register_tool(
                     "schema_closed_echo",
                     schema_closed_echo,
                     closed_tool_spec,
@@ -388,6 +414,10 @@ class AgentRuntimeTests(unittest.TestCase):
                     ("schema_size_echo", {"label": "okay", "items": ["one", "two", "three"], "options": {"mode": "safe"}}, "items must contain at most 2 items."),
                     ("schema_size_echo", {"label": "okay", "items": ["one"], "options": {}}, "options must contain at least 1 field."),
                     ("schema_size_echo", {"label": "okay", "items": ["one"], "options": {"a": 1, "b": 2, "c": 3}}, "options must contain at most 2 fields."),
+                    ("schema_pattern_echo", {"label": "lower"}, "label must be an uppercase safe label."),
+                    ("schema_pattern_echo", {"label": "BAD SPACE"}, "label must be an uppercase safe label."),
+                    ("schema_pattern_echo", {"label": ""}, "label must be an uppercase safe label."),
+                    ("sealed_export", {"passphrase_env": "bad env name"}, "passphrase_env must be an environment variable name."),
                     ("schema_closed_echo", {"label": "okay", "typo": "ignored?"}, "typo is not an allowed argument."),
                     ("schema_closed_echo", {"label": "okay", "alpha": 1, "zulu": 2}, "Unexpected arguments: alpha, zulu."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
@@ -433,6 +463,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 valid_number = runtime.registry.run("schema_number_echo", {"threshold": "1.25", "label": "unit"})
                 valid_collection = runtime.registry.run("schema_collection_echo", {"items": ["alpha", "beta"], "options": {"mode": "safe"}})
                 valid_size = runtime.registry.run("schema_size_echo", {"label": "bounded", "items": ["alpha", "beta"], "options": {"mode": "safe", "phase": "unit"}})
+                valid_pattern = runtime.registry.run("schema_pattern_echo", {"label": "ABC_12"})
                 valid_closed = runtime.registry.run("schema_closed_echo", {"label": "closed", "_policy_approved": True})
                 self.assertEqual(valid_number.status, "ok", valid_number.to_dict())
                 self.assertEqual(valid_number.data["threshold"], 1.25)
@@ -445,6 +476,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(valid_size.status, "ok", valid_size.to_dict())
                 self.assertEqual(valid_size.data["label"], "bounded")
                 self.assertEqual(size_dispatches, [{"label": "bounded", "items": ["alpha", "beta"], "options": {"mode": "safe", "phase": "unit"}}])
+                self.assertEqual(valid_pattern.status, "ok", valid_pattern.to_dict())
+                self.assertEqual(valid_pattern.data["label"], "ABC_12")
+                self.assertEqual(pattern_dispatches, [{"label": "ABC_12"}])
                 self.assertEqual(valid_closed.status, "ok", valid_closed.to_dict())
                 self.assertEqual(closed_dispatches, [{"label": "closed", "_policy_approved": True}])
 
@@ -478,13 +512,14 @@ class AgentRuntimeTests(unittest.TestCase):
                         engagement_path=str(engagement),
                         db_path=str(Path(tmp) / "confirm-agent.db"),
                         session_name="confirm-validation",
-                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo", "schema_collection_echo", "schema_size_echo", "schema_closed_echo"),
+                        confirm_tools=("list_findings", "workspace_write", "add_task", "schema_number_echo", "schema_collection_echo", "schema_size_echo", "schema_pattern_echo", "schema_closed_echo"),
                     )
                 )
                 try:
                     confirm_runtime.registry.register_tool("schema_number_echo", schema_number_echo, number_tool_spec)
                     confirm_runtime.registry.register_tool("schema_collection_echo", schema_collection_echo, collection_tool_spec)
                     confirm_runtime.registry.register_tool("schema_size_echo", schema_size_echo, size_tool_spec)
+                    confirm_runtime.registry.register_tool("schema_pattern_echo", schema_pattern_echo, pattern_tool_spec)
                     confirm_runtime.registry.register_tool("schema_closed_echo", schema_closed_echo, closed_tool_spec)
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
@@ -498,6 +533,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     accepted_collection = confirm_runtime.registry.run("schema_collection_echo", {"items": ["queued"], "options": {"mode": "safe"}})
                     rejected_size = confirm_runtime.registry.run("schema_size_echo", {"label": "ab", "items": ["queued"], "options": {"mode": "safe"}})
                     accepted_size = confirm_runtime.registry.run("schema_size_echo", {"label": "queued", "items": ["queued"], "options": {"mode": "safe"}})
+                    rejected_pattern = confirm_runtime.registry.run("schema_pattern_echo", {"label": "queued"})
+                    accepted_pattern = confirm_runtime.registry.run("schema_pattern_echo", {"label": "QUEUED"})
                     rejected_closed = confirm_runtime.registry.run("schema_closed_echo", {"label": "queued", "extra": "nope"})
                     accepted_closed = confirm_runtime.registry.run("schema_closed_echo", {"label": "queued"})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
@@ -527,6 +564,10 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_size.message, "label must be at least 3 characters.")
                     self.assertEqual(accepted_size.status, "needs_approval", accepted_size.to_dict())
                     self.assertEqual(accepted_size.data.get("tool"), "schema_size_echo")
+                    self.assertEqual(rejected_pattern.status, "error")
+                    self.assertEqual(rejected_pattern.message, "label must be an uppercase safe label.")
+                    self.assertEqual(accepted_pattern.status, "needs_approval", accepted_pattern.to_dict())
+                    self.assertEqual(accepted_pattern.data.get("tool"), "schema_pattern_echo")
                     self.assertEqual(rejected_closed.status, "error")
                     self.assertEqual(rejected_closed.message, "extra is not an allowed argument.")
                     self.assertEqual(accepted_closed.status, "needs_approval", accepted_closed.to_dict())
@@ -539,7 +580,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(rejected_required.message, "content is required.")
                     self.assertEqual(rejected_enum.status, "error")
                     self.assertEqual(rejected_enum.message, "status must be one of: pending, in_progress, completed, cancelled.")
-                    self.assertEqual(after, before + 4)
+                    self.assertEqual(after, before + 5)
                 finally:
                     confirm_runtime.close()
             finally:

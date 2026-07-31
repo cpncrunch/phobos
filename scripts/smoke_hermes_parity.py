@@ -261,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         number_dispatches: list[dict[str, object]] = []
         collection_dispatches: list[dict[str, object]] = []
         size_dispatches: list[dict[str, object]] = []
+        pattern_dispatches: list[dict[str, object]] = []
         closed_dispatches: list[dict[str, object]] = []
 
         def schema_number_echo(args: dict[str, object]) -> ToolResult:
@@ -274,6 +275,10 @@ def main(argv: list[str] | None = None) -> int:
         def schema_size_echo(args: dict[str, object]) -> ToolResult:
             size_dispatches.append(dict(args))
             return ToolResult("ok", "size ok", {"label": args.get("label"), "items": args.get("items"), "options": args.get("options")})
+
+        def schema_pattern_echo(args: dict[str, object]) -> ToolResult:
+            pattern_dispatches.append(dict(args))
+            return ToolResult("ok", "pattern ok", {"label": args.get("label")})
 
         def schema_closed_echo(args: dict[str, object]) -> ToolResult:
             closed_dispatches.append(dict(args))
@@ -324,6 +329,26 @@ def main(argv: list[str] | None = None) -> int:
                         "options": {"type": "object", "minProperties": 1, "maxProperties": 2, "description": "Bounded smoke options."},
                     },
                     "required": ["label", "items", "options"],
+                    "additionalProperties": True,
+                },
+            },
+        )
+        runtime.registry.register_tool(
+            "schema_pattern_echo",
+            schema_pattern_echo,
+            {
+                "description": "Smoke-only JSON-schema string pattern validation boundary.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "pattern": r"^[A-Z][A-Z0-9_-]{2,7}$",
+                            "x-pattern-error": "must be an uppercase safe label",
+                            "description": "Pattern-bounded smoke label.",
+                        },
+                    },
+                    "required": ["label"],
                     "additionalProperties": True,
                 },
             },
@@ -613,6 +638,48 @@ def main(argv: list[str] | None = None) -> int:
             and size_approval_count_after == size_approval_count_before
             and size_dispatches == [{"label": "bounded", "items": ["one", "two"], "options": {"mode": "safe", "phase": "smoke"}}]
             and "Traceback" not in json.dumps(size_validation_payload)
+        )
+        invalid_pattern_lower = runtime.registry.run("schema_pattern_echo", {"label": "lower"})
+        invalid_pattern_space = runtime.registry.run("schema_pattern_echo", {"label": "BAD SPACE"})
+        invalid_pattern_blank = runtime.registry.run("schema_pattern_echo", {"label": ""})
+        invalid_sealed_env_name = runtime.registry.run("sealed_export", {"passphrase_env": "bad env name"})
+        valid_pattern = runtime.registry.run("schema_pattern_echo", {"label": "ABC_12"})
+        pattern_approval_count_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("schema_pattern_echo")
+        try:
+            invalid_confirm_pattern = runtime.registry.run("schema_pattern_echo", {"label": "queued"})
+        finally:
+            runtime.registry.confirm_tools.discard("schema_pattern_echo")
+        pattern_approval_count_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        pattern_validation_payload = {
+            "invalid_lower": invalid_pattern_lower.to_dict(),
+            "invalid_space": invalid_pattern_space.to_dict(),
+            "invalid_blank": invalid_pattern_blank.to_dict(),
+            "invalid_sealed_env_name": invalid_sealed_env_name.to_dict(),
+            "valid": valid_pattern.to_dict(),
+            "invalid_confirm": invalid_confirm_pattern.to_dict(),
+            "approvals_before": pattern_approval_count_before,
+            "approvals_after": pattern_approval_count_after,
+            "dispatches": pattern_dispatches,
+        }
+        write("tool-schema-pattern-validation.json", json.dumps(pattern_validation_payload, indent=2))
+        checks["tool_schema_pattern_validation_ok"] = (
+            invalid_pattern_lower.status == "error"
+            and invalid_pattern_lower.message == "label must be an uppercase safe label."
+            and invalid_pattern_space.status == "error"
+            and invalid_pattern_space.message == "label must be an uppercase safe label."
+            and invalid_pattern_blank.status == "error"
+            and invalid_pattern_blank.message == "label must be an uppercase safe label."
+            and invalid_sealed_env_name.status == "error"
+            and invalid_sealed_env_name.message == "passphrase_env must be an environment variable name."
+            and valid_pattern.status == "ok"
+            and valid_pattern.data.get("label") == "ABC_12"
+            and invalid_confirm_pattern.status == "error"
+            and invalid_confirm_pattern.message == "label must be an uppercase safe label."
+            and pattern_approval_count_after == pattern_approval_count_before
+            and pattern_dispatches == [{"label": "ABC_12"}]
+            and "bad env name" not in json.dumps(pattern_validation_payload)
+            and "Traceback" not in json.dumps(pattern_validation_payload)
         )
         invalid_closed_extra = runtime.registry.run("schema_closed_echo", {"label": "closed", "typo": "unexpected"})
         invalid_closed_many = runtime.registry.run("schema_closed_echo", {"label": "closed", "alpha": 1, "zulu": 2})
