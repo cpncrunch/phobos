@@ -2056,6 +2056,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 result_statuses = [item["result"]["status"] for item in applied_payload["results"]]
                 self.assertIn("ok", result_statuses)
                 self.assertIn("dry_run", result_statuses)
+                ledger = applied_payload.get("execution_ledger", [])
+                self.assertEqual([item["tool"] for item in ledger], ["list_tasks", "run_command"])
+                self.assertEqual(ledger[1]["execution_state"], "dry_run_not_executed")
+                self.assertFalse(ledger[1]["actual_command_or_process_activity"])
+                self.assertFalse(ledger[1]["safe_to_claim_command_executed"])
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
                 self.assertFalse((tmp_path / "should-not-run").exists())
             finally:
@@ -2197,6 +2202,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 apply_payload = json.loads(applied.split("\n", 1)[1])
                 result_statuses = [item["result"]["status"] for item in apply_payload["results"]]
                 self.assertEqual(result_statuses, ["needs_approval", "blocked"])
+                apply_ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual([item["execution_state"] for item in apply_ledger], ["queued_for_approval", "blocked"])
+                self.assertTrue(apply_ledger[0]["approval_queued"])
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in apply_ledger))
+                self.assertFalse(any(item["safe_to_claim_command_executed"] for item in apply_ledger))
                 pending = runtime.store.list_approvals(runtime.session_id, status="pending")
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(pending[0]["tool_name"], "run_command")
@@ -2295,6 +2305,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(payload["transcript_artifact_written"])
                 statuses = [item["result"]["status"] for step in payload["steps"] for item in step.get("results", [])]
                 self.assertEqual(statuses[:2], ["error", "ok"])
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual([item["execution_state"] for item in ledger[:2]], ["handler_error_no_target_execution_claimed", "completed_without_command_execution"])
+                self.assertFalse(any(item["actual_command_or_process_activity"] for item in ledger))
                 self.assertNotIn("feedback-secret", json.dumps(payload))
                 recalled = runtime.handle_message('/recall query=feedback-recovered')
                 self.assertIn("model feedback loop recovered", recalled)
@@ -2303,6 +2316,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(json_path.exists())
                 self.assertTrue(md_path.exists())
                 transcript = json_path.read_text(encoding="utf-8") + md_path.read_text(encoding="utf-8")
+                self.assertIn("Execution ledger", transcript)
                 self.assertIn("Workspace file not found", transcript)
                 self.assertIn("feedback loop recovered", transcript)
                 self.assertNotIn("feedback-secret", transcript)
@@ -2386,6 +2400,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(bridge.status, "handled", bridge.to_dict())
                 self.assertIn("Native tool loop stopped", bridge.response)
                 self.assertIn("Actual results", bridge.response)
+                self.assertIn("Execution ledger", bridge.response)
                 self.assertIn("Auto loop completed", bridge.raw_response)
                 self.assertNotIn("bridge-secret", bridge.response + bridge.raw_response)
             finally:

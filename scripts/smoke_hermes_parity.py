@@ -1052,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
             write("native-tool-call-plan.txt", native_plan)
             write("native-tool-call-apply.txt", native_apply)
             native_apply_payload = json.loads(native_apply.split("\n", 1)[1])
+            native_apply_ledger = native_apply_payload.get("execution_ledger", []) if isinstance(native_apply_payload.get("execution_ledger"), list) else []
             pending_native_approvals_after_apply = model_tool_runtime.store.list_approvals(model_tool_runtime.session_id, status="pending")
         finally:
             model_tool_runtime.close()
@@ -1146,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
             guardrail_plan_audit_events = [row["event"] for row in guardrail_runtime.store.list_audit(guardrail_runtime.session_id, limit=20)]
             guardrail_apply = guardrail_runtime.handle_message('/auto apply=true model=true execute=true prompt="native guardrail smoke plan"')
             guardrail_apply_payload = json.loads(guardrail_apply.split("\n", 1)[1])
+            guardrail_apply_ledger = guardrail_apply_payload.get("execution_ledger", []) if isinstance(guardrail_apply_payload.get("execution_ledger"), list) else []
             pending_guardrail_after_apply = guardrail_runtime.store.list_approvals(guardrail_runtime.session_id, status="pending")
             write("native-tool-guardrail-plan.txt", guardrail_plan)
             write("native-tool-guardrail-apply.txt", guardrail_apply)
@@ -1241,6 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             feedback_loop = feedback_runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback smoke token=feedback-smoke-secret"')
             feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
+            feedback_ledger = feedback_payload.get("execution_ledger", []) if isinstance(feedback_payload.get("execution_ledger"), list) else []
             feedback_recall = feedback_runtime.handle_message('/recall query=native-feedback-recovered')
             feedback_artifacts = feedback_payload.get("artifacts", {}) if isinstance(feedback_payload.get("artifacts"), dict) else {}
             feedback_json_path = Path(feedback_artifacts.get("json", ""))
@@ -1310,8 +1313,22 @@ def main(argv: list[str] | None = None) -> int:
             and feedback_payload.get("transcript_artifact_written") is True
             and [item.get("result", {}).get("status") for step in feedback_payload.get("steps", []) for item in step.get("results", [])][:2] == ["error", "ok"]
             and "native feedback loop recovered" in feedback_recall
+            and "Execution ledger" in feedback_transcript
             and "Workspace file not found" in feedback_transcript
             and "feedback-smoke-secret" not in json.dumps(feedback_payload) + feedback_transcript
+        )
+        checks["native_tool_call_execution_ledger_ok"] = (
+            len(native_apply_ledger) >= 2
+            and len(guardrail_apply_ledger) >= 2
+            and len(feedback_ledger) >= 2
+            and [item.get("tool") for item in native_apply_ledger] == ["list_tasks", "run_command"]
+            and native_apply_ledger[1].get("execution_state") == "dry_run_not_executed"
+            and native_apply_ledger[1].get("actual_command_or_process_activity") is False
+            and [item.get("execution_state") for item in guardrail_apply_ledger] == ["queued_for_approval", "blocked"]
+            and all(item.get("actual_command_or_process_activity") is False for item in guardrail_apply_ledger)
+            and [item.get("execution_state") for item in feedback_ledger[:2]] == ["handler_error_no_target_execution_claimed", "completed_without_command_execution"]
+            and all(item.get("actual_command_or_process_activity") is False for item in feedback_ledger)
+            and "feedback-smoke-secret" not in json.dumps(native_apply_ledger + guardrail_apply_ledger + feedback_ledger)
         )
         checks["native_tool_call_gateway_chat_ok"] = (
             "/auto" in feedback_routes.get("paths", [])

@@ -18,6 +18,17 @@ from .models import ActionRequest, EngagementROE, redact_secrets
 
 
 _MODEL_PLANNER_APPROVAL_ACTION_TOOLS = {"approve", "deny"}
+_TARGET_AFFECTING_PLANNED_TOOLS = {
+    "assess_action",
+    "run_command",
+    "start_process",
+    "nmap_scan",
+    "httpx_probe",
+    "nuclei_scan",
+    "ffuf_scan",
+}
+_EXECUTION_CAPABLE_TOOLS = {"run_command", "start_process", "nmap_scan", "httpx_probe", "nuclei_scan", "ffuf_scan"}
+_ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
 
 
 @dataclass(slots=True)
@@ -427,11 +438,15 @@ class OffSecAgentRuntime:
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
             return "Auto plan (no tools executed):\n" + json.dumps(payload, indent=2)
         results = []
+        execution_ledger = []
         for call in plan.tool_calls:
             result = self.registry.run(call.tool, call.args)
-            results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict()}))
+            execution = _planned_call_execution_ledger(call, result)
+            execution_ledger.append(execution)
+            results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict(), "execution": execution}))
         payload["mode"] = "applied"
         payload["results"] = results
+        payload["execution_ledger"] = _redact_runtime_value(execution_ledger)
         return "Auto plan applied:\n" + json.dumps(_redact_runtime_value(payload), indent=2)[:10000]
 
     def _validate_plan(self, plan: AgentPlan, *, allow_command_execution: bool) -> AgentPlan:
@@ -551,6 +566,7 @@ class OffSecAgentRuntime:
         steps = max(1, min(int(steps), 10))
         current_prompt = prompt
         loop_results: list[dict[str, Any]] = []
+        execution_ledger: list[dict[str, Any]] = []
         seen: set[str] = set()
         stop_reason = "max_steps"
         for step in range(1, steps + 1):
@@ -569,7 +585,9 @@ class OffSecAgentRuntime:
             step_results = []
             for call in plan.tool_calls:
                 result = self.registry.run(call.tool, call.args)
-                step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict()}))
+                execution = _planned_call_execution_ledger(call, result, step=step)
+                execution_ledger.append(execution)
+                step_results.append(_redact_runtime_value({"tool": call.tool, "reason": call.reason, "result": result.to_dict(), "execution": execution}))
             loop_results.append(_redact_runtime_value({"step": step, "mode": "applied", "plan": plan.to_dict(), "results": step_results}))
             if not use_model:
                 stop_reason = "deterministic_plan_applied"
@@ -584,6 +602,7 @@ class OffSecAgentRuntime:
             "model": use_model,
             "transcript_artifact_written": False,
             "secret_values_redacted": True,
+            "execution_ledger": _redact_runtime_value(execution_ledger),
             "steps": loop_results,
         }
         try:
@@ -625,7 +644,7 @@ def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecTool
     would allow, confirm-gate, or block before any side effects are possible.
     """
 
-    if tool not in {"assess_action", "run_command", "start_process"}:
+    if tool not in _TARGET_AFFECTING_PLANNED_TOOLS:
         return None
     if not isinstance(args, dict):
         return {"status": "error", "error": "tool args were not an object"}
@@ -907,6 +926,7 @@ def _render_auto_loop_chat(response: str) -> str:
     except json.JSONDecodeError:
         return response
     steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+    ledger = data.get("execution_ledger") if isinstance(data.get("execution_ledger"), list) else []
     counts: dict[str, int] = {}
     planned: list[str] = []
     for step in steps:
@@ -936,6 +956,12 @@ def _render_auto_loop_chat(response: str) -> str:
         lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
     if counts:
         lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
+    if ledger:
+        actual_activity = sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True)
+        queued = sum(1 for item in ledger if isinstance(item, dict) and item.get("approval_queued") is True)
+        blocked = sum(1 for item in ledger if isinstance(item, dict) and item.get("blocked") is True)
+        dry_runs = sum(1 for item in ledger if isinstance(item, dict) and item.get("dry_run") is True)
+        lines.append(f"- Execution ledger: actual_command_or_process_activity={actual_activity}, approval_queued={queued}, blocked={blocked}, dry_run={dry_runs}")
     artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
     if data.get("transcript_artifact_written") and artifacts:
         md_path = artifacts.get("markdown") or artifacts.get("json")
@@ -1064,6 +1090,65 @@ def _coerce(value: str) -> Any:
     return value
 
 
+def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *, step: int | None = None) -> dict[str, Any]:
+    """Summarize what actually happened after applying a planned tool call.
+
+    Native model/tool-call loops must not overclaim execution.  This ledger is a
+    compact, redacted contract for transcripts and chat summaries: dry-runs,
+    guardrail/policy approvals, and blocked calls are explicitly marked as not
+    target activity even though the registry boundary was invoked to make that
+    decision.
+    """
+
+    args = call.args if isinstance(call.args, dict) else {}
+    data = result.data if isinstance(result.data, dict) else {}
+    decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+    status = str(result.status or "unknown")
+    tool = str(call.tool or "")
+    execution_requested = bool(args.get("execute", False)) if tool in _EXECUTION_CAPABLE_TOOLS else False
+    actual_command_or_process_activity = bool(tool in _EXECUTION_CAPABLE_TOOLS and execution_requested and status in _ACTUAL_EXECUTION_STATUSES)
+    approval_queued = bool(status == "needs_approval" and data.get("approval_id"))
+    blocked = status == "blocked"
+    dry_run = status == "dry_run"
+    if actual_command_or_process_activity:
+        execution_state = "executed_or_started"
+    elif approval_queued:
+        execution_state = "queued_for_approval"
+    elif blocked:
+        execution_state = "blocked"
+    elif dry_run:
+        execution_state = "dry_run_not_executed"
+    elif status == "error":
+        execution_state = "handler_error_no_target_execution_claimed"
+    elif status in {"ok", "parsed", "completed", "approved", "denied"}:
+        execution_state = "completed_without_command_execution"
+    else:
+        execution_state = "completed_status_not_command_execution"
+    ledger: dict[str, Any] = {
+        "tool": tool,
+        "result_status": status,
+        "execution_state": execution_state,
+        "dispatch_attempted": True,
+        "target_affecting_tool": tool in _TARGET_AFFECTING_PLANNED_TOOLS,
+        "command_execution_requested": execution_requested,
+        "actual_command_or_process_activity": actual_command_or_process_activity,
+        "approval_queued": approval_queued,
+        "blocked": blocked,
+        "dry_run": dry_run,
+        "safe_to_claim_tool_ran": not (approval_queued or blocked or dry_run),
+        "safe_to_claim_command_executed": actual_command_or_process_activity,
+    }
+    if step is not None:
+        ledger["step"] = step
+    if data.get("approval_id"):
+        ledger["approval_id"] = data.get("approval_id")
+    if isinstance(decision, dict) and decision.get("status"):
+        ledger["guardrail_status"] = decision.get("status")
+    if result.artifacts:
+        ledger["artifacts"] = result.artifacts
+    return _redact_runtime_value(ledger)
+
+
 def _redact_runtime_value(value: Any) -> Any:
     """Recursively redact string leaves while preserving JSON structure."""
 
@@ -1111,9 +1196,29 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         "",
         str(payload.get("prompt") or ""),
         "",
-        "## Step transcript",
+        "## Execution ledger",
         "",
     ]
+    raw_ledger = payload.get("execution_ledger")
+    ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
+    if not ledger:
+        lines.append("- No tool calls were dispatched.")
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        step = f" step={item.get('step')}" if item.get("step") is not None else ""
+        lines.append(
+            f"- `{item.get('tool')}`{step}: state=`{item.get('execution_state')}`, "
+            f"result=`{item.get('result_status')}`, "
+            f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`, "
+            f"approval_queued=`{item.get('approval_queued', False)}`, "
+            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`"
+        )
+    lines.extend([
+        "",
+        "## Step transcript",
+        "",
+    ])
     raw_steps = payload.get("steps")
     steps: list[Any] = raw_steps if isinstance(raw_steps, list) else []
     if not steps:
