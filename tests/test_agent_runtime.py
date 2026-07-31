@@ -195,8 +195,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 invalid_cases = [
                     ("get_job", {"id": "not-an-int"}, "id must be an integer."),
                     ("poll_process", {"id": "not-an-int"}, "id must be an integer."),
+                    ("poll_process", {"id": 0}, "id must be at least 1."),
                     ("list_findings", {"limit": "not-an-int"}, "limit must be an integer."),
+                    ("list_findings", {"limit": 0}, "limit must be at least 1."),
                     ("evidence_timeline", {"limit": True}, "limit must be an integer."),
+                    ("evidence_manifest", {"max_bytes": 0}, "max_bytes must be at least 1."),
                     ("run_command", {"execute": "maybe"}, "execute must be a boolean."),
                     ("workspace_write", {"path": ["notes/bad-string.md"], "content": "bad"}, "path must be a string."),
                     ("scope_check", {"target": {"host": "app.example.test"}}, "target must be a string."),
@@ -256,6 +259,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 try:
                     before = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     rejected = confirm_runtime.registry.run("list_findings", {"limit": "not-an-int"})
+                    rejected_bound = confirm_runtime.registry.run("list_findings", {"limit": 0})
                     rejected_bool = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md", "content": "nope", "append": "maybe"})
                     rejected_string = confirm_runtime.registry.run("workspace_write", {"path": {"bad": "queued.md"}, "content": "nope"})
                     rejected_required = confirm_runtime.registry.run("workspace_write", {"path": "notes/queued.md"})
@@ -263,6 +267,8 @@ class AgentRuntimeTests(unittest.TestCase):
                     after = len(confirm_runtime.store.list_approvals(confirm_runtime.session_id, status="all"))
                     self.assertEqual(rejected.status, "error")
                     self.assertEqual(rejected.message, "limit must be an integer.")
+                    self.assertEqual(rejected_bound.status, "error")
+                    self.assertEqual(rejected_bound.message, "limit must be at least 1.")
                     self.assertEqual(rejected_bool.status, "error")
                     self.assertEqual(rejected_bool.message, "append must be a boolean.")
                     self.assertEqual(rejected_string.status, "error")

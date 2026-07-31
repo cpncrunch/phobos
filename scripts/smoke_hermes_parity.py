@@ -201,9 +201,21 @@ def main(argv: list[str] | None = None) -> int:
         checks["plugin_loaded_and_executed"] = '"echo": "plugin-ok"' in plugin
         invalid_tool_integer = runtime.registry.run("list_findings", {"limit": "not-an-int"})
         valid_tool_integer = runtime.registry.run("list_findings", {"limit": "2"})
+        invalid_tool_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
+        integer_bound_approvals_before = len(runtime.store.list_approvals(runtime.session_id, status="all"))
+        runtime.registry.confirm_tools.add("list_findings")
+        try:
+            invalid_confirm_integer_bound = runtime.registry.run("list_findings", {"limit": 0})
+        finally:
+            runtime.registry.confirm_tools.discard("list_findings")
+        integer_bound_approvals_after = len(runtime.store.list_approvals(runtime.session_id, status="all"))
         integer_validation_payload = {
             "invalid": invalid_tool_integer.to_dict(),
             "valid": valid_tool_integer.to_dict(),
+            "invalid_bound": invalid_tool_integer_bound.to_dict(),
+            "invalid_confirm_bound": invalid_confirm_integer_bound.to_dict(),
+            "approvals_before": integer_bound_approvals_before,
+            "approvals_after": integer_bound_approvals_after,
         }
         write("tool-schema-integer-validation.json", json.dumps(integer_validation_payload, indent=2))
         checks["tool_schema_integer_validation_ok"] = (
@@ -211,6 +223,14 @@ def main(argv: list[str] | None = None) -> int:
             and invalid_tool_integer.message == "limit must be an integer."
             and valid_tool_integer.status == "ok"
             and "invalid literal" not in json.dumps(integer_validation_payload)
+            and "Traceback" not in json.dumps(integer_validation_payload)
+        )
+        checks["tool_schema_integer_bounds_validation_ok"] = (
+            invalid_tool_integer_bound.status == "error"
+            and invalid_tool_integer_bound.message == "limit must be at least 1."
+            and invalid_confirm_integer_bound.status == "error"
+            and invalid_confirm_integer_bound.message == "limit must be at least 1."
+            and integer_bound_approvals_before == integer_bound_approvals_after
             and "Traceback" not in json.dumps(integer_validation_payload)
         )
         invalid_tool_boolean = runtime.registry.run("run_command", {"execute": "maybe"})
