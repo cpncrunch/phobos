@@ -504,19 +504,17 @@ class OffSecAgentRuntime:
 
     def _plan_actions_with_model(self, prompt: str, *, allow_command_execution: bool) -> AgentPlan:
         specs = [spec.to_dict() for spec in self.registry.specs()]
-        planner_prompt = (
-            "You are planning Phobos Agent tool calls. Return ONLY JSON with keys summary, tool_calls, warnings. "
-            "tool_calls must be a list of {tool, args, reason}. Use only registered tools. Do not invent tools. "
-            "Target-affecting tools still go through ROE guardrails. If command execution is not explicitly allowed, set execute=false.\n\n"
-            f"Command execution allowed: {allow_command_execution}\n"
-            f"Operator request: {prompt}\n\n"
-            f"Registered tools: {json.dumps(specs[:80], indent=2)[:30000]}"
-        )
-        raw = self.adapter.generate("impact", planner_prompt).content
-        parsed = _extract_json_object(raw)
+        response = self.adapter.generate_tool_plan(prompt, specs, allow_command_execution=allow_command_execution)
+        parsed = _extract_json_object(response.content)
         calls: list[PlannedToolCall] = []
         rejected: list[dict[str, Any]] = []
         warnings = [str(item) for item in parsed.get("warnings", []) if str(item).strip()] if isinstance(parsed.get("warnings", []), list) else []
+        if isinstance(parsed.get("rejected_tool_calls", []), list):
+            for item in parsed.get("rejected_tool_calls", []):
+                if isinstance(item, dict):
+                    rejected.append(item)
+                else:
+                    rejected.append({"tool": None, "reason": "Rejected tool call must be an object.", "args": {"value_type": type(item).__name__}})
         for item in parsed.get("tool_calls", []):
             if not isinstance(item, dict):
                 warnings.append("Model planner returned a non-object tool call; skipped.")

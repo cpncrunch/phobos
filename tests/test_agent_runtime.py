@@ -18,7 +18,7 @@ from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfi
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
+from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse, OpenAICompatibleAdapter
 
 
 class FakePlannerAdapter(BaseModelAdapter):
@@ -2032,6 +2032,99 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("dry_run", result_statuses)
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
                 self.assertFalse((tmp_path / "should-not-run").exists())
+            finally:
+                runtime.close()
+
+    def test_openai_native_tool_calls_are_translated_and_runtime_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-openai-should-not-execute.txt"
+
+            class FakeHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native provider selected safe local memory plus a command dry-run",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-openai", "value": "openai-compatible native tool call translated"}),
+                                            },
+                                        },
+                                        {
+                                            "id": "call_dry_run",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "run_command",
+                                                "arguments": json.dumps({
+                                                    "target": "app.example.test",
+                                                    "purpose": "native tool call dry-run validation",
+                                                    "command": f"printf native-openai-dry-run > {dry_run_marker}",
+                                                    "execute": True,
+                                                }),
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native provider tool call request"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["key"], "native-openai")
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    self.assertTrue(plan_payload["tool_calls"][1]["validation"].get("schema_validated"))
+                    self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native provider tool call request"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual(applied_payload["mode"], "applied")
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                recall = runtime.handle_message('/recall query=native-openai')
+                self.assertIn("openai-compatible native tool call translated", recall)
+                self.assertTrue(captured_payloads)
+                self.assertIn("tools", captured_payloads[0])
+                self.assertEqual(captured_payloads[0]["tool_choice"], "auto")
+                tool_names = [item["function"]["name"] for item in captured_payloads[0]["tools"]]
+                self.assertIn("remember", tool_names)
+                self.assertFalse(dry_run_marker.exists())
             finally:
                 runtime.close()
 

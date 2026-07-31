@@ -21,7 +21,8 @@ if str(SRC) not in sys.path:
 
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse
+from offsec_agent_harness.model_adapters import BaseModelAdapter, ModelResponse, OpenAICompatibleAdapter
+import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
 
 
@@ -1041,6 +1042,64 @@ def main(argv: list[str] | None = None) -> int:
             and native_apply_payload.get("mode") == "applied"
             and "dry_run" in [item.get("result", {}).get("status") for item in native_apply_payload.get("results", [])]
             and not pending_native_approvals_after_apply
+        )
+
+        native_openai_captured = {}
+
+        class NativeOpenAISmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native OpenAI-compatible tool-call smoke",
+                                "tool_calls": [
+                                    {
+                                        "id": "smoke_native_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-openai-smoke", "value": "native OpenAI-compatible tool call translated"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_openai_urlopen(request, timeout=0):
+            native_openai_captured["url"] = request.full_url
+            native_openai_captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return NativeOpenAISmokeResponse()
+
+        native_openai_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_openai_urlopen
+            native_openai_adapter = OpenAICompatibleAdapter(model="fake-native-smoke", base_url="http://127.0.0.1:9/v1")
+            native_openai_response = native_openai_adapter.generate_tool_plan(
+                "remember native OpenAI-compatible smoke",
+                [spec.to_dict() for spec in runtime.registry.specs()],
+                allow_command_execution=False,
+            )
+            native_openai_payload = json.loads(native_openai_response.content)
+            write("native-openai-tool-call-adapter.json", json.dumps({"payload": native_openai_payload, "raw": native_openai_response.raw, "request": native_openai_captured}, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_openai_original_urlopen
+        checks["native_openai_tool_call_adapter_ok"] = (
+            native_openai_captured.get("url", "").endswith("/chat/completions")
+            and native_openai_captured.get("payload", {}).get("tool_choice") == "auto"
+            and any(item.get("function", {}).get("name") == "remember" for item in native_openai_captured.get("payload", {}).get("tools", []))
+            and native_openai_payload.get("tool_calls", [{}])[0].get("tool") == "remember"
+            and native_openai_payload.get("tool_calls", [{}])[0].get("args", {}).get("key") == "native-openai-smoke"
+            and native_openai_response.raw.get("native_tool_calls") is True
+            and "api_key" not in json.dumps(native_openai_response.raw).lower()
         )
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
