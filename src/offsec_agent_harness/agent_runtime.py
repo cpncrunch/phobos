@@ -781,14 +781,17 @@ class OffSecAgentRuntime:
                     stop_reason = "no_tool_calls"
                     loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
                 break
-            signatures = [json.dumps(call.to_dict(), sort_keys=True, default=str) for call in plan.tool_calls]
-            if all(signature in seen for signature in signatures):
+            signatures = [_planned_call_duplicate_signature(call) for call in plan.tool_calls]
+            duplicate_signatures = [signature for signature in signatures if signature in seen]
+            if duplicate_signatures:
                 stop_reason = "duplicate_plan"
                 loop_results.append(_redact_runtime_value({
                     "step": step,
                     "mode": "stopped_duplicate_plan",
                     "plan": plan.to_dict(),
-                    "duplicate_tool_call_count": len(signatures),
+                    "duplicate_tool_call_count": len(duplicate_signatures),
+                    "new_tool_call_count": max(0, len(signatures) - len(duplicate_signatures)),
+                    "duplicate_detection": "tool_args_any_repeat",
                     "no_tools_executed": True,
                     "execution_ledger_delta": [],
                 }))
@@ -928,6 +931,19 @@ def _build_auto_loop_feedback_prompt(original_prompt: str, feedback_history: lis
         + history_text
         + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
     )
+
+
+def _planned_call_duplicate_signature(call: PlannedToolCall) -> str:
+    """Return a stable duplicate key for a validated planned call.
+
+    Loop duplicate detection is a safety boundary, not a transcript nicety: if a
+    model repeats a previously-dispatched tool+args pair with a new reason or as
+    part of a larger mixed plan, Phobos must stop before re-dispatching it.
+    Exclude free-text reasons and validation metadata so paraphrased repeats do
+    not evade the loop guard.
+    """
+
+    return json.dumps({"tool": call.tool, "args": call.args}, sort_keys=True, default=str)
 
 
 def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecToolRegistry, tool: str, args: Any) -> dict[str, Any] | None:
@@ -1073,6 +1089,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "per_step_execution_ledger_delta": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
+            "partial_duplicate_plan_stop_enforced": True,
             "model_error_stop_enforced": True,
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
@@ -1797,7 +1814,8 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
             lines.extend([f"Plan summary: {summary}", ""])
         if step.get("mode") == "stopped_duplicate_plan":
             lines.extend([
-                f"Duplicate plan stop: {step.get('duplicate_tool_call_count', 0)} repeated call(s); no tools were dispatched for this step.",
+                f"Duplicate plan stop: {step.get('duplicate_tool_call_count', 0)} repeated tool+args call(s); "
+                f"new calls withheld={step.get('new_tool_call_count', 0)}; no tools were dispatched for this step.",
                 "",
             ])
         raw_calls = plan.get("tool_calls")

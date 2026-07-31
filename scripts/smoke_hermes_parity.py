@@ -401,6 +401,36 @@ class SmokeToolCallDuplicatePlanAdapter(BaseModelAdapter):
         )
 
 
+class SmokeToolCallPartialDuplicatePlanAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-partial-duplicate-plan"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            calls = [
+                {"tool": "remember", "args": {"key": "native-partial-duplicate-stop", "value": "native partial duplicate stop ran once"}, "reason": "first unique local call runs once"}
+            ]
+        else:
+            calls = [
+                {"tool": "remember", "args": {"key": "native-partial-duplicate-stop", "value": "native partial duplicate stop ran once"}, "reason": "paraphrased repeated tool args must stop before dispatch"},
+                {"tool": "remember", "args": {"key": "native-partial-duplicate-withheld", "value": "partial duplicate new call should be withheld"}, "reason": "new call in duplicate batch must not partially dispatch"},
+            ]
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "smoke model emitted a mixed duplicate native plan",
+                "tool_calls": calls,
+                "warnings": [],
+            }),
+        )
+
+
 class SmokeToolCallMaxStepsAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-max-steps"
 
@@ -1754,6 +1784,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("per_step_execution_ledger_delta") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
+            and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
             and native_status_data.get("model_error_stop_enforced") is True
             and native_status_data.get("provider_tool_result_echo_ignored") is True
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2656,6 +2687,31 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             duplicate_runtime.close()
 
+        partial_duplicate_adapter = SmokeToolCallPartialDuplicatePlanAdapter()
+        partial_duplicate_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-partial-duplicate-plan-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=partial_duplicate_adapter,
+        )
+        try:
+            partial_duplicate_loop = partial_duplicate_runtime.handle_message('/auto-loop model=true steps=4 prompt="native partial duplicate loop token=partial-duplicate-smoke-secret"')
+            partial_duplicate_payload = json.loads(partial_duplicate_loop.split("\n", 1)[1])
+            partial_duplicate_recall = partial_duplicate_runtime.handle_message('/recall query=native-partial-duplicate-stop')
+            partial_duplicate_withheld_recall = partial_duplicate_runtime.handle_message('/recall query=native-partial-duplicate-withheld')
+            partial_duplicate_transcript = ""
+            partial_duplicate_artifacts = partial_duplicate_payload.get("artifacts", {}) if isinstance(partial_duplicate_payload.get("artifacts"), dict) else {}
+            for path_value in [partial_duplicate_artifacts.get("json"), partial_duplicate_artifacts.get("markdown")]:
+                if path_value:
+                    partial_duplicate_transcript += Path(str(path_value)).read_text(encoding="utf-8")
+            write("native-tool-partial-duplicate-plan-loop.txt", partial_duplicate_loop)
+            write("native-tool-partial-duplicate-plan-transcript.txt", partial_duplicate_transcript)
+        finally:
+            partial_duplicate_runtime.close()
+
         max_steps_adapter = SmokeToolCallMaxStepsAdapter()
         max_steps_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
@@ -2691,6 +2747,9 @@ def main(argv: list[str] | None = None) -> int:
         duplicate_steps = duplicate_payload.get("steps", []) if isinstance(duplicate_payload.get("steps"), list) else []
         duplicate_stop_step = duplicate_steps[-1] if duplicate_steps and isinstance(duplicate_steps[-1], dict) else {}
         duplicate_ledger = duplicate_payload.get("execution_ledger", []) if isinstance(duplicate_payload.get("execution_ledger"), list) else []
+        partial_duplicate_steps = partial_duplicate_payload.get("steps", []) if isinstance(partial_duplicate_payload.get("steps"), list) else []
+        partial_duplicate_stop_step = partial_duplicate_steps[-1] if partial_duplicate_steps and isinstance(partial_duplicate_steps[-1], dict) else {}
+        partial_duplicate_ledger = partial_duplicate_payload.get("execution_ledger", []) if isinstance(partial_duplicate_payload.get("execution_ledger"), list) else []
         checks["native_tool_call_terminal_no_tool_stop_ok"] = (
             terminal_payload.get("stop_reason") == "no_tool_calls"
             and terminal_payload.get("steps_executed") == 1
@@ -2720,6 +2779,22 @@ def main(argv: list[str] | None = None) -> int:
             and "native duplicate stop ran once" in duplicate_recall
             and "Duplicate plan stop" in duplicate_transcript
             and "duplicate-stop-smoke-secret" not in json.dumps(duplicate_payload) + duplicate_recall + duplicate_transcript
+        )
+        checks["native_tool_call_partial_duplicate_loop_stop_ok"] = (
+            partial_duplicate_payload.get("stop_reason") == "duplicate_plan"
+            and partial_duplicate_payload.get("steps_executed") == 1
+            and len(partial_duplicate_adapter.prompts) == 2
+            and len(partial_duplicate_ledger) == 1
+            and partial_duplicate_ledger[0].get("execution_state") == "completed_without_command_execution"
+            and partial_duplicate_stop_step.get("mode") == "stopped_duplicate_plan"
+            and partial_duplicate_stop_step.get("duplicate_detection") == "tool_args_any_repeat"
+            and partial_duplicate_stop_step.get("duplicate_tool_call_count") == 1
+            and partial_duplicate_stop_step.get("new_tool_call_count") == 1
+            and partial_duplicate_stop_step.get("execution_ledger_delta") == []
+            and "native partial duplicate stop ran once" in partial_duplicate_recall
+            and "partial duplicate new call should be withheld" not in partial_duplicate_withheld_recall
+            and "new calls withheld=1" in partial_duplicate_transcript
+            and "partial-duplicate-smoke-secret" not in json.dumps(partial_duplicate_payload) + partial_duplicate_recall + partial_duplicate_transcript
         )
         checks["native_tool_call_max_steps_budget_ok"] = (
             max_steps_payload.get("stop_reason") == "max_steps"

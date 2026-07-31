@@ -466,6 +466,48 @@ class FakeToolCallDuplicatePlanAdapter(BaseModelAdapter):
         )
 
 
+class FakeToolCallPartialDuplicatePlanAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-partial-duplicate-plan"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            calls = [
+                {
+                    "tool": "remember",
+                    "args": {"key": "partial-duplicate-loop-marker", "value": "native partial duplicate loop ran once"},
+                    "reason": "first safe local call should run exactly once",
+                }
+            ]
+        else:
+            calls = [
+                {
+                    "tool": "remember",
+                    "args": {"key": "partial-duplicate-loop-marker", "value": "native partial duplicate loop ran once"},
+                    "reason": "paraphrased duplicate should still be detected by tool args, not reason text",
+                },
+                {
+                    "tool": "remember",
+                    "args": {"key": "partial-duplicate-new-call", "value": "this call must be withheld with the duplicate batch"},
+                    "reason": "a mixed duplicate+new batch must not partially dispatch after a repeat",
+                },
+            ]
+        return ModelResponse(
+            provider=self.provider,
+            role=role,
+            content=json.dumps({
+                "summary": "fake model emitted a partial duplicate native tool batch",
+                "tool_calls": calls,
+                "warnings": [],
+            }),
+        )
+
+
 class FakeToolCallMaxStepsAdapter(BaseModelAdapter):
     provider = "fake-tool-call-max-steps"
 
@@ -3802,6 +3844,54 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_auto_loop_stops_partial_duplicate_batch_without_partial_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Partial Duplicate Plan Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallPartialDuplicatePlanAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-partial-duplicate-plan",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="native partial duplicate loop token=partial-duplicate-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "duplicate_plan")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(len(adapter.prompts), 2)
+                ledger = payload.get("execution_ledger", [])
+                self.assertEqual(len(ledger), 1)
+                self.assertEqual(ledger[0]["tool"], "remember")
+                self.assertEqual(ledger[0]["execution_state"], "completed_without_command_execution")
+                duplicate_step = payload["steps"][-1]
+                self.assertEqual(duplicate_step["mode"], "stopped_duplicate_plan")
+                self.assertEqual(duplicate_step["duplicate_detection"], "tool_args_any_repeat")
+                self.assertEqual(duplicate_step["duplicate_tool_call_count"], 1)
+                self.assertEqual(duplicate_step["new_tool_call_count"], 1)
+                self.assertTrue(duplicate_step["no_tools_executed"])
+                self.assertEqual(duplicate_step["execution_ledger_delta"], [])
+                self.assertIn("partial duplicate loop ran once", runtime.handle_message('/recall query=partial-duplicate-loop-marker'))
+                withheld = runtime.handle_message('/recall query=partial-duplicate-new-call')
+                self.assertNotIn("this call must be withheld", withheld)
+                transcript = Path(payload["artifacts"]["json"]).read_text(encoding="utf-8") + Path(payload["artifacts"]["markdown"]).read_text(encoding="utf-8")
+                self.assertIn("new calls withheld=1", transcript)
+                status = runtime.registry.run("runtime_status", {})
+                self.assertTrue(status.data.get("native_tool_calling", {}).get("partial_duplicate_plan_stop_enforced"), status.to_dict())
+                self.assertNotIn("partial-duplicate-secret", response + transcript + withheld)
+            finally:
+                runtime.close()
+
     def test_model_auto_loop_enforces_max_step_budget_with_clear_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3936,6 +4026,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(native_status.get("execution_requires_operator_execute_true"), native_status)
                 self.assertTrue(native_status.get("per_step_execution_ledger_delta"), native_status)
                 self.assertTrue(native_status.get("max_steps_budget_stop_enforced"), native_status)
+                self.assertTrue(native_status.get("partial_duplicate_plan_stop_enforced"), native_status)
                 self.assertTrue(native_status.get("model_error_stop_enforced"), native_status)
                 self.assertTrue(native_status.get("provider_tool_result_echo_ignored"), native_status)
                 self.assertIn("flat_tool_calls", native_status.get("provider_native_tool_call_variants", []))
