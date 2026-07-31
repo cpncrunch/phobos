@@ -17,6 +17,9 @@ from .model_adapters import BaseModelAdapter, build_adapter, build_fallback_adap
 from .models import ActionRequest, EngagementROE, redact_secrets
 
 
+_MODEL_PLANNER_APPROVAL_ACTION_TOOLS = {"approve", "deny"}
+
+
 @dataclass(slots=True)
 class AgentRuntimeConfig:
     engagement_path: str
@@ -503,7 +506,7 @@ class OffSecAgentRuntime:
         return validated_model
 
     def _plan_actions_with_model(self, prompt: str, *, allow_command_execution: bool) -> AgentPlan:
-        specs = [spec.to_dict() for spec in self.registry.specs()]
+        specs = [spec.to_dict() for spec in self.registry.specs() if spec.name not in _MODEL_PLANNER_APPROVAL_ACTION_TOOLS]
         response = self.adapter.generate_tool_plan(prompt, specs, allow_command_execution=allow_command_execution)
         parsed = _extract_json_object(response.content)
         calls: list[PlannedToolCall] = []
@@ -525,6 +528,11 @@ class OffSecAgentRuntime:
             if not isinstance(tool_args, dict):
                 warnings.append(f"Model planner args for {tool!r} were not an object; skipped.")
                 rejected.append({"tool": tool or None, "reason": "Tool args must be an object.", "args": {"value_type": type(tool_args).__name__}})
+                continue
+            if tool in _MODEL_PLANNER_APPROVAL_ACTION_TOOLS:
+                message = "Approval-control tools require an explicit direct operator command; model planners cannot approve or deny queued actions."
+                warnings.append(f"Model planner proposed {tool}; skipped because approval actions require direct operator control.")
+                rejected.append(_redact_runtime_value({"tool": tool, "reason": message, "args": tool_args}))
                 continue
             if tool in {"run_command", "start_process"} and not allow_command_execution:
                 tool_args = dict(tool_args)

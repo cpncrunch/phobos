@@ -147,6 +147,32 @@ class FakeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-approval-action"
+
+    def __init__(self):
+        self.approval_id = 1
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "fake model attempted approval-control actions",
+                "tool_calls": [
+                    {"tool": "approve", "args": {"id": self.approval_id}, "reason": "model must not approve queued actions"},
+                    {"tool": "deny", "args": {"id": self.approval_id, "reason": "model must not deny queued actions"}, "reason": "model must not deny queued actions"},
+                ],
+                "warnings": [],
+            }),
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def make_runtime(self, tmp: str) -> tuple[OffSecAgentRuntime, Path]:
         tmp_path = Path(tmp)
@@ -2124,6 +2150,8 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(captured_payloads[0]["tool_choice"], "auto")
                 tool_names = [item["function"]["name"] for item in captured_payloads[0]["tools"]]
                 self.assertIn("remember", tool_names)
+                self.assertNotIn("approve", tool_names)
+                self.assertNotIn("deny", tool_names)
                 self.assertFalse(dry_run_marker.exists())
             finally:
                 runtime.close()
@@ -2174,6 +2202,69 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(pending[0]["tool_name"], "run_command")
                 self.assertFalse(confirm_marker.exists())
                 self.assertFalse(block_marker.exists())
+            finally:
+                runtime.close()
+
+    def test_model_planner_cannot_approve_or_deny_queued_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Approval Action Boundary",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            approval_marker = tmp_path / "model-approval-should-not-run.txt"
+            adapter = FakeToolCallApprovalActionAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-approval-actions",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                queued = runtime.registry.run(
+                    "run_command",
+                    {
+                        "target": "app.example.test",
+                        "purpose": "approval action guard fixture",
+                        "command": f"curl -X POST http://127.0.0.1:1/native-approval ; printf approved > {approval_marker}",
+                        "execute": True,
+                    },
+                )
+                self.assertEqual(queued.status, "needs_approval", queued.to_dict())
+                adapter.approval_id = int(queued.data["approval_id"])
+
+                planned = runtime.handle_message('/auto model=true prompt="model tries to approve pending action"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual(plan_payload["tool_calls"], [])
+                rejected = json.dumps(plan_payload.get("rejected_tool_calls", []))
+                self.assertIn("Approval-control tools require an explicit direct operator command", rejected)
+                self.assertNotIn("approve", adapter.seen_tool_names)
+                self.assertNotIn("deny", adapter.seen_tool_names)
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="model tries to approve pending action"')
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(apply_payload["mode"], "applied")
+                self.assertEqual(apply_payload["results"], [])
+                pending = runtime.store.list_approvals(runtime.session_id, status="pending")
+                self.assertEqual([item["id"] for item in pending], [adapter.approval_id])
+                self.assertFalse(approval_marker.exists())
+
+                looped = runtime.handle_message('/auto-loop model=true steps=2 prompt="model tries to approve pending action"')
+                loop_payload = json.loads(looped.split("\n", 1)[1])
+                self.assertEqual(loop_payload["stop_reason"], "no_tool_calls")
+                self.assertEqual(loop_payload["steps_executed"], 0)
+                self.assertIn("Approval-control tools require an explicit direct operator command", json.dumps(loop_payload))
+                self.assertFalse(approval_marker.exists())
+                raw_audit = "\n".join(row[0] or "" for row in runtime.store.conn.execute("SELECT data_json FROM audit_log").fetchall())
+                self.assertNotIn('"tool": "approve"', raw_audit)
+                self.assertNotIn('"tool": "deny"', raw_audit)
             finally:
                 runtime.close()
 

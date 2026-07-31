@@ -117,6 +117,32 @@ class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class SmokeToolCallApprovalActionAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-approval-action"
+
+    def __init__(self):
+        self.approval_id = 1
+        self.seen_tool_names: list[str] = []
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        self.seen_tool_names = [str(item.get("name")) for item in tool_specs]
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "smoke model attempted approval-control actions",
+                "tool_calls": [
+                    {"tool": "approve", "args": {"id": self.approval_id}, "reason": "model must not approve queued actions"},
+                    {"tool": "deny", "args": {"id": self.approval_id, "reason": "model must not deny queued actions"}, "reason": "model must not deny queued actions"},
+                ],
+                "warnings": [],
+            }),
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a harmless local Hermes-like parity smoke test for phobos-agent.")
     parser.add_argument("--out-root", default="demo-phobos-parity", help="Output directory to recreate under the repository root.")
@@ -1142,6 +1168,64 @@ def main(argv: list[str] | None = None) -> int:
             and pending_guardrail_after_apply[0].get("tool_name") == "run_command"
             and not native_confirm_marker.exists()
             and not native_block_marker.exists()
+        )
+
+        approval_action_marker = root / "native-approval-action-should-not-run.txt"
+        approval_action_adapter = SmokeToolCallApprovalActionAdapter()
+        approval_action_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-approval-action.db"),
+                session_name="native-tool-approval-action-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=approval_action_adapter,
+        )
+        try:
+            queued_approval_action = approval_action_runtime.registry.run(
+                "run_command",
+                {
+                    "target": "app.example.test",
+                    "purpose": "native approval action guard smoke fixture",
+                    "command": f"curl -X POST http://127.0.0.1:1/native-approval ; printf approved > {approval_action_marker}",
+                    "execute": True,
+                },
+            )
+            approval_action_adapter.approval_id = int(queued_approval_action.data.get("approval_id", 0) or 0)
+            approval_action_plan = approval_action_runtime.handle_message('/auto model=true prompt="model tries to approve pending action"')
+            approval_action_plan_payload = json.loads(approval_action_plan.split("\n", 1)[1])
+            approval_action_apply = approval_action_runtime.handle_message('/auto apply=true model=true prompt="model tries to approve pending action"')
+            approval_action_apply_payload = json.loads(approval_action_apply.split("\n", 1)[1])
+            approval_action_loop = approval_action_runtime.handle_message('/auto-loop model=true steps=2 prompt="model tries to approve pending action"')
+            approval_action_loop_payload = json.loads(approval_action_loop.split("\n", 1)[1])
+            pending_approval_actions = approval_action_runtime.store.list_approvals(approval_action_runtime.session_id, status="pending")
+            approval_action_audit = "\n".join(row[0] or "" for row in approval_action_runtime.store.conn.execute("SELECT data_json FROM audit_log").fetchall())
+            write("native-tool-approval-action-guard.json", json.dumps({
+                "plan": approval_action_plan_payload,
+                "apply": approval_action_apply_payload,
+                "loop": approval_action_loop_payload,
+                "seen_tool_names": approval_action_adapter.seen_tool_names,
+                "pending": pending_approval_actions,
+            }, indent=2, sort_keys=True))
+        finally:
+            approval_action_runtime.close()
+        approval_action_rejected = json.dumps(approval_action_plan_payload.get("rejected_tool_calls", [])) + json.dumps(approval_action_loop_payload)
+        checks["native_tool_call_approval_action_guard_ok"] = (
+            queued_approval_action.status == "needs_approval"
+            and approval_action_plan_payload.get("mode") == "plan_only"
+            and approval_action_plan_payload.get("tool_calls") == []
+            and "Approval-control tools require an explicit direct operator command" in approval_action_rejected
+            and "approve" not in approval_action_adapter.seen_tool_names
+            and "deny" not in approval_action_adapter.seen_tool_names
+            and approval_action_apply_payload.get("mode") == "applied"
+            and approval_action_apply_payload.get("results") == []
+            and approval_action_loop_payload.get("stop_reason") == "no_tool_calls"
+            and approval_action_loop_payload.get("steps_executed") == 0
+            and len(pending_approval_actions) == 1
+            and pending_approval_actions[0].get("id") == approval_action_adapter.approval_id
+            and not approval_action_marker.exists()
+            and '"tool": "approve"' not in approval_action_audit
+            and '"tool": "deny"' not in approval_action_audit
         )
 
         feedback_runtime = PhobosAgentRuntime(
