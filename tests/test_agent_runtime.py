@@ -312,6 +312,37 @@ class FakeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class FakeToolCallTerminalNoToolAdapter(BaseModelAdapter):
+    provider = "fake-tool-call-terminal-no-tool"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            payload = {
+                "summary": "model intentionally stopped after the successful native tool result",
+                "tool_calls": [],
+                "warnings": ["no further tool calls are needed"],
+            }
+        else:
+            payload = {
+                "summary": "first native step stores one local memory marker",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "terminal-stop-marker", "value": "model ran exactly once"},
+                        "reason": "safe local memory proves the first native step ran",
+                    }
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 class FakeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "fake-tool-call-approval-action"
 
@@ -3159,6 +3190,48 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertEqual(blocked.status, "blocked", blocked.to_dict())
                 audit_events = [row["event"] for row in runtime.store.list_audit(runtime.session_id, limit=20)]
                 self.assertIn("auto_loop", audit_events)
+            finally:
+                runtime.close()
+
+    def test_model_auto_loop_respects_terminal_no_tool_response_after_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Model Terminal No Tool Loop",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            adapter = FakeToolCallTerminalNoToolAdapter()
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="model-terminal-no-tool",
+                    auto_model_planning=True,
+                ),
+                adapter=adapter,
+            )
+            try:
+                response = runtime.handle_message('/auto-loop model=true steps=4 prompt="remember terminal-stop-marker as token=terminal-secret"')
+                payload = json.loads(response.split("\n", 1)[1])
+                self.assertEqual(payload["stop_reason"], "no_tool_calls")
+                self.assertEqual(payload["steps_executed"], 1)
+                self.assertEqual(len(adapter.prompts), 2)
+                self.assertEqual(len(payload.get("execution_ledger", [])), 1)
+                self.assertEqual(payload["execution_ledger"][0]["execution_state"], "completed_without_command_execution")
+                self.assertFalse(payload["execution_ledger"][0]["actual_command_or_process_activity"])
+                self.assertEqual(payload["steps"][-1]["mode"], "no_plan")
+                terminal_plan = payload["steps"][-1]["plan"]
+                self.assertEqual(terminal_plan["summary"], "model intentionally stopped after the successful native tool result")
+                metadata = terminal_plan.get("metadata", {})
+                self.assertTrue(metadata.get("terminal_no_tool_plan_respected"), metadata)
+                self.assertTrue(metadata.get("deterministic_fallback_suppressed"), metadata)
+                self.assertNotIn("terminal-secret", json.dumps(payload))
+                recalled = runtime.handle_message('/recall query=terminal-stop-marker')
+                self.assertIn("model ran exactly once", recalled)
+                self.assertNotIn("terminal-secret", response + recalled)
             finally:
                 runtime.close()
 

@@ -266,6 +266,33 @@ class SmokeToolCallFeedbackAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
 
 
+class SmokeToolCallTerminalNoToolAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-terminal-no-tool"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" not in prompt:
+            return ModelResponse(provider=self.provider, role=role, content="smoke response")
+        self.prompts.append(prompt)
+        if "Previous Phobos tool results" in prompt:
+            payload = {
+                "summary": "smoke model stopped after successful native result",
+                "tool_calls": [],
+                "warnings": ["no more native tool calls needed"],
+            }
+        else:
+            payload = {
+                "summary": "smoke first step writes one memory marker",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-terminal-stop", "value": "native terminal no-tool stop ran once"}, "reason": "safe local marker proves only one native step executed"}
+                ],
+                "warnings": [],
+            }
+        return ModelResponse(provider=self.provider, role=role, content=json.dumps(payload))
+
+
 class SmokeToolCallApprovalActionAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-approval-action"
 
@@ -2060,6 +2087,43 @@ def main(argv: list[str] | None = None) -> int:
             if feedback_gateway is not None:
                 feedback_gateway.shutdown()
             feedback_runtime.close()
+
+        terminal_adapter = SmokeToolCallTerminalNoToolAdapter()
+        terminal_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(db_path),
+                session_name="native-terminal-no-tool-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=terminal_adapter,
+        )
+        try:
+            terminal_loop = terminal_runtime.handle_message('/auto-loop model=true steps=4 prompt="remember native-terminal-stop as token=terminal-stop-smoke-secret"')
+            terminal_payload = json.loads(terminal_loop.split("\n", 1)[1])
+            terminal_recall = terminal_runtime.handle_message('/recall query=native-terminal-stop')
+            write("native-tool-terminal-no-tool-loop.txt", terminal_loop)
+        finally:
+            terminal_runtime.close()
+        terminal_steps = terminal_payload.get("steps", []) if isinstance(terminal_payload.get("steps"), list) else []
+        terminal_no_plan = terminal_steps[-1] if terminal_steps and isinstance(terminal_steps[-1], dict) else {}
+        terminal_plan = terminal_no_plan.get("plan") if isinstance(terminal_no_plan.get("plan"), dict) else {}
+        terminal_metadata = terminal_plan.get("metadata") if isinstance(terminal_plan.get("metadata"), dict) else {}
+        terminal_ledger = terminal_payload.get("execution_ledger", []) if isinstance(terminal_payload.get("execution_ledger"), list) else []
+        checks["native_tool_call_terminal_no_tool_stop_ok"] = (
+            terminal_payload.get("stop_reason") == "no_tool_calls"
+            and terminal_payload.get("steps_executed") == 1
+            and len(terminal_adapter.prompts) == 2
+            and len(terminal_ledger) == 1
+            and terminal_ledger[0].get("execution_state") == "completed_without_command_execution"
+            and terminal_ledger[0].get("actual_command_or_process_activity") is False
+            and terminal_no_plan.get("mode") == "no_plan"
+            and terminal_plan.get("summary") == "smoke model stopped after successful native result"
+            and terminal_metadata.get("terminal_no_tool_plan_respected") is True
+            and terminal_metadata.get("deterministic_fallback_suppressed") is True
+            and "native terminal no-tool stop ran once" in terminal_recall
+            and "terminal-stop-smoke-secret" not in json.dumps(terminal_payload) + terminal_recall
+        )
         checks["native_tool_call_feedback_loop_ok"] = (
             feedback_payload.get("stop_reason") == "no_tool_calls"
             and feedback_payload.get("steps_executed") == 2

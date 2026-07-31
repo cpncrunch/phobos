@@ -580,7 +580,14 @@ class OffSecAgentRuntime:
             metadata=dict(plan.metadata or {}),
         )
 
-    def _plan_actions(self, prompt: str, *, allow_command_execution: bool, use_model: bool) -> AgentPlan:
+    def _plan_actions(
+        self,
+        prompt: str,
+        *,
+        allow_command_execution: bool,
+        use_model: bool,
+        allow_deterministic_model_fallback: bool = True,
+    ) -> AgentPlan:
         deterministic = plan_agent_actions(prompt, allow_command_execution=allow_command_execution)
         if not use_model:
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
@@ -588,21 +595,37 @@ class OffSecAgentRuntime:
             model_plan = self._plan_actions_with_model(prompt, allow_command_execution=allow_command_execution)
         except Exception as exc:
             safe_error = redact_secrets(str(exc)) or exc.__class__.__name__
+            if not allow_deterministic_model_fallback:
+                return self._validate_plan(
+                    AgentPlan(
+                        prompt=prompt,
+                        summary="Model planner failed after tool feedback; native loop stopped before deterministic re-planning.",
+                        warnings=[f"Model planner failed after tool feedback; deterministic fallback suppressed: {safe_error}"],
+                        metadata={"deterministic_fallback_suppressed": True},
+                    ),
+                    allow_command_execution=allow_command_execution,
+                )
             deterministic.warnings.append(f"Model planner failed; deterministic planner used: {safe_error}")
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
         if not model_plan.tool_calls:
-            if deterministic.tool_calls:
+            if allow_deterministic_model_fallback and deterministic.tool_calls:
                 deterministic.warnings.extend(model_plan.warnings)
                 deterministic.rejected_tool_calls.extend(model_plan.rejected_tool_calls)
                 deterministic.metadata = _merge_plan_metadata(deterministic.metadata, model_plan.metadata)
                 return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
+            if not allow_deterministic_model_fallback:
+                model_plan.metadata = dict(model_plan.metadata or {})
+                model_plan.metadata.update({"deterministic_fallback_suppressed": True, "terminal_no_tool_plan_respected": True})
             return self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
         validated_model = self._validate_plan(model_plan, allow_command_execution=allow_command_execution)
-        if not validated_model.tool_calls and deterministic.tool_calls:
+        if not validated_model.tool_calls and allow_deterministic_model_fallback and deterministic.tool_calls:
             deterministic.warnings.extend(validated_model.warnings)
             deterministic.rejected_tool_calls.extend(validated_model.rejected_tool_calls)
             deterministic.metadata = _merge_plan_metadata(deterministic.metadata, validated_model.metadata)
             return self._validate_plan(deterministic, allow_command_execution=allow_command_execution)
+        if not validated_model.tool_calls and not allow_deterministic_model_fallback:
+            validated_model.metadata = dict(validated_model.metadata or {})
+            validated_model.metadata.update({"deterministic_fallback_suppressed": True, "terminal_no_tool_plan_respected": True})
         return validated_model
 
     def _model_tool_plan_context(self, prompt: str) -> str:
@@ -726,7 +749,12 @@ class OffSecAgentRuntime:
         seen: set[str] = set()
         stop_reason = "max_steps"
         for step in range(1, steps + 1):
-            plan = self._plan_actions(current_prompt, allow_command_execution=execute, use_model=use_model)
+            plan = self._plan_actions(
+                current_prompt,
+                allow_command_execution=execute,
+                use_model=use_model,
+                allow_deterministic_model_fallback=not feedback_history,
+            )
             if not plan.tool_calls:
                 stop_reason = "no_tool_calls"
                 loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict()}))
