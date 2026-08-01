@@ -832,10 +832,10 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
     conversion does not dispatch handlers or queue approvals, and the runtime's
     normal schema, runtime-policy, ROE, and transcript boundaries remain
     authoritative.  Gemini/OpenAI-compatible bridges may also collapse a single
-    function proposal into a root ``functionCall`` object, and a few wrappers
-    expose a root ``functionCalls``/``function_calls`` array.  Normalize those
-    into the same provider-native call boundary rather than letting them become
-    terminal no-tool responses.
+    function proposal into a root ``functionCall`` object, a root ``toolUse``
+    object, or plural root ``functionCalls``/``toolUses`` arrays. Normalize
+    those into the same provider-native call boundary rather than letting them
+    become terminal no-tool responses.
     """
 
     if not isinstance(raw, dict):
@@ -880,6 +880,18 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
         root_function_call_batches.append(("root.function_calls", raw.get("function_calls")))
     for provider_shape, root_function_calls in root_function_call_batches:
         for call in _native_function_call_batch_items(provider_shape, root_function_calls):
+            _append_message_tool_call(message, call)
+    root_tool_use_batches: list[tuple[str, Any]] = []
+    if isinstance(raw.get("tool_use"), (list, dict)):
+        root_tool_use_batches.append(("root.tool_use", raw.get("tool_use")))
+    if isinstance(raw.get("toolUse"), (list, dict)):
+        root_tool_use_batches.append(("root.toolUse", raw.get("toolUse")))
+    if isinstance(raw.get("tool_uses"), (list, dict)):
+        root_tool_use_batches.append(("root.tool_uses", raw.get("tool_uses")))
+    if isinstance(raw.get("toolUses"), (list, dict)):
+        root_tool_use_batches.append(("root.toolUses", raw.get("toolUses")))
+    for provider_shape, root_tool_uses in root_tool_use_batches:
+        for call in _native_tool_use_batch_items(provider_shape, root_tool_uses):
             _append_message_tool_call(message, call)
     root_function_response = raw.get("functionResponse") or raw.get("function_response")
     if isinstance(root_function_response, dict):
@@ -967,6 +979,33 @@ def _native_function_call_batch_items(provider_shape: str, raw_function_calls: A
             "call_id": str(_native_call_id(item)),
             "_provider_shape": provider_shape,
         })
+    return calls
+
+
+def _native_tool_use_batch_items(provider_shape: str, raw_tool_uses: Any) -> list[dict[str, Any]]:
+    """Return tool-call objects for root-level provider ``toolUse`` aliases.
+
+    Anthropic-style responses normally carry ``tool_use`` blocks in ``content``.
+    Some OpenAI-compatible shims instead lift those blocks to root fields such
+    as ``toolUse`` or ``toolUses``. Normalize only the registered function-call
+    shape here; runtime schema validation, ROE previews, approvals, and dry-run
+    execution boundaries remain authoritative.
+    """
+
+    if isinstance(raw_tool_uses, dict):
+        items: list[Any] = [raw_tool_uses]
+    elif isinstance(raw_tool_uses, list):
+        items = raw_tool_uses
+    else:
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        call = dict(item)
+        call.setdefault("type", "tool_use")
+        call["_provider_shape"] = str(call.get("_provider_shape") or provider_shape)
+        calls.append(call)
     return calls
 
 
@@ -1312,6 +1351,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider message functionCall"
         elif provider_shape == "message.function_calls":
             label = "native provider message function_calls"
+        elif provider_shape in {"root.tool_use", "root.toolUse", "root.tool_uses", "root.toolUses"}:
+            label = "native provider " + provider_shape.replace(".", " ")
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         else:
@@ -1401,6 +1442,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider message functionCall"
         elif item.get("_provider_shape") == "message.function_calls":
             label = "native provider message function_calls"
+        elif provider_shape in {"root.tool_use", "root.toolUse", "root.tool_uses", "root.toolUses"}:
+            label = "native provider " + provider_shape.replace(".", " ")
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":
