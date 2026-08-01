@@ -1863,8 +1863,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         native_status_data = native_flag_status.get("data", {}).get("native_tool_calling", {}) if isinstance(native_flag_status, dict) else {}
         native_status_counts = native_status_data.get("transcript_counts", {}) if isinstance(native_status_data, dict) else {}
+        native_status_milestone_contract = native_status_data.get("milestone_contract", {}) if isinstance(native_status_data, dict) else {}
         checks["native_tool_call_status_contract_ok"] = (
             native_flag_status.get("status") == "ok"
+            and native_status_data.get("milestone") == "native_model_tool_calling_loop"
+            and native_status_data.get("milestone_contract_complete") is True
+            and bool(native_status_milestone_contract)
+            and all(native_status_milestone_contract.values())
+            and native_status_milestone_contract.get("schema_validation_before_dispatch") is True
+            and native_status_milestone_contract.get("guardrail_preview_before_target_activity") is True
+            and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
+            and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
+            and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
@@ -3194,6 +3204,54 @@ def main(argv: list[str] | None = None) -> int:
             and "native-gateway-secret" not in json.dumps(gateway_auto)
             and "native-loop-secret" not in json.dumps(gateway_loop)
             and "native-chat-secret" not in json.dumps(bridge_loop.to_dict())
+        )
+        native_milestone_required_checks = [
+            "native_tool_call_plan_validation_ok",
+            "native_tool_call_plan_transcript_ok",
+            "native_tool_call_one_shot_planner_trace_ok",
+            "native_tool_call_context_handoff_ok",
+            "native_tool_call_fallback_chain_ok",
+            "native_tool_call_natural_auto_provenance_ok",
+            "native_tool_call_allowed_execution_ok",
+            "native_tool_call_apply_transcript_ok",
+            "native_tool_call_scanner_execute_boundary_ok",
+            "native_tool_call_slash_flag_safety_ok",
+            "native_tool_call_status_contract_ok",
+            "native_openai_tool_call_adapter_ok",
+            "native_provider_flat_tool_call_ok",
+            "native_provider_tool_call_edge_cases_ok",
+            "native_provider_content_block_tool_call_ok",
+            "native_provider_tool_result_ignore_ok",
+            "native_tool_call_guardrail_approval_ok",
+            "native_tool_call_loop_approval_stop_ok",
+            "native_tool_call_operator_approval_replay_ok",
+            "native_tool_call_approval_action_guard_ok",
+            "native_tool_call_runtime_policy_ok",
+            "native_tool_call_terminal_no_tool_stop_ok",
+            "native_tool_call_no_tool_no_dispatch_ok",
+            "native_tool_call_duplicate_loop_stop_ok",
+            "native_tool_call_partial_duplicate_loop_stop_ok",
+            "native_tool_call_same_step_duplicate_stop_ok",
+            "native_tool_call_max_steps_budget_ok",
+            "native_tool_call_model_error_stop_ok",
+            "native_tool_call_invalid_plan_stop_ok",
+            "native_tool_call_feedback_loop_ok",
+            "native_tool_call_step_ledger_delta_ok",
+            "native_tool_call_planner_trace_ok",
+            "native_tool_call_cumulative_feedback_ok",
+            "native_tool_call_transcript_index_detail_ok",
+            "native_tool_call_execution_ledger_ok",
+            "native_tool_call_execution_summary_ok",
+            "native_tool_call_gateway_chat_ok",
+        ]
+        checks["native_tool_call_milestone_contract_ok"] = (
+            all(checks.get(name) is True for name in native_milestone_required_checks)
+            and native_status_data.get("milestone") == "native_model_tool_calling_loop"
+            and native_status_data.get("milestone_contract_complete") is True
+            and bool(native_status_milestone_contract)
+            and all(native_status_milestone_contract.values())
+            and len(native_status_milestone_contract) >= 16
+            and "native-chat-secret" not in json.dumps(native_status_data)
         )
         hygiene_memory = runtime.registry.run("remember", {"key": "smoke-forget", "value": "Temporary memory hygiene marker token=supersecret", "tags": "hygiene"})
         hygiene_id = int(hygiene_memory.data.get("id", 0))

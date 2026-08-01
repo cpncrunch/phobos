@@ -29,6 +29,24 @@ _TARGET_AFFECTING_PLANNED_TOOLS = {
 }
 _EXECUTION_CAPABLE_TOOLS = {"run_command", "start_process", "nmap_scan", "httpx_probe", "nuclei_scan", "ffuf_scan"}
 _ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
+_NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
+    "natural_language_model_planning": True,
+    "provider_native_tool_call_translation": True,
+    "schema_validation_before_dispatch": True,
+    "runtime_policy_boundary": True,
+    "guardrail_preview_before_target_activity": True,
+    "approval_queue_direct_replay_boundary": True,
+    "explicit_execute_required_for_command_activity": True,
+    "scanner_execute_boundary": True,
+    "result_feedback_loop": True,
+    "cumulative_redacted_feedback": True,
+    "terminal_no_dispatch_stops": True,
+    "terminal_approval_block_stops": True,
+    "duplicate_plan_stops": True,
+    "redacted_transcripts_and_audit": True,
+    "execution_ledger_claim_contract": True,
+    "gateway_and_bridge_surfaces": True,
+}
 
 
 @dataclass(slots=True)
@@ -1215,6 +1233,9 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
         "model_providers": providers,
         "bridges": bridges,
         "native_tool_calling": {
+            "milestone": "native_model_tool_calling_loop",
+            "milestone_contract": dict(_NATIVE_TOOL_CALL_MILESTONE_CONTRACT),
+            "milestone_contract_complete": all(_NATIVE_TOOL_CALL_MILESTONE_CONTRACT.values()),
             "model_planning_enabled": bool(config.auto_model_planning),
             "natural_auto_execute_enabled": bool(config.auto_execute_natural),
             "max_auto_steps": int(config.max_auto_steps),
