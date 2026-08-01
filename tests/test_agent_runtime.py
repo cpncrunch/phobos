@@ -3131,6 +3131,114 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_candidate_function_call_parts_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Candidate Function Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-candidate-should-not-run.txt"
+            provider_result_marker = "PROVIDER_CANDIDATE_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeCandidateHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {"text": "native candidate plan token=candidate-secret"},
+                                        {
+                                            "functionCall": {
+                                                "id": "candidate_memory",
+                                                "name": "remember",
+                                                "parameters": {"key": "native-candidate", "value": "candidate functionCall accepted"},
+                                            },
+                                        },
+                                        {
+                                            "functionCall": {
+                                                "call_id": "candidate_dry_run",
+                                                "name": "run_command",
+                                                "args": {
+                                                    "target": "app.example.test",
+                                                    "purpose": "candidate native dry-run boundary",
+                                                    "command": f"printf native-candidate > {dry_run_marker}",
+                                                    "execute": True,
+                                                },
+                                            },
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": provider_result_marker + " token=candidate-secret"},
+                                            },
+                                        },
+                                    ]
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeCandidateHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-candidate-function-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-candidate", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native candidate function call token=candidate-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider candidate functionCall" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-candidate")
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["candidate_memory", "candidate_dry_run"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider candidate functionCall", "native provider candidate functionCall"])
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn("candidate-secret", planned)
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native candidate function call token=candidate-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["candidate_memory", "candidate_dry_run"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-candidate')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("candidate functionCall accepted", recall)
+                self.assertIn("candidate_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("candidate_function_call_translation"))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("candidate-secret", applied + recall)
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

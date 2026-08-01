@@ -336,6 +336,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
         first = choices[0]
         if isinstance(first, dict) and isinstance(first.get("message"), dict):
             return first["message"]
+    candidate_message = _candidate_content_to_message(raw)
+    if candidate_message:
+        return candidate_message
     responses_message = _responses_output_to_message(raw)
     if responses_message:
         return responses_message
@@ -363,6 +366,70 @@ def _message_content_text(content: Any) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return "" if content is None else str(content)
+
+
+def _native_argument_value(
+    mapping: dict[str, Any],
+    *,
+    preferred: tuple[str, ...] = ("arguments", "args", "input", "parameters", "params"),
+) -> Any:
+    if not isinstance(mapping, dict):
+        return {}
+    for key in preferred:
+        if key in mapping:
+            return mapping.get(key)
+    return {}
+
+
+def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize candidate/part native function calls into the common shape.
+
+    Some OpenAI-compatible gateways front providers that expose Gemini-style
+    ``candidates[].content.parts[]`` payloads with camelCase ``functionCall``
+    entries and ``args``/``parameters`` objects instead of Chat Completions
+    ``tool_calls``.  Treat them exactly like other planner proposals: translate
+    only the requested registered-call shape and leave all ROE/schema/runtime
+    enforcement to the Phobos runtime.  Provider-side ``functionResponse``
+    echoes are preserved only as ignored result blocks so their content never
+    becomes summary text or dispatch input.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    candidates = raw.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return {}
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return {}
+    content = first.get("content") if isinstance(first.get("content"), dict) else {}
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if not isinstance(parts, list):
+        return {}
+    content_blocks: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            content_blocks.append({"type": "text", "text": text})
+        function_call = part.get("functionCall") or part.get("function_call")
+        if isinstance(function_call, dict):
+            call_id = function_call.get("id") or function_call.get("call_id") or function_call.get("tool_call_id") or ""
+            tool_calls.append({
+                "type": "tool_call",
+                "name": function_call.get("name") or function_call.get("tool"),
+                "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
+                "call_id": str(call_id),
+                "_provider_shape": "gemini.candidate",
+            })
+        function_response = part.get("functionResponse") or part.get("function_response")
+        if isinstance(function_response, dict):
+            content_blocks.append({"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""})
+    if not content_blocks and not tool_calls:
+        return {}
+    return {"content": content_blocks, "tool_calls": tool_calls}
 
 
 def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
@@ -406,7 +473,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         if block_type in {"function_call", "tool_call", "tool_use"}:
             name = item.get("name") or item.get("tool")
-            arguments = item.get("arguments", item.get("input", item.get("args", {})))
+            arguments = _native_argument_value(item, preferred=("arguments", "input", "args", "parameters", "params"))
             call_id = item.get("call_id") or item.get("id") or item.get("tool_call_id") or ""
             tool_calls.append({
                 "type": "tool_call",
@@ -567,7 +634,7 @@ def _parse_native_content_tool_block(
             call_id=call_id,
             label=f"native content-block {block_type}",
         )
-    arguments = item.get("input", item.get("arguments", {}))
+    arguments = _native_argument_value(item, preferred=("input", "arguments", "args", "parameters", "params"))
     return _parse_native_function_call(
         {"name": item.get("name"), "arguments": arguments},
         index=index,
@@ -597,8 +664,13 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     if isinstance(function, str) and not name:
         name = function
     if name:
-        arguments = item.get("arguments", item.get("args", item.get("input", {})))
-        label = "native provider responses output function_call" if item.get("_provider_shape") == "responses.output" else "native provider flat tool_call"
+        arguments = _native_argument_value(item, preferred=("arguments", "args", "input", "parameters", "params"))
+        if item.get("_provider_shape") == "responses.output":
+            label = "native provider responses output function_call"
+        elif item.get("_provider_shape") == "gemini.candidate":
+            label = "native provider candidate functionCall"
+        else:
+            label = "native provider flat tool_call"
         return _parse_native_function_call(
             {"name": name, "arguments": arguments},
             index=index,
@@ -650,7 +722,7 @@ def _parse_native_function_call(
     name = str(function.get("name") or "").strip()
     if not name:
         return None, {"tool": None, "reason": "Native function call missing tool name.", "args": {}}, "Native function call missing a name; skipped."
-    args, error = _parse_native_arguments(function.get("arguments"))
+    args, error = _parse_native_arguments(_native_argument_value(function))
     if error:
         return None, {"tool": name, "reason": error, "args": {}}, f"Native arguments for {name} were invalid; skipped."
     label = label or ("legacy native function_call" if legacy else "native provider tool_call")

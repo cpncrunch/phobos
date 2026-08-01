@@ -1915,6 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
+            and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
@@ -1937,9 +1938,11 @@ def main(argv: list[str] | None = None) -> int:
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "custom_tool_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
@@ -2485,6 +2488,116 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_custom_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and "native-responses-secret" not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+        )
+
+        native_candidate_marker = root / "native-candidate-should-not-run.txt"
+        native_candidate_captured = {}
+
+        class NativeProviderCandidateSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "native candidate functionCall smoke token=native-candidate-secret"},
+                                    {
+                                        "functionCall": {
+                                            "id": "candidate_memory",
+                                            "name": "remember",
+                                            "parameters": {"key": "native-candidate-smoke", "value": "candidate functionCall native tool call translated"},
+                                        }
+                                    },
+                                    {
+                                        "functionCall": {
+                                            "call_id": "candidate_dry",
+                                            "name": "run_command",
+                                            "args": {
+                                                "target": "app.example.test",
+                                                "purpose": "native candidate dry-run smoke",
+                                                "command": f"printf native-candidate > {native_candidate_marker}",
+                                                "execute": True,
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": native_provider_result_marker + " token=native-candidate-secret"},
+                                        }
+                                    },
+                                ]
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_candidate_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_candidate_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_candidate_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeProviderCandidateSmokeResponse()
+
+        native_candidate_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-candidate.db"),
+                session_name="native-provider-candidate-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-candidate-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_candidate_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_candidate_urlopen
+            native_candidate_plan = native_candidate_runtime.handle_message('/auto model=true prompt="native candidate functionCall smoke token=native-candidate-secret"')
+            native_candidate_plan_payload = json.loads(native_candidate_plan.split("\n", 1)[1])
+            native_candidate_apply = native_candidate_runtime.handle_message('/auto apply=true model=true prompt="native candidate functionCall smoke token=native-candidate-secret"')
+            native_candidate_apply_payload = json.loads(native_candidate_apply.split("\n", 1)[1])
+            native_candidate_recall = native_candidate_runtime.handle_message('/recall query=native-candidate-smoke')
+            write("native-provider-candidate-function-calls.json", json.dumps({
+                "plan": native_candidate_plan_payload,
+                "apply": native_candidate_apply_payload,
+                "captured": native_candidate_captured,
+                "recall": native_candidate_recall,
+                "marker_exists": native_candidate_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_candidate_original_urlopen
+            native_candidate_runtime.close()
+        native_candidate_calls = native_candidate_plan_payload.get("tool_calls", []) if isinstance(native_candidate_plan_payload.get("tool_calls"), list) else []
+        native_candidate_metadata = native_candidate_plan_payload.get("metadata", {}) if isinstance(native_candidate_plan_payload.get("metadata"), dict) else {}
+        native_candidate_ledger = native_candidate_apply_payload.get("execution_ledger", []) if isinstance(native_candidate_apply_payload.get("execution_ledger"), list) else []
+        native_candidate_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_candidate_calls]
+        checks["native_provider_candidate_function_call_ok"] = (
+            native_candidate_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_candidate_calls] == ["remember", "run_command"]
+            and all("native provider candidate functionCall" in call.get("reason", "") for call in native_candidate_calls)
+            and native_candidate_calls[0].get("args", {}).get("key") == "native-candidate-smoke"
+            and native_candidate_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_candidate_call_metadata] == ["candidate_memory", "candidate_dry"]
+            and all(item.get("native_tool_call_source") == "native provider candidate functionCall" for item in native_candidate_call_metadata)
+            and native_candidate_metadata.get("native_tool_calls") is True
+            and native_candidate_metadata.get("native_tool_call_count") == 2
+            and [item.get("result", {}).get("status") for item in native_candidate_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_candidate_ledger] == ["candidate_memory", "candidate_dry"]
+            and native_candidate_ledger[1].get("native_tool_call_source") == "native provider candidate functionCall"
+            and native_candidate_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("candidate_function_call_translation") is True
+            and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "candidate functionCall native tool call translated" in native_candidate_recall
+            and native_candidate_captured.get("tool_choice") == "auto"
+            and native_candidate_captured.get("tool_count", 0) > 0
+            and not native_candidate_marker.exists()
+            and native_provider_result_marker not in native_candidate_plan + native_candidate_apply + native_candidate_recall + json.dumps(native_candidate_plan_payload) + json.dumps(native_candidate_apply_payload)
+            and "native-candidate-secret" not in native_candidate_plan + native_candidate_apply + native_candidate_recall + json.dumps(native_candidate_plan_payload) + json.dumps(native_candidate_apply_payload)
         )
         checks["native_provider_custom_tool_call_reject_ok"] = (
             "Custom/freeform native tool calls are not supported" in native_edge_rejected
@@ -3423,6 +3536,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
+            "native_provider_candidate_function_call_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",
             "native_tool_call_guardrail_approval_ok",
