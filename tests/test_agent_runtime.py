@@ -4619,6 +4619,126 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_output_typeless_nested_message_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Typeless Responses Output Message",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "TYPELESS_RESPONSES_OUTPUT_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeTypelessResponsesOutputMessageHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "typeless responses output message token=typeless-output-message-secret",
+                        "output": [
+                            {
+                                "message": {
+                                    "content": {
+                                        "parts": [
+                                            {"text": "typeless nested message text token=typeless-output-message-secret"},
+                                            {
+                                                "functionCall": {
+                                                    "callId": "typeless_output_message_parts_memory",
+                                                    "name": "remember",
+                                                    "args": {"key": "native-typeless-output-message-parts", "value": "typeless Responses output message content parts accepted"},
+                                                }
+                                            },
+                                            {
+                                                "functionResponse": {
+                                                    "name": "remember",
+                                                    "response": {"content": provider_result_marker + " token=typeless-output-message-secret"},
+                                                }
+                                            },
+                                        ]
+                                    },
+                                    "tool_calls": [
+                                        {
+                                            "id": "typeless_output_message_tool_calls_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-typeless-output-message-tool-calls", "value": "typeless Responses output message tool_calls accepted"}),
+                                            },
+                                        }
+                                    ],
+                                    "functionCalls": {
+                                        "callId": "typeless_output_message_function_calls_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-typeless-output-message-functioncalls", "value": "typeless Responses output message functionCalls accepted"},
+                                    },
+                                }
+                            }
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeTypelessResponsesOutputMessageHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-typeless-responses-output-message",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-typeless-responses-output-message", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native typeless responses output message token=typeless-output-message-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "remember", "remember"])
+                    self.assertIn("native provider responses output message tool_calls", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses output message functionCalls", payload["tool_calls"][1]["reason"])
+                    self.assertIn("native provider responses output message content parts functionCall", payload["tool_calls"][2]["reason"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual(
+                        [item.get("provider_tool_call_id") for item in call_metadata],
+                        [
+                            "typeless_output_message_tool_calls_memory",
+                            "typeless_output_message_function_calls_memory",
+                            "typeless_output_message_parts_memory",
+                        ],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertNotIn("typeless-output-message-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native typeless responses output message token=typeless-output-message-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], [item.get("provider_tool_call_id") for item in call_metadata])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], [item.get("native_tool_call_source") for item in call_metadata])
+                recall = runtime.handle_message('/recall query=native-typeless-output-message')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("typeless Responses output message tool_calls accepted", recall)
+                self.assertIn("typeless Responses output message functionCalls accepted", recall)
+                self.assertIn("typeless Responses output message content parts accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_output_message_typeless_wrapper_translation"), status)
+                self.assertIn("responses_output_message_typeless_wrapper", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("typeless-output-message-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_responses_message_content_parts_function_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6692,6 +6812,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("responses_message_tool_call_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("responses_message_tool_calls_camel_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("responses_message_tool_call_singular_alias_translation"), native_status)
+                self.assertTrue(milestone_contract.get("responses_output_message_typeless_wrapper_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_snake_alias_translation"), native_status)
@@ -6725,6 +6846,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("top_level_content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_parts_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_typeless_wrapper", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_tool_calls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_toolCalls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_tool_call", native_status.get("provider_native_tool_call_variants", []))

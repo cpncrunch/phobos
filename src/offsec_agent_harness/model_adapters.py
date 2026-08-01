@@ -526,16 +526,18 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         block_type = str(item.get("type") or "").strip()
-        if block_type == "message":
+        nested_message = item.get("message")
+        is_message_item = block_type == "message" or (not block_type and isinstance(nested_message, dict))
+        if is_message_item:
             _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape="responses.message.content")
             _extend_responses_message_tool_calls(tool_calls, item)
-            nested_message = item.get("message")
             if isinstance(nested_message, dict):
                 # A few Responses-compatible shims wrap the assistant message
                 # under output[].message rather than putting content/tool-call
-                # aliases directly on the output[] item. Keep this in the same
-                # native planning boundary with distinct provenance labels so
-                # transcripts show exactly which provider shape was accepted.
+                # aliases directly on the output[] item. Some omit
+                # output[].type="message" entirely; still keep this in the same
+                # native planning boundary so schema, runtime policy, ROE,
+                # approval, and transcript rules remain authoritative.
                 _extend_responses_content_blocks(
                     content_blocks,
                     nested_message.get("content"),

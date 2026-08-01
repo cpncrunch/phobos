@@ -1993,6 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
             and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_wrapper_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_tool_calls_camel_alias_translation") is True
@@ -2055,6 +2056,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3979,6 +3981,43 @@ def main(argv: list[str] | None = None) -> int:
                                     "function_call": {"name": "remember", "args": {"key": "native-responses-output-message-function-calls-smoke", "value": "Responses output nested message function_calls native tool call translated"}},
                                 },
                             },
+                        },
+                        {
+                            "message": {
+                                "content": {
+                                    "parts": [
+                                        {"text": "native typeless responses output message text token=native-responses-output-message-secret"},
+                                        {
+                                            "functionCall": {
+                                                "callId": "responses_output_message_typeless_parts_memory",
+                                                "name": "remember",
+                                                "args": {"key": "native-responses-output-message-typeless-parts-smoke", "value": "Responses output typeless nested message content parts native tool call translated"},
+                                            }
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": native_responses_output_message_result_marker + " token=native-responses-output-message-secret"},
+                                            }
+                                        },
+                                    ]
+                                },
+                                "tool_calls": [
+                                    {
+                                        "id": "responses_output_message_typeless_tool_calls_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-responses-output-message-typeless-tool-calls-smoke", "value": "Responses output typeless nested message tool_calls native tool call translated"}),
+                                        },
+                                    }
+                                ],
+                                "functionCalls": {
+                                    "callId": "responses_output_message_typeless_functions_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-responses-output-message-typeless-functioncalls-smoke", "value": "Responses output typeless nested message functionCalls native tool call translated"},
+                                },
+                            }
                         }
                     ],
                 }).encode("utf-8")
@@ -4021,7 +4060,7 @@ def main(argv: list[str] | None = None) -> int:
         native_responses_output_message_outputs = native_responses_output_message_plan + native_responses_output_message_apply + native_responses_output_message_recall + json.dumps(native_responses_output_message_plan_payload) + json.dumps(native_responses_output_message_apply_payload)
         checks["native_provider_responses_output_message_aliases_ok"] = (
             native_responses_output_message_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_responses_output_message_calls] == ["remember", "list_tasks", "remember", "remember", "remember", "remember", "remember", "remember"]
+            and [call.get("tool") for call in native_responses_output_message_calls] == ["remember", "list_tasks", "remember", "remember", "remember", "remember", "remember", "remember", "remember", "remember", "remember"]
             and [item.get("provider_tool_call_id") for item in native_responses_output_message_call_metadata] == [
                 "responses_output_message_tool_calls_memory",
                 "responses_output_message_toolcalls_tasks",
@@ -4030,7 +4069,10 @@ def main(argv: list[str] | None = None) -> int:
                 "responses_output_message_function_memory",
                 "responses_output_message_functions_memory",
                 "responses_output_message_functions_snake_memory",
+                "responses_output_message_typeless_tool_calls_memory",
+                "responses_output_message_typeless_functions_memory",
                 "responses_output_message_parts_memory",
+                "responses_output_message_typeless_parts_memory",
             ]
             and [item.get("native_tool_call_source") for item in native_responses_output_message_call_metadata] == [
                 "native provider responses output message tool_calls",
@@ -4040,10 +4082,13 @@ def main(argv: list[str] | None = None) -> int:
                 "native provider responses output message functionCall",
                 "native provider responses output message functionCalls",
                 "native provider responses output message function_calls",
+                "native provider responses output message tool_calls",
+                "native provider responses output message functionCalls",
+                "native provider responses output message content parts functionCall",
                 "native provider responses output message content parts functionCall",
             ]
             and [item.get("provider_tool_call_id") for item in native_responses_output_message_ledger] == [item.get("provider_tool_call_id") for item in native_responses_output_message_call_metadata]
-            and [item.get("result", {}).get("status") for item in native_responses_output_message_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok"]
+            and [item.get("result", {}).get("status") for item in native_responses_output_message_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok"]
             and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
             and "responses_output_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_toolCalls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -4053,13 +4098,25 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "Responses output nested message tool_calls native tool call translated" in native_responses_output_message_recall
             and "Responses output nested message content parts native tool call translated" in native_responses_output_message_recall
+            and "Responses output typeless nested message tool_calls native tool call translated" in native_responses_output_message_recall
+            and "Responses output typeless nested message functionCalls native tool call translated" in native_responses_output_message_recall
+            and "Responses output typeless nested message content parts native tool call translated" in native_responses_output_message_recall
             and "functionResponse" in json.dumps(native_responses_output_message_plan_payload.get("warnings", []))
             and native_responses_output_message_captured.get("tool_choice") == "auto"
             and native_responses_output_message_captured.get("tool_count", 0) > 0
             and native_responses_output_message_result_marker not in native_responses_output_message_outputs
             and "native-responses-output-message-secret" not in native_responses_output_message_outputs + json.dumps(native_responses_output_message_call_metadata) + json.dumps(native_responses_output_message_ledger)
+        )
+        checks["native_provider_responses_output_message_typeless_wrapper_ok"] = (
+            checks["native_provider_responses_output_message_aliases_ok"]
+            and native_status_milestone_contract.get("responses_output_message_typeless_wrapper_translation") is True
+            and "responses_output_message_typeless_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_tool_calls_memory" in json.dumps(native_responses_output_message_call_metadata)
+            and "Responses output typeless nested message content parts native tool call translated" in native_responses_output_message_recall
+            and native_responses_output_message_result_marker not in native_responses_output_message_outputs
         )
 
         native_responses_message_tool_captured = {}
