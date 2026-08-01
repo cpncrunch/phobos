@@ -1348,9 +1348,41 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         return None, None, "Native provider tool_result entry ignored; Phobos only accepts model-requested tool calls at this boundary."
     if native_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
         return _reject_unsupported_native_tool_call(item, index=index, native_type=str(native_type))
-    if native_type not in {None, "function", "tool_call", "tool_use", "toolUse"}:
+    if native_type not in {None, "function", "tool_call", "tool_use", "toolUse", "function_call", "functionCall"}:
         return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
     provider_shape = str(item.get("_provider_shape") or "")
+    if isinstance(item.get("functionCall"), dict):
+        nested_function_call = item.get("functionCall")
+        alias_key = "functionCall"
+    elif isinstance(item.get("function_call"), dict):
+        nested_function_call = item.get("function_call")
+        alias_key = "function_call"
+    else:
+        nested_function_call = None
+        alias_key = ""
+    if isinstance(nested_function_call, dict):
+        return _parse_native_function_call(
+            {
+                "name": _native_tool_name(nested_function_call),
+                "arguments": _native_argument_value(nested_function_call, preferred=("args", "arguments", "parameters", "input", "params")),
+            },
+            index=index,
+            legacy=False,
+            call_id=_native_call_id(item, nested_function_call),
+            label=_native_nested_tool_call_alias_label(provider_shape, alias_key),
+        )
+    nested_tool_use_key, nested_tool_use = _native_content_tool_use_alias(item)
+    if isinstance(nested_tool_use, dict):
+        return _parse_native_function_call(
+            {
+                "name": _native_tool_name(nested_tool_use),
+                "arguments": _native_argument_value(nested_tool_use, preferred=("input", "arguments", "args", "parameters", "params")),
+            },
+            index=index,
+            legacy=False,
+            call_id=_native_call_id(item, nested_tool_use),
+            label=_native_nested_tool_call_alias_label(provider_shape, nested_tool_use_key or "toolUse"),
+        )
     function = item.get("function")
     if isinstance(function, dict):
         if provider_shape == "single_top_level.tool_calls":
@@ -1544,6 +1576,22 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label=label,
         )
     return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
+
+
+def _native_nested_tool_call_alias_label(provider_shape: str, alias_key: str) -> str:
+    """Return transcript labels for nested functionCall/toolUse wrappers.
+
+    Most Chat-Completions compatible providers put ``function`` directly under
+    ``tool_calls[]``.  Some Gemini/Bedrock/OpenAI shims instead keep the native
+    object nested under ``functionCall`` or ``toolUse`` inside each tool-call
+    entry.  Preserve that provenance while keeping execution behind Phobos'
+    normal schema, runtime-policy, ROE, approval, and transcript boundaries.
+    """
+
+    alias = alias_key or "functionCall"
+    if provider_shape:
+        return "native provider " + provider_shape.replace(".", " ") + f" nested {alias}"
+    return f"native provider tool_call nested {alias}"
 
 
 def _native_call_id(*items: Any) -> str:

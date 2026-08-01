@@ -3163,6 +3163,119 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_tool_calls_nested_functioncall_and_tooluse_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Nested Tool Call Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-nested-tool-calls-should-not-run.txt"
+
+            class FakeNestedAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native nested provider tool_calls plan token=nested-tool-call-secret",
+                                    "tool_calls": [
+                                        {
+                                            "id": "nested_functioncall_memory",
+                                            "type": "functionCall",
+                                            "functionCall": {
+                                                "toolName": "remember",
+                                                "args": {"key": "native-nested-functioncall", "value": "nested functionCall in tool_calls accepted"},
+                                            },
+                                        },
+                                        {
+                                            "toolUseId": "nested_tooluse_tasks",
+                                            "type": "toolUse",
+                                            "toolUse": {
+                                                "functionName": "list_tasks",
+                                                "inputJson": {"status": "all", "limit": "1"},
+                                            },
+                                        },
+                                        {
+                                            "callId": "nested_tooluse_dry",
+                                            "type": "tool_call",
+                                            "toolUse": {
+                                                "name": "run_command",
+                                                "input": {
+                                                    "target": "app.example.test",
+                                                    "purpose": "nested toolUse dry-run boundary",
+                                                    "command": f"printf native-nested-tool-call > {dry_run_marker}",
+                                                    "execute": True,
+                                                },
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeNestedAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-nested-tool-call-aliases",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-nested-tool-calls", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native nested tool_calls token=nested-tool-call-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "run_command"])
+                    self.assertIn("native provider tool_call nested functionCall", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider tool_call nested toolUse", payload["tool_calls"][1]["reason"])
+                    self.assertFalse(payload["tool_calls"][2]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"])
+                    self.assertEqual(
+                        [item.get("native_tool_call_source") for item in call_metadata],
+                        ["native provider tool_call nested functionCall", "native provider tool_call nested toolUse", "native provider tool_call nested toolUse"],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
+                    self.assertNotIn("nested-tool-call-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native nested tool_calls token=nested-tool-call-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"])
+                    self.assertFalse(ledger[2].get("actual_command_or_process_activity"))
+                    self.assertEqual(ledger[2].get("native_tool_call_source"), "native provider tool_call nested toolUse")
+                recall = runtime.handle_message('/recall query=native-nested-functioncall')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("nested functionCall in tool_calls accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("tool_calls_nested_alias_translation"), status)
+                self.assertIn("tool_calls_nested_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("tool_calls_nested_toolUse", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("nested-tool-call-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_argument_aliases_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

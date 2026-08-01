@@ -1986,6 +1986,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("singular_tool_call_alias_translation") is True
             and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
+            and native_status_milestone_contract.get("tool_calls_nested_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("provider_hosted_tool_calls_rejected") is True
@@ -2045,6 +2046,8 @@ def main(argv: list[str] | None = None) -> int:
             and "single_top_level_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "singular_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_calls_nested_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2381,6 +2384,118 @@ def main(argv: list[str] | None = None) -> int:
             and "provider_call_id=`flat_dry`" in native_flat_transcript_markdown
             and "source=`native provider flat tool_call`" in native_flat_transcript_markdown
             and "native-flat-secret" not in json.dumps(native_flat_transcript_detail) + native_flat_transcript_markdown
+        )
+
+        native_nested_marker = root / "native-nested-tool-calls-should-not-run.txt"
+        native_nested_captured = {}
+
+        class NativeOpenAINestedToolCallAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native nested provider tool_calls smoke token=native-nested-secret",
+                                "tool_calls": [
+                                    {
+                                        "id": "nested_functioncall_memory",
+                                        "type": "functionCall",
+                                        "functionCall": {
+                                            "toolName": "remember",
+                                            "args": {"key": "native-nested-tool-call-smoke", "value": "nested functionCall tool_calls translated"},
+                                        },
+                                    },
+                                    {
+                                        "toolUseId": "nested_tooluse_tasks",
+                                        "type": "toolUse",
+                                        "toolUse": {
+                                            "functionName": "list_tasks",
+                                            "inputJson": {"status": "all", "limit": "1"},
+                                        },
+                                    },
+                                    {
+                                        "callId": "nested_tooluse_dry",
+                                        "type": "tool_call",
+                                        "toolUse": {
+                                            "name": "run_command",
+                                            "input": {
+                                                "target": "app.example.test",
+                                                "purpose": "nested provider toolUse dry-run smoke",
+                                                "command": f"printf native-nested > {native_nested_marker}",
+                                                "execute": True,
+                                            },
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_nested_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_nested_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_nested_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAINestedToolCallAliasSmokeResponse()
+
+        native_nested_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-nested-tool-call-aliases.db"),
+                session_name="native-provider-nested-tool-call-aliases-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-nested-tool-call-aliases-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_nested_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_nested_urlopen
+            native_nested_plan = native_nested_runtime.handle_message('/auto model=true prompt="native nested tool_calls smoke token=native-nested-secret"')
+            native_nested_plan_payload = json.loads(native_nested_plan.split("\n", 1)[1])
+            native_nested_apply = native_nested_runtime.handle_message('/auto apply=true model=true prompt="native nested tool_calls smoke token=native-nested-secret"')
+            native_nested_apply_payload = json.loads(native_nested_apply.split("\n", 1)[1])
+            native_nested_recall = native_nested_runtime.handle_message('/recall query=native-nested-tool-call-smoke')
+            write("native-provider-nested-tool-call-aliases.json", json.dumps({
+                "plan": native_nested_plan_payload,
+                "apply": native_nested_apply_payload,
+                "captured": native_nested_captured,
+                "recall": native_nested_recall,
+                "marker_exists": native_nested_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_nested_original_urlopen
+            native_nested_runtime.close()
+        native_nested_calls = native_nested_plan_payload.get("tool_calls", []) if isinstance(native_nested_plan_payload.get("tool_calls"), list) else []
+        native_nested_metadata = native_nested_plan_payload.get("metadata", {}) if isinstance(native_nested_plan_payload.get("metadata"), dict) else {}
+        native_nested_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_nested_calls]
+        native_nested_ledger = native_nested_apply_payload.get("execution_ledger", []) if isinstance(native_nested_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_tool_calls_nested_aliases_ok"] = (
+            native_nested_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_nested_calls] == ["remember", "list_tasks", "run_command"]
+            and "native provider tool_call nested functionCall" in native_nested_calls[0].get("reason", "")
+            and all("native provider tool_call nested toolUse" in call.get("reason", "") for call in native_nested_calls[1:])
+            and native_nested_calls[2].get("args", {}).get("execute") is False
+            and native_nested_metadata.get("native_tool_calls") is True
+            and native_nested_metadata.get("native_tool_call_count") == 3
+            and [item.get("provider_tool_call_id") for item in native_nested_call_metadata] == ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"]
+            and [item.get("native_tool_call_source") for item in native_nested_call_metadata] == ["native provider tool_call nested functionCall", "native provider tool_call nested toolUse", "native provider tool_call nested toolUse"]
+            and [item.get("result", {}).get("status") for item in native_nested_apply_payload.get("results", [])] == ["ok", "ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_nested_ledger] == ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"]
+            and native_nested_ledger[2].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("tool_calls_nested_alias_translation") is True
+            and "tool_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_calls_nested_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "nested functionCall tool_calls translated" in native_nested_recall
+            and native_nested_captured.get("tool_choice") == "auto"
+            and native_nested_captured.get("tool_count", 0) > 0
+            and not native_nested_marker.exists()
+            and "native-nested-secret" not in native_nested_plan + native_nested_apply + native_nested_recall + json.dumps(native_nested_plan_payload) + json.dumps(native_nested_apply_payload)
         )
 
         native_single_top_captured = {}
@@ -6713,6 +6828,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_provider_flat_tool_call_ok",
+            "native_provider_tool_calls_nested_aliases_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
             "native_provider_camel_case_tool_call_alias_ok",
