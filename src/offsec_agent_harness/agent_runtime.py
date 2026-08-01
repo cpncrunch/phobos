@@ -31,6 +31,7 @@ _EXECUTION_CAPABLE_TOOLS = {"run_command", "start_process", "nmap_scan", "httpx_
 _ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
 _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "natural_language_model_planning": True,
+    "wrapped_json_plan_extraction": True,
     "provider_native_tool_call_translation": True,
     "single_top_level_tool_call_translation": True,
     "legacy_function_call_translation": True,
@@ -1310,6 +1311,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "milestone_contract": dict(_NATIVE_TOOL_CALL_MILESTONE_CONTRACT),
             "milestone_contract_complete": all(_NATIVE_TOOL_CALL_MILESTONE_CONTRACT.values()),
             "model_planning_enabled": bool(config.auto_model_planning),
+            "wrapped_json_plan_extraction": True,
             "natural_auto_execute_enabled": bool(config.auto_execute_natural),
             "max_auto_steps": int(config.max_auto_steps),
             "plan_only_default": True,
@@ -1746,14 +1748,92 @@ def _mentions_no_execution(text: str) -> bool:
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("model did not return a JSON object")
-    parsed = json.loads(text[start:end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("model JSON response was not an object")
-    return parsed
+    """Extract the first plausible model tool-plan JSON object.
+
+    Real model adapters do not always obey the ``Return ONLY JSON`` prompt: some
+    wrap the object in a fenced ``json`` block, add a prose preface with brace
+    examples, or append trailing notes.  Native tool-call planning still needs a
+    strict local boundary, so scan bounded text for balanced JSON objects,
+    prefer objects that actually look like Phobos tool plans, and never dispatch
+    anything until the normal schema/runtime-policy/ROE validation path accepts
+    the parsed plan.
+    """
+
+    if not isinstance(text, str):
+        raise ValueError("model did not return text containing a JSON object")
+    parsed_objects: list[dict[str, Any]] = []
+    last_error = "model did not return a JSON object"
+    for candidate in _json_plan_candidate_texts(text):
+        for raw_object in _balanced_json_object_strings(candidate):
+            try:
+                parsed = json.loads(raw_object)
+            except json.JSONDecodeError as exc:
+                last_error = exc.msg
+                continue
+            if isinstance(parsed, dict):
+                parsed_objects.append(parsed)
+            else:
+                last_error = "model JSON response was not an object"
+    if not parsed_objects:
+        raise ValueError(last_error)
+    for parsed in parsed_objects:
+        if isinstance(parsed.get("tool_calls"), list):
+            return parsed
+    for parsed in parsed_objects:
+        if any(key in parsed for key in ("summary", "warnings", "rejected_tool_calls")):
+            return parsed
+    return parsed_objects[0]
+
+
+def _json_plan_candidate_texts(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"```[A-Za-z0-9_-]*\s*(.*?)```", text, flags=re.DOTALL):
+        block = match.group(1).strip()
+        if block and "{" in block:
+            candidates.append(block)
+    stripped = text.strip()
+    if stripped and stripped not in candidates:
+        candidates.append(stripped)
+    return candidates
+
+
+def _balanced_json_object_strings(text: str) -> list[str]:
+    objects: list[str] = []
+    length = len(text)
+    index = 0
+    while index < length:
+        if text[index] != "{":
+            index += 1
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        end_index: int | None = None
+        for cursor in range(index, length):
+            char = text[cursor]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end_index = cursor + 1
+                    break
+        if end_index is None:
+            index += 1
+            continue
+        objects.append(text[index:end_index])
+        index = end_index
+    return objects
 
 
 def _slash_bool_arg(args: dict[str, Any], name: str, default: bool) -> tuple[bool, str | None]:

@@ -50,6 +50,36 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeWrappedJsonToolPlanAdapter(BaseModelAdapter):
+    provider = "smoke-wrapped-json-tool-plan"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('wrapped-json-smoke-should-not-run', encoding='utf-8')\""
+            plan = {
+                "summary": "smoke wrapped JSON model plan selected safe local memory and a dry-run command",
+                "tool_calls": [
+                    {"tool": "remember", "args": {"key": "native-wrapped-json-smoke", "value": "wrapped JSON planner accepted"}, "reason": "prove fenced/surrounded JSON is extracted before validation"},
+                    {"tool": "run_command", "args": {"target": "app.example.test", "purpose": "wrapped JSON native smoke dry-run", "command": command, "execute": True}, "reason": "execution-capable model calls stay dry-run without operator execute=true"},
+                ],
+                "warnings": [],
+            }
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=(
+                    'Provider preface with ignored braces {"note":"ignore","token":"wrapped-smoke-secret"}.\n'
+                    "```json\n"
+                    + json.dumps(plan, indent=2)
+                    + "\n```\nTrailing unmatched provider brace {not-json"
+                ),
+            )
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeFailingToolPlanAdapter(BaseModelAdapter):
     provider = "smoke-tool-call-primary-fails"
 
@@ -1567,6 +1597,46 @@ def main(argv: list[str] | None = None) -> int:
             and "native-plan-secret" not in json.dumps(native_plan_trace + native_apply_trace) + json.dumps(native_plan_detail)
         )
 
+        native_wrapped_marker = root / "native-wrapped-json-should-not-run.txt"
+        native_wrapped_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-wrapped-json.db"),
+                session_name="native-tool-wrapped-json-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeWrappedJsonToolPlanAdapter(native_wrapped_marker),
+        )
+        try:
+            native_wrapped_plan = native_wrapped_runtime.handle_message('/auto model=true prompt="wrapped JSON native plan token=wrapped-smoke-secret"')
+            native_wrapped_plan_payload = json.loads(native_wrapped_plan.split("\n", 1)[1])
+            native_wrapped_apply = native_wrapped_runtime.handle_message('/auto apply=true model=true prompt="wrapped JSON native plan token=wrapped-smoke-secret"')
+            native_wrapped_apply_payload = json.loads(native_wrapped_apply.split("\n", 1)[1])
+            native_wrapped_recall = native_wrapped_runtime.handle_message('/recall query=native-wrapped-json-smoke')
+            native_wrapped_status = native_wrapped_runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+            write("native-tool-wrapped-json-plan.json", json.dumps({
+                "plan": native_wrapped_plan_payload,
+                "apply": native_wrapped_apply_payload,
+                "recall": native_wrapped_recall,
+                "status": native_wrapped_status,
+                "marker_exists": native_wrapped_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_wrapped_runtime.close()
+        native_wrapped_calls = native_wrapped_plan_payload.get("tool_calls", []) if isinstance(native_wrapped_plan_payload.get("tool_calls"), list) else []
+        checks["native_tool_call_wrapped_json_plan_ok"] = (
+            native_wrapped_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_wrapped_calls] == ["remember", "run_command"]
+            and native_wrapped_calls[1].get("args", {}).get("execute") is False
+            and native_wrapped_plan_payload.get("planner_trace", [{}])[0].get("provider") == "smoke-wrapped-json-tool-plan"
+            and [item.get("result", {}).get("status") for item in native_wrapped_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and "wrapped JSON planner accepted" in native_wrapped_recall
+            and native_wrapped_status.get("wrapped_json_plan_extraction") is True
+            and native_wrapped_status.get("milestone_contract", {}).get("wrapped_json_plan_extraction") is True
+            and not native_wrapped_marker.exists()
+            and "wrapped-smoke-secret" not in native_wrapped_plan + native_wrapped_apply + native_wrapped_recall + json.dumps(native_wrapped_plan_payload) + json.dumps(native_wrapped_apply_payload)
+        )
+
         native_context_adapter = SmokeToolCallContextAdapter()
         native_context_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
@@ -1907,6 +1977,7 @@ def main(argv: list[str] | None = None) -> int:
             and bool(native_status_milestone_contract)
             and all(native_status_milestone_contract.values())
             and native_status_milestone_contract.get("schema_validation_before_dispatch") is True
+            and native_status_milestone_contract.get("wrapped_json_plan_extraction") is True
             and native_status_milestone_contract.get("guardrail_preview_before_target_activity") is True
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
@@ -1920,6 +1991,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_data.get("model_planning_enabled") is True
+            and native_status_data.get("wrapped_json_plan_extraction") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
@@ -3751,6 +3823,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
+            "native_tool_call_wrapped_json_plan_ok",
             "native_tool_call_plan_transcript_ok",
             "native_tool_call_one_shot_planner_trace_ok",
             "native_tool_call_context_handoff_ok",

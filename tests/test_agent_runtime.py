@@ -70,6 +70,44 @@ class FakeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
 
 
+class FakeWrappedJsonToolPlanAdapter(BaseModelAdapter):
+    provider = "fake-wrapped-json-tool-plan"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        if "Return ONLY JSON" in prompt:
+            command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('wrapped-json-should-not-run', encoding='utf-8')\""
+            plan = {
+                "summary": "wrapped JSON model plan selected safe local memory and a dry-run command",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-wrapped-json", "value": "wrapped JSON model plan accepted"},
+                        "reason": "prove fenced/surrounded JSON was parsed before registry validation",
+                    },
+                    {
+                        "tool": "run_command",
+                        "args": {"target": "app.example.test", "purpose": "wrapped JSON native plan dry-run", "command": command, "execute": True},
+                        "reason": "execution-capable calls must still be coerced to dry-run without explicit execute=true",
+                    },
+                ],
+                "warnings": [],
+            }
+            return ModelResponse(
+                provider=self.provider,
+                role=role,
+                content=(
+                    'Planner preface with decoy braces {"note":"ignore","token":"wrapped-json-secret"}.\n'
+                    "```json\n"
+                    + json.dumps(plan, indent=2)
+                    + "\n```\nTrailing provider prose with an unmatched brace {not-json"
+                ),
+            )
+        return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+
 class FakeFailingToolPlanAdapter(BaseModelAdapter):
     provider = "fake-tool-call-primary-fails"
 
@@ -2622,6 +2660,51 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertFalse(ledger[1]["safe_to_claim_command_executed"])
                 self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
                 self.assertFalse((tmp_path / "should-not-run").exists())
+            finally:
+                runtime.close()
+
+    def test_model_plan_extracts_wrapped_or_fenced_json_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Wrapped JSON Native Plan",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "wrapped-json-should-not-run.txt"
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="wrapped-json-native-plan",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeWrappedJsonToolPlanAdapter(marker),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="wrapped JSON model plan token=wrapped-plan-secret"')
+                plan_payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                self.assertEqual(plan_payload.get("planner_trace", [{}])[0].get("provider"), "fake-wrapped-json-tool-plan")
+                self.assertTrue(plan_payload["tool_calls"][0]["validation"]["schema_validated"])
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="wrapped JSON model plan token=wrapped-plan-secret"')
+                applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(applied_payload["mode"], "applied")
+                self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                self.assertFalse(marker.exists())
+                recall = runtime.handle_message('/recall query=native-wrapped-json')
+                self.assertIn("wrapped JSON model plan accepted", recall)
+                native_status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(native_status.get("wrapped_json_plan_extraction"), native_status)
+                self.assertTrue(native_status.get("milestone_contract", {}).get("wrapped_json_plan_extraction"), native_status)
+                serialized = planned + applied + recall + json.dumps(plan_payload) + json.dumps(applied_payload)
+                self.assertNotIn("wrapped-plan-secret", serialized)
+                self.assertNotIn("wrapped-json-secret", serialized)
             finally:
                 runtime.close()
 
