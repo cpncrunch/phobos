@@ -2331,6 +2331,7 @@ def main(argv: list[str] | None = None) -> int:
                                     },
                                     {"type": "tool_use", "id": "content_bad", "name": "remember", "input": ["not", "object"]},
                                     {"type": "tool_result", "content": native_provider_result_marker},
+                                    {"type": "functionResponse", "content": native_provider_result_marker + " token=native-content-block-secret"},
                                 ],
                             }
                         }
@@ -2613,12 +2614,16 @@ def main(argv: list[str] | None = None) -> int:
             "tool_result" in native_edge_warnings.lower()
             and "tool_result" in native_content_warnings.lower()
             and "tool_result" in native_responses_warnings.lower()
+            and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "function_response" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and native_provider_result_marker not in native_edge_plan + native_edge_apply + native_edge_recall
             and native_provider_result_marker not in native_content_plan + native_content_apply + native_content_recall
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall
+            and native_provider_result_marker not in native_candidate_plan + native_candidate_apply + native_candidate_recall
             and native_provider_result_marker not in json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and native_provider_result_marker not in json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
             and native_provider_result_marker not in json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+            and native_provider_result_marker not in json.dumps(native_candidate_plan_payload) + json.dumps(native_candidate_apply_payload)
         )
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"

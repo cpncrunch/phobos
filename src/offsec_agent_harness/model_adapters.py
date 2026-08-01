@@ -484,7 +484,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             })
             continue
         if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
-            content_blocks.append({"type": "tool_result", "content": item.get("output") or item.get("content") or ""})
+            content_blocks.append({"type": "tool_result", "content": item.get("output") or item.get("content") or item.get("response") or ""})
             continue
     output_text = raw.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -682,7 +682,13 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
 
 
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
-_NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {"tool_result", "function_result", "function_call_output"}
+_NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
+    "tool_result",
+    "function_result",
+    "function_call_output",
+    "functionResponse",
+    "function_response",
+}
 _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {"custom_tool_call"}
 
 

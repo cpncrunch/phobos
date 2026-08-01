@@ -2935,6 +2935,7 @@ class AgentRuntimeTests(unittest.TestCase):
             ).save(engagement)
             captured_payloads = []
             custom_input_marker = "CONTENT_BLOCK_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
+            function_response_marker = "CONTENT_BLOCK_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
 
             class FakeContentBlockHTTPResponse:
                 def __enter__(self):
@@ -2964,6 +2965,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"type": "tool_use", "id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
                                         {"type": "custom_tool_call", "id": "toolu_custom", "name": "run_command", "input": custom_input_marker + " token=content-secret"},
                                         {"type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
+                                        {"type": "functionResponse", "content": function_response_marker + " token=content-secret"},
                                     ],
                                 }
                             }
@@ -3002,6 +3004,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("tool_result", warnings_blob)
                     self.assertIn("custom/freeform", warnings_blob)
                     self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(payload))
+                    self.assertNotIn(function_response_marker, planned + rejected_blob + json.dumps(payload))
                     self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(payload))
                     metadata = payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
