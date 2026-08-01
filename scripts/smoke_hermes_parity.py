@@ -1678,6 +1678,9 @@ def main(argv: list[str] | None = None) -> int:
             native_allowed_exec_payload = json.loads(native_allowed_exec.split("\n", 1)[1])
             native_allowed_exec_ledger = native_allowed_exec_payload.get("execution_ledger", []) if isinstance(native_allowed_exec_payload.get("execution_ledger"), list) else []
             native_allowed_dry_ledger = native_allowed_dry_payload.get("execution_ledger", []) if isinstance(native_allowed_dry_payload.get("execution_ledger"), list) else []
+            native_allowed_plan_summary = native_allowed_plan_payload.get("execution_summary", {}) if isinstance(native_allowed_plan_payload.get("execution_summary"), dict) else {}
+            native_allowed_dry_summary = native_allowed_dry_payload.get("execution_summary", {}) if isinstance(native_allowed_dry_payload.get("execution_summary"), dict) else {}
+            native_allowed_exec_summary = native_allowed_exec_payload.get("execution_summary", {}) if isinstance(native_allowed_exec_payload.get("execution_summary"), dict) else {}
             native_allowed_artifacts = native_allowed_exec_payload.get("artifacts", {}) if isinstance(native_allowed_exec_payload.get("artifacts"), dict) else {}
             native_allowed_json_path = Path(native_allowed_artifacts.get("json", ""))
             native_allowed_md_path = Path(native_allowed_artifacts.get("markdown", ""))
@@ -1708,9 +1711,12 @@ def main(argv: list[str] | None = None) -> int:
             native_allowed_plan_payload.get("mode") == "plan_only"
             and native_allowed_plan_payload.get("tool_calls", [{}])[0].get("args", {}).get("execute") is False
             and native_allowed_plan_payload.get("tool_calls", [{}])[0].get("validation", {}).get("guardrail_status") == "allow"
+            and native_allowed_plan_summary.get("ledger_entries") == 0
             and [item.get("result", {}).get("status") for item in native_allowed_dry_payload.get("results", [])] == ["dry_run"]
             and native_allowed_dry_ledger[0].get("actual_command_or_process_activity") is False
             and native_allowed_dry_ledger[0].get("safe_to_claim_tool_ran") is False
+            and native_allowed_dry_summary.get("dry_run") == 1
+            and native_allowed_dry_summary.get("claimable_command_executions") == 0
             and native_allowed_marker_after_dry is False
             and native_allowed_exec_statuses == ["executed"]
             and native_allowed_marker.exists()
@@ -1720,6 +1726,9 @@ def main(argv: list[str] | None = None) -> int:
             and native_allowed_exec_ledger[0].get("safe_to_claim_tool_ran") is True
             and native_allowed_exec_ledger[0].get("safe_to_claim_command_executed") is True
             and native_allowed_exec_ledger[0].get("guardrail_status") == "allow"
+            and native_allowed_exec_summary.get("actual_command_or_process_activity") == 1
+            and native_allowed_exec_summary.get("claimable_tool_runs") == 1
+            and native_allowed_exec_summary.get("claimable_command_executions") == 1
             and "native-allowed-secret" not in json.dumps(native_allowed_plan_payload) + json.dumps(native_allowed_dry_payload) + json.dumps(native_allowed_exec_payload)
         )
         checks["native_tool_call_apply_transcript_ok"] = (
@@ -1727,13 +1736,16 @@ def main(argv: list[str] | None = None) -> int:
             and native_allowed_json_path.is_file()
             and native_allowed_md_path.is_file()
             and "Phobos Native Tool-Calling Auto Plan" in native_allowed_transcript
+            and "Execution summary" in native_allowed_transcript
             and "Execution ledger" in native_allowed_transcript
+            and "claimable command executions: `1`" in native_allowed_transcript
             and "actual_command_or_process_activity=`True`" in native_allowed_transcript
             and "auto_plan_apply" in native_allowed_apply_audit_events
             and native_allowed_bridge.status == "handled"
             and "Auto plan applied through the guarded registry boundary" in native_allowed_bridge.response
             and "dry_run=1" in native_allowed_bridge.response
             and "actual_command_or_process_activity=0" in native_allowed_bridge.response
+            and "claimable_command_executions=0" in native_allowed_bridge.response
             and "native-allowed-secret" not in native_allowed_transcript
             and "native-apply-secret" not in json.dumps(native_allowed_bridge.to_dict()) + native_allowed_transcript
         )
@@ -1861,6 +1873,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("per_step_planner_trace") is True
             and native_status_data.get("one_shot_planner_trace") is True
             and native_status_data.get("planner_trace_redacted") is True
+            and native_status_data.get("execution_summary_contract") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
@@ -2595,6 +2608,7 @@ def main(argv: list[str] | None = None) -> int:
             feedback_loop = feedback_runtime.handle_message('/auto-loop model=true steps=4 prompt="native feedback smoke token=feedback-smoke-secret"')
             feedback_payload = json.loads(feedback_loop.split("\n", 1)[1])
             feedback_ledger = feedback_payload.get("execution_ledger", []) if isinstance(feedback_payload.get("execution_ledger"), list) else []
+            feedback_execution_summary = feedback_payload.get("execution_summary", {}) if isinstance(feedback_payload.get("execution_summary"), dict) else {}
             feedback_steps = feedback_payload.get("steps", []) if isinstance(feedback_payload.get("steps"), list) else []
             feedback_planner_trace = feedback_payload.get("planner_trace", []) if isinstance(feedback_payload.get("planner_trace"), list) else []
             feedback_step_deltas = [
@@ -3053,7 +3067,14 @@ def main(argv: list[str] | None = None) -> int:
             and feedback_payload.get("steps_executed") == 2
             and feedback_payload.get("transcript_artifact_written") is True
             and [item.get("result", {}).get("status") for step in feedback_payload.get("steps", []) for item in step.get("results", [])][:2] == ["error", "ok"]
+            and feedback_execution_summary.get("ledger_entries") == 2
+            and feedback_execution_summary.get("handler_error") == 1
+            and feedback_execution_summary.get("local_only_completion") == 1
+            and feedback_execution_summary.get("claimable_tool_runs") == 1
+            and feedback_execution_summary.get("claimable_command_executions") == 0
             and "native feedback loop recovered" in feedback_recall
+            and "Execution summary" in feedback_transcript
+            and "Claimable tool runs: `1`" in feedback_transcript
             and "Execution ledger" in feedback_transcript
             and "Execution ledger delta" in feedback_transcript
             and "Workspace file not found" in feedback_transcript
@@ -3110,6 +3131,7 @@ def main(argv: list[str] | None = None) -> int:
             and feedback_transcript_detail.get("status") == "ok"
             and feedback_transcript_detail.get("data", {}).get("raw_file_contents_emitted") is False
             and feedback_transcript_detail.get("data", {}).get("summary", {}).get("execution_counts", {}).get("handler_error") == 1
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("execution_summary", {}).get("claimable_tool_runs") == 1
             and feedback_transcript_detail.get("data", {}).get("summary", {}).get("result_count") == 2
             and feedback_transcript_ref.get("status") == "ok"
             and "Native tool-calling transcript returned" in feedback_transcript_slash
@@ -3141,6 +3163,20 @@ def main(argv: list[str] | None = None) -> int:
             and native_allowed_exec_ledger[0].get("safe_to_claim_command_executed") is True
             and "feedback-smoke-secret" not in json.dumps(native_apply_ledger + guardrail_apply_ledger + feedback_ledger + native_allowed_exec_ledger)
         )
+        checks["native_tool_call_execution_summary_ok"] = (
+            native_allowed_plan_summary.get("ledger_entries") == 0
+            and native_allowed_dry_summary.get("ledger_entries") == 1
+            and native_allowed_dry_summary.get("dry_run") == 1
+            and native_allowed_dry_summary.get("claimable_tool_runs") == 0
+            and native_allowed_exec_summary.get("ledger_entries") == 1
+            and native_allowed_exec_summary.get("actual_command_or_process_activity") == 1
+            and native_allowed_exec_summary.get("claimable_command_executions") == 1
+            and feedback_execution_summary.get("handler_error") == 1
+            and feedback_execution_summary.get("claimable_tool_runs") == 1
+            and feedback_transcript_detail.get("data", {}).get("summary", {}).get("execution_summary", {}).get("handler_error") == 1
+            and "Claim rule" in feedback_transcript
+            and "native-allowed-secret" not in json.dumps(native_allowed_plan_summary) + json.dumps(native_allowed_dry_summary) + json.dumps(native_allowed_exec_summary) + json.dumps(feedback_execution_summary)
+        )
         checks["native_tool_call_gateway_chat_ok"] = (
             "/auto" in feedback_routes.get("paths", [])
             and "/auto-loop" in feedback_routes.get("paths", [])
@@ -3153,6 +3189,7 @@ def main(argv: list[str] | None = None) -> int:
             and bridge_loop.status == "handled"
             and "Native tool loop stopped" in bridge_loop.response
             and "Actual results" in bridge_loop.response
+            and "claimable_tool_runs=1" in bridge_loop.response
             and "Auto loop completed" in bridge_loop.raw_response
             and "native-gateway-secret" not in json.dumps(gateway_auto)
             and "native-loop-secret" not in json.dumps(gateway_loop)

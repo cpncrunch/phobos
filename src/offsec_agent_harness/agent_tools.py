@@ -3538,6 +3538,7 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
             raw_step_calls = plan.get("tool_calls")
             step_calls: list[Any] = raw_step_calls if isinstance(raw_step_calls, list) else []
             calls.extend(step_calls)
+    execution_summary = _auto_transcript_execution_summary(data, ledger)
     return _redacted_mapping({
         "kind": kind,
         "path": rel,
@@ -3554,6 +3555,7 @@ def _auto_transcript_entry(evidence_root: Path, kind: str, json_path: Path, *, p
         "tool_count": len(calls),
         "planner_trace_count": len(trace),
         "planner_providers": providers[:8],
+        "execution_summary": execution_summary,
         "execution_counts": _auto_transcript_ledger_counts(ledger),
         "actual_command_or_process_activity": sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True),
         "prompt_preview": str(data.get("prompt") or "")[:200],
@@ -3636,6 +3638,47 @@ def _auto_transcript_ledger_counts(ledger: Any) -> dict[str, int]:
         if str(item.get("execution_state") or "").startswith("handler_error"):
             counts["handler_error"] += 1
     return counts
+
+
+def _auto_transcript_execution_summary(payload: dict[str, Any], ledger: Any) -> dict[str, Any]:
+    raw_summary = payload.get("execution_summary") if isinstance(payload, dict) else None
+    if isinstance(raw_summary, dict):
+        return _redacted_mapping(raw_summary)
+    entries = [item for item in ledger if isinstance(item, dict)] if isinstance(ledger, list) else []
+
+    def count_flag(name: str) -> int:
+        return sum(1 for item in entries if item.get(name) is True)
+
+    def count_state(prefix: str) -> int:
+        return sum(1 for item in entries if str(item.get("execution_state") or "").startswith(prefix))
+
+    def counted_values(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in entries:
+            value = str(item.get(key) or "unknown")
+            counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    claimable_tools = count_flag("safe_to_claim_tool_ran")
+    return _redacted_mapping({
+        "ledger_entries": len(entries),
+        "dispatch_attempted": count_flag("dispatch_attempted"),
+        "target_affecting_tool_calls": count_flag("target_affecting_tool"),
+        "actual_command_or_process_activity": count_flag("actual_command_or_process_activity"),
+        "approval_queued": count_flag("approval_queued"),
+        "blocked": count_flag("blocked"),
+        "dry_run": count_flag("dry_run"),
+        "handler_error": count_state("handler_error"),
+        "local_only_completion": count_state("completed_without_command_execution"),
+        "claimable_tool_runs": claimable_tools,
+        "claimable_command_executions": count_flag("safe_to_claim_command_executed"),
+        "non_claimable_results": max(0, len(entries) - claimable_tools),
+        "result_status_counts": counted_values("result_status"),
+        "execution_state_counts": counted_values("execution_state"),
+        "runtime_policy_counts": counted_values("runtime_policy"),
+        "guardrail_status_counts": counted_values("guardrail_status"),
+        "claim_rule": "Only entries with safe_to_claim_command_executed=true / actual_command_or_process_activity=true may be described as command or process execution; dry-run, approval, blocked, and handler-error entries are non-claimable.",
+    })
 
 
 def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int = 20) -> dict[str, Any]:
@@ -3733,6 +3776,7 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         "step_ledger_deltas": step_ledger_deltas[:max_ledger],
         "step_ledger_delta_count": len(step_ledger_deltas),
         "no_dispatch_step_count": no_dispatch_step_count,
+        "execution_summary": _auto_transcript_execution_summary(data, ledger),
         "execution_counts": _auto_transcript_ledger_counts(ledger),
         "truncated": len(ledger) > max_ledger or len(calls) > max_ledger or len(results) > max_ledger or len(step_ledger_deltas) > max_ledger,
     })

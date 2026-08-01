@@ -472,6 +472,7 @@ class OffSecAgentRuntime:
             payload["next_step"] = "Re-run with /auto apply=true to invoke these tools. Add execute=true only if guarded command execution is intended."
             payload["results"] = []
             payload["execution_ledger"] = []
+            payload["execution_summary"] = _native_execution_summary([])
             payload["transcript_artifact_written"] = False
             payload["secret_values_redacted"] = True
             payload["no_tools_executed"] = True
@@ -512,6 +513,7 @@ class OffSecAgentRuntime:
         payload["mode"] = "applied"
         payload["results"] = results
         payload["execution_ledger"] = _redact_runtime_value(execution_ledger)
+        payload["execution_summary"] = _native_execution_summary(execution_ledger)
         payload["transcript_artifact_written"] = False
         payload["secret_values_redacted"] = True
         try:
@@ -920,6 +922,7 @@ class OffSecAgentRuntime:
             "transcript_artifact_written": False,
             "secret_values_redacted": True,
             "execution_ledger": _redact_runtime_value(execution_ledger),
+            "execution_summary": _native_execution_summary(execution_ledger),
             "planner_trace": _redact_runtime_value(planner_trace),
             "steps": loop_results,
         }
@@ -1221,6 +1224,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "per_step_planner_trace": True,
             "one_shot_planner_trace": True,
             "planner_trace_redacted": True,
+            "execution_summary_contract": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
@@ -1461,7 +1465,17 @@ def _render_auto_apply_chat(response: str) -> str:
         lines.append("- Planned tools: " + ", ".join(f"`{tool}`" for tool in planned[:8]))
     if counts:
         lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
-    if ledger:
+    execution_summary = data.get("execution_summary") if isinstance(data.get("execution_summary"), dict) else {}
+    if execution_summary:
+        lines.append(
+            "- Execution ledger summary: "
+            f"actual_command_or_process_activity={execution_summary.get('actual_command_or_process_activity', 0)}, "
+            f"approval_queued={execution_summary.get('approval_queued', 0)}, "
+            f"blocked={execution_summary.get('blocked', 0)}, dry_run={execution_summary.get('dry_run', 0)}, "
+            f"claimable_tool_runs={execution_summary.get('claimable_tool_runs', 0)}, "
+            f"claimable_command_executions={execution_summary.get('claimable_command_executions', 0)}"
+        )
+    elif ledger:
         actual_activity = sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True)
         queued = sum(1 for item in ledger if isinstance(item, dict) and item.get("approval_queued") is True)
         blocked = sum(1 for item in ledger if isinstance(item, dict) and item.get("blocked") is True)
@@ -1530,7 +1544,17 @@ def _render_auto_loop_chat(response: str) -> str:
         lines.append("- Planner trace: " + ", ".join(f"`{provider}`" for provider in providers[:4]))
     if counts:
         lines.append("- Actual results: " + ", ".join(f"{status}={count}" for status, count in sorted(counts.items())))
-    if ledger:
+    execution_summary = data.get("execution_summary") if isinstance(data.get("execution_summary"), dict) else {}
+    if execution_summary:
+        lines.append(
+            "- Execution ledger summary: "
+            f"actual_command_or_process_activity={execution_summary.get('actual_command_or_process_activity', 0)}, "
+            f"approval_queued={execution_summary.get('approval_queued', 0)}, "
+            f"blocked={execution_summary.get('blocked', 0)}, dry_run={execution_summary.get('dry_run', 0)}, "
+            f"claimable_tool_runs={execution_summary.get('claimable_tool_runs', 0)}, "
+            f"claimable_command_executions={execution_summary.get('claimable_command_executions', 0)}"
+        )
+    elif ledger:
         actual_activity = sum(1 for item in ledger if isinstance(item, dict) and item.get("actual_command_or_process_activity") is True)
         queued = sum(1 for item in ledger if isinstance(item, dict) and item.get("approval_queued") is True)
         blocked = sum(1 for item in ledger if isinstance(item, dict) and item.get("blocked") is True)
@@ -1780,6 +1804,56 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
     return _redact_runtime_value(ledger)
 
 
+def _native_execution_summary(ledger: Any) -> dict[str, Any]:
+    """Return machine-readable execution-claim counts for native /auto payloads.
+
+    The execution ledger remains the authoritative per-call record.  This
+    compact summary gives chat, gateway, and transcript consumers a stable way
+    to distinguish actual command/process activity from dry-runs, approval
+    queues, blocks, handler errors, and local-only registry completions without
+    scanning raw results or overclaiming what happened.
+    """
+
+    entries = [item for item in ledger if isinstance(item, dict)] if isinstance(ledger, list) else []
+
+    def count_flag(name: str) -> int:
+        return sum(1 for item in entries if item.get(name) is True)
+
+    def count_state(prefix: str) -> int:
+        return sum(1 for item in entries if str(item.get("execution_state") or "").startswith(prefix))
+
+    def counted_values(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in entries:
+            value = str(item.get(key) or "unknown")
+            counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    actual = count_flag("actual_command_or_process_activity")
+    claimable_tools = count_flag("safe_to_claim_tool_ran")
+    claimable_commands = count_flag("safe_to_claim_command_executed")
+    summary = {
+        "ledger_entries": len(entries),
+        "dispatch_attempted": count_flag("dispatch_attempted"),
+        "target_affecting_tool_calls": count_flag("target_affecting_tool"),
+        "actual_command_or_process_activity": actual,
+        "approval_queued": count_flag("approval_queued"),
+        "blocked": count_flag("blocked"),
+        "dry_run": count_flag("dry_run"),
+        "handler_error": count_state("handler_error"),
+        "local_only_completion": count_state("completed_without_command_execution"),
+        "claimable_tool_runs": claimable_tools,
+        "claimable_command_executions": claimable_commands,
+        "non_claimable_results": max(0, len(entries) - claimable_tools),
+        "result_status_counts": counted_values("result_status"),
+        "execution_state_counts": counted_values("execution_state"),
+        "runtime_policy_counts": counted_values("runtime_policy"),
+        "guardrail_status_counts": counted_values("guardrail_status"),
+        "claim_rule": "Only entries with safe_to_claim_command_executed=true / actual_command_or_process_activity=true may be described as command or process execution; dry-run, approval, blocked, and handler-error entries are non-claimable.",
+    }
+    return _redact_runtime_value(summary)
+
+
 def _redact_runtime_value(value: Any) -> Any:
     """Recursively redact string leaves while preserving JSON structure."""
 
@@ -1844,6 +1918,19 @@ def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
             f"selected_provider=`{item.get('selected_provider')}` tool_calls=`{item.get('tool_call_count')}` "
             f"rejected=`{item.get('rejected_tool_call_count')}` context_chars=`{item.get('context_chars', 0)}`{fallback_note}"
         )
+    raw_summary = payload.get("execution_summary")
+    execution_summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
+    if execution_summary:
+        lines.extend([
+            "",
+            "## Execution summary",
+            "",
+            f"- Ledger entries: `{execution_summary.get('ledger_entries', 0)}`",
+            f"- Actual command/process activity: `{execution_summary.get('actual_command_or_process_activity', 0)}`",
+            f"- Approval queued: `{execution_summary.get('approval_queued', 0)}`; blocked: `{execution_summary.get('blocked', 0)}`; dry-run: `{execution_summary.get('dry_run', 0)}`",
+            f"- Claimable tool runs: `{execution_summary.get('claimable_tool_runs', 0)}`; claimable command executions: `{execution_summary.get('claimable_command_executions', 0)}`",
+            f"- Claim rule: {execution_summary.get('claim_rule', '')}",
+        ])
     lines.extend([
         "",
         "## Execution ledger",
@@ -1961,6 +2048,19 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
             f"selected_provider=`{item.get('selected_provider')}` tool_calls=`{item.get('tool_call_count')}` "
             f"rejected=`{item.get('rejected_tool_call_count')}` context_chars=`{item.get('context_chars', 0)}`{fallback_note}"
         )
+    raw_summary = payload.get("execution_summary")
+    execution_summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
+    if execution_summary:
+        lines.extend([
+            "",
+            "## Execution summary",
+            "",
+            f"- Ledger entries: `{execution_summary.get('ledger_entries', 0)}`",
+            f"- Actual command/process activity: `{execution_summary.get('actual_command_or_process_activity', 0)}`",
+            f"- Approval queued: `{execution_summary.get('approval_queued', 0)}`; blocked: `{execution_summary.get('blocked', 0)}`; dry-run: `{execution_summary.get('dry_run', 0)}`",
+            f"- Claimable tool runs: `{execution_summary.get('claimable_tool_runs', 0)}`; claimable command executions: `{execution_summary.get('claimable_command_executions', 0)}`",
+            f"- Claim rule: {execution_summary.get('claim_rule', '')}",
+        ])
     lines.extend([
         "",
         "## Execution ledger",
