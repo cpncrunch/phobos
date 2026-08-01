@@ -1992,6 +1992,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
+            and native_status_milestone_contract.get("responses_message_content_tool_call_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
@@ -2037,6 +2038,8 @@ def main(argv: list[str] | None = None) -> int:
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_content_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3666,6 +3669,102 @@ def main(argv: list[str] | None = None) -> int:
             and "native-responses-nested-secret" not in native_responses_nested_outputs + json.dumps(native_responses_nested_call_metadata) + json.dumps(native_responses_nested_ledger)
         )
 
+        native_responses_message_content_captured = {}
+        native_responses_message_content_result_marker = "NATIVE_RESPONSES_MESSAGE_CONTENT_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesMessageContentSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native responses message content smoke token=native-responses-message-secret",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "native responses message content smoke token=native-responses-message-secret"},
+                                {
+                                    "type": "function_call",
+                                    "call_id": "responses_message_content_memory",
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-responses-message-content-smoke", "value": "Responses message content function_call native tool call translated"}),
+                                },
+                                {
+                                    "type": "tool_use",
+                                    "toolUseId": "responses_message_content_tasks",
+                                    "name": "list_tasks",
+                                    "input": {"status": "all", "limit": 1},
+                                },
+                                {"type": "function_call_output", "call_id": "responses_message_content_result", "output": native_responses_message_content_result_marker + " token=native-responses-message-secret"},
+                            ],
+                        }
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_message_content_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_message_content_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_message_content_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesMessageContentSmokeResponse()
+
+        native_responses_message_content_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-message-content.db"),
+                session_name="native-provider-responses-message-content-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-message-content-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_message_content_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_message_content_urlopen
+            native_responses_message_content_plan = native_responses_message_content_runtime.handle_message('/auto model=true prompt="native responses message content smoke token=native-responses-message-secret"')
+            native_responses_message_content_plan_payload = json.loads(native_responses_message_content_plan.split("\n", 1)[1])
+            native_responses_message_content_apply = native_responses_message_content_runtime.handle_message('/auto apply=true model=true prompt="native responses message content smoke token=native-responses-message-secret"')
+            native_responses_message_content_apply_payload = json.loads(native_responses_message_content_apply.split("\n", 1)[1])
+            native_responses_message_content_recall = native_responses_message_content_runtime.handle_message('/recall query=native-responses-message-content-smoke')
+            write("native-provider-responses-message-content-tool-calls.json", json.dumps({
+                "plan": native_responses_message_content_plan_payload,
+                "apply": native_responses_message_content_apply_payload,
+                "captured": native_responses_message_content_captured,
+                "recall": native_responses_message_content_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_message_content_original_urlopen
+            native_responses_message_content_runtime.close()
+        native_responses_message_content_calls = native_responses_message_content_plan_payload.get("tool_calls", []) if isinstance(native_responses_message_content_plan_payload.get("tool_calls"), list) else []
+        native_responses_message_content_metadata = native_responses_message_content_plan_payload.get("metadata", {}) if isinstance(native_responses_message_content_plan_payload.get("metadata"), dict) else {}
+        native_responses_message_content_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_message_content_calls]
+        native_responses_message_content_ledger = native_responses_message_content_apply_payload.get("execution_ledger", []) if isinstance(native_responses_message_content_apply_payload.get("execution_ledger"), list) else []
+        native_responses_message_content_outputs = native_responses_message_content_plan + native_responses_message_content_apply + native_responses_message_content_recall + json.dumps(native_responses_message_content_plan_payload) + json.dumps(native_responses_message_content_apply_payload)
+        checks["native_provider_responses_message_content_tool_call_ok"] = (
+            native_responses_message_content_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_message_content_calls] == ["remember", "list_tasks"]
+            and "native provider responses message content function_call" in native_responses_message_content_calls[0].get("reason", "")
+            and "native provider responses message content tool_use" in native_responses_message_content_calls[1].get("reason", "")
+            and native_responses_message_content_metadata.get("native_tool_calls") is True
+            and native_responses_message_content_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_responses_message_content_call_metadata] == ["responses_message_content_memory", "responses_message_content_tasks"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_content_call_metadata] == ["native provider responses message content function_call", "native provider responses message content tool_use"]
+            and [item.get("provider_tool_call_id") for item in native_responses_message_content_ledger] == ["responses_message_content_memory", "responses_message_content_tasks"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_content_ledger] == ["native provider responses message content function_call", "native provider responses message content tool_use"]
+            and [item.get("result", {}).get("status") for item in native_responses_message_content_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("responses_message_content_tool_call_translation") is True
+            and "responses_message_content_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses message content function_call native tool call translated" in native_responses_message_content_recall
+            and "tool_result" in json.dumps(native_responses_message_content_plan_payload.get("warnings", [])).lower()
+            and native_responses_message_content_captured.get("tool_choice") == "auto"
+            and native_responses_message_content_captured.get("tool_count", 0) > 0
+            and native_responses_message_content_result_marker not in native_responses_message_content_outputs
+            and "native-responses-message-secret" not in native_responses_message_content_outputs + json.dumps(native_responses_message_content_call_metadata) + json.dumps(native_responses_message_content_ledger)
+        )
+
         native_single_responses_captured = {}
 
         class NativeOpenAISingleResponsesOutputSmokeResponse:
@@ -4882,6 +4981,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
+            "native_provider_responses_message_content_tool_call_ok",
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",

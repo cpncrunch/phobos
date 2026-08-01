@@ -3945,6 +3945,100 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_message_content_tool_calls_keep_provider_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Message Content Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "PROVIDER_RESPONSES_MESSAGE_CONTENT_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesMessageContentHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "responses message content token=responses-message-secret",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": "responses message content token=responses-message-secret"},
+                                    {
+                                        "type": "function_call",
+                                        "call_id": "resp_message_content_memory",
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-responses-message-content", "value": "Responses message content function_call accepted"}),
+                                    },
+                                    {
+                                        "type": "tool_use",
+                                        "toolUseId": "resp_message_content_tasks",
+                                        "name": "list_tasks",
+                                        "input": {"status": "all", "limit": 1},
+                                    },
+                                    {"type": "function_call_output", "call_id": "resp_message_content_result", "output": provider_result_marker + " token=responses-message-secret"},
+                                ],
+                            }
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesMessageContentHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-message-content",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses-message-content", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses message content token=responses-message-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertIn("native provider responses message content function_call", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses message content tool_use", payload["tool_calls"][1]["reason"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_content_memory", "resp_message_content_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses message content function_call", "native provider responses message content tool_use"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn("responses-message-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses message content token=responses-message-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_content_memory", "resp_message_content_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider responses message content function_call", "native provider responses message content tool_use"])
+                recall = runtime.handle_message('/recall query=native-responses-message-content')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses message content function_call accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_content_tool_call_translation"), status)
+                self.assertIn("responses_message_content_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_content_tool_use", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("responses-message-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_single_responses_output_tool_call_object_is_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

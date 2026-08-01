@@ -503,7 +503,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         block_type = str(item.get("type") or "").strip()
         if block_type == "message":
-            _extend_responses_content_blocks(content_blocks, item.get("content"))
+            _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape="responses.message.content")
             continue
         if block_type in {"output_text", "text"}:
             text = item.get("text") or item.get("content")
@@ -578,20 +578,37 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {"content": content_value, "tool_calls": tool_calls}
 
 
-def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any) -> None:
+def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any, *, provider_shape: str = "") -> None:
     if isinstance(content, str):
         blocks.append({"type": "text", "text": content})
         return
     if isinstance(content, dict):
-        blocks.append(dict(content))
+        blocks.append(_responses_content_block(content, provider_shape=provider_shape))
         return
     if not isinstance(content, list):
         return
     for block in content:
         if isinstance(block, dict):
-            blocks.append(dict(block))
+            blocks.append(_responses_content_block(block, provider_shape=provider_shape))
         elif isinstance(block, str):
             blocks.append({"type": "text", "text": block})
+
+
+def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> dict[str, Any]:
+    out = dict(block)
+    block_type = str(out.get("type") or "").strip()
+    if provider_shape and "_provider_shape" not in out and block_type in (
+        _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
+        | _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
+        | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
+    ):
+        # Responses API output[].type=message commonly nests function/tool-call
+        # content blocks.  Preserve this provider provenance through the normal
+        # content-block parser so transcripts and ledgers distinguish these
+        # calls from top-level Anthropic-style content blocks without weakening
+        # schema/ROE/runtime-policy validation.
+        out["_provider_shape"] = provider_shape
+    return out
 
 
 def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
@@ -894,13 +911,15 @@ def _parse_native_content_tool_block(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     function = item.get("function")
     call_id = _native_call_id(item, function if isinstance(function, dict) else None)
+    provider_shape = str(item.get("_provider_shape") or "")
+    label = f"native provider responses message content {block_type}" if provider_shape == "responses.message.content" else f"native content-block {block_type}"
     if isinstance(function, dict):
         return _parse_native_function_call(
             function,
             index=index,
             legacy=False,
             call_id=call_id,
-            label=f"native content-block {block_type}",
+            label=label,
         )
     arguments = _native_argument_value(item, preferred=("input", "arguments", "args", "parameters", "params"))
     return _parse_native_function_call(
@@ -908,7 +927,7 @@ def _parse_native_content_tool_block(
         index=index,
         legacy=False,
         call_id=call_id,
-        label=f"native content-block {block_type}",
+        label=label,
     )
 
 
