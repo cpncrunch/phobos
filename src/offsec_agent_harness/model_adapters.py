@@ -348,6 +348,8 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
 def _message_content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        return _message_content_text([content])
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -506,6 +508,9 @@ def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any)
     if isinstance(content, str):
         blocks.append({"type": "text", "text": content})
         return
+    if isinstance(content, dict):
+        blocks.append(dict(content))
+        return
     if not isinstance(content, list):
         return
     for block in content:
@@ -582,13 +587,17 @@ def _parse_native_content_tool_blocks(
     schema validation, runtime policy, ROE preview, and guarded dispatch later.
     """
 
-    if not isinstance(content, list):
+    if isinstance(content, dict):
+        content_items = [content]
+    elif isinstance(content, list):
+        content_items = content
+    else:
         return [], [], []
     calls: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     warnings: list[str] = []
     index = max(1, start_index)
-    for item in content:
+    for item in content_items:
         if not isinstance(item, dict):
             continue
         block_type = str(item.get("type") or "").strip()

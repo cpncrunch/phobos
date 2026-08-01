@@ -3026,6 +3026,114 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_single_content_block_tool_call_and_result_echo_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Single Content Block Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            call_counter = {"count": 0}
+            provider_result_marker = "SINGLE_CONTENT_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeSingleContentHTTPResponse:
+                def __init__(self, payload: dict):
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                call_counter["count"] += 1
+                if call_counter["count"] <= 2:
+                    return FakeSingleContentHTTPResponse({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": {
+                                        "type": "tool_use",
+                                        "id": "single_memory",
+                                        "name": "remember",
+                                        "input": {"key": "native-single-content", "value": "single content block accepted"},
+                                    }
+                                }
+                            }
+                        ]
+                    })
+                return FakeSingleContentHTTPResponse({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": {
+                                    "type": "tool_result",
+                                    "content": provider_result_marker + " token=single-result-secret",
+                                }
+                            }
+                        }
+                    ]
+                })
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-single-content-block",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-single-content", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native single content block token=single-content-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-single-content")
+                    self.assertIn("native content-block tool_use", payload["tool_calls"][0]["reason"])
+                    call_metadata = payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(call_metadata.get("provider_tool_call_id"), "single_memory")
+                    self.assertEqual(call_metadata.get("native_tool_call_source"), "native content-block tool_use")
+                    self.assertEqual(call_metadata.get("native_tool_call_index"), 1)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertNotIn("single-content-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native single content block token=single-content-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual(ledger[0].get("provider_tool_call_id"), "single_memory")
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native content-block tool_use")
+
+                    result_echo_plan = runtime.handle_message('/auto model=true prompt="provider emitted only prior result echo token=single-result-secret"')
+                    result_payload = json.loads(result_echo_plan.split("\n", 1)[1])
+                    self.assertEqual(result_payload["mode"], "plan_only")
+                    self.assertEqual(result_payload.get("tool_calls"), [])
+                    self.assertIn("tool_result", json.dumps(result_payload.get("warnings", [])).lower())
+                    self.assertTrue(result_payload.get("no_tools_executed"))
+                    self.assertNotIn(provider_result_marker, result_echo_plan + json.dumps(result_payload))
+                    self.assertNotIn("single-result-secret", result_echo_plan + json.dumps(result_payload))
+                recall = runtime.handle_message('/recall query=native-single-content')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("single content block accepted", recall)
+                self.assertIn("single_content_block_tool_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("single_content_block_tool_call_translation"))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("single-content-secret", applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_responses_output_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

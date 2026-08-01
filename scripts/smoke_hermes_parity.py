@@ -1916,6 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
+            and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
@@ -1937,6 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("provider_tool_result_echo_ignored") is True
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2390,6 +2392,116 @@ def main(argv: list[str] | None = None) -> int:
             and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
         )
 
+        native_single_content_captured = {}
+        native_single_content_counter = {"count": 0}
+        native_single_content_result_marker = "NATIVE_SINGLE_CONTENT_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAISingleContentBlockSmokeResponse:
+            def __init__(self, payload: dict):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_native_single_content_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_single_content_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_single_content_captured["tool_choice"] = payload.get("tool_choice")
+            native_single_content_counter["count"] += 1
+            if native_single_content_counter["count"] <= 2:
+                return NativeOpenAISingleContentBlockSmokeResponse({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": {
+                                    "type": "tool_use",
+                                    "id": "single_content_memory",
+                                    "name": "remember",
+                                    "input": {"key": "native-single-content-smoke", "value": "single content-block native tool call translated"},
+                                }
+                            }
+                        }
+                    ]
+                })
+            return NativeOpenAISingleContentBlockSmokeResponse({
+                "choices": [
+                    {
+                        "message": {
+                            "content": {
+                                "type": "tool_result",
+                                "content": native_single_content_result_marker + " token=native-single-result-secret",
+                            }
+                        }
+                    }
+                ]
+            })
+
+        native_single_content_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-single-content-block.db"),
+                session_name="native-provider-single-content-block-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-single-content-block-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_single_content_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_single_content_urlopen
+            native_single_content_plan = native_single_content_runtime.handle_message('/auto model=true prompt="native single content block smoke token=native-single-content-secret"')
+            native_single_content_plan_payload = json.loads(native_single_content_plan.split("\n", 1)[1])
+            native_single_content_apply = native_single_content_runtime.handle_message('/auto apply=true model=true prompt="native single content block smoke token=native-single-content-secret"')
+            native_single_content_apply_payload = json.loads(native_single_content_apply.split("\n", 1)[1])
+            native_single_content_result_plan = native_single_content_runtime.handle_message('/auto model=true prompt="provider emitted only a prior result echo token=native-single-result-secret"')
+            native_single_content_result_payload = json.loads(native_single_content_result_plan.split("\n", 1)[1])
+            native_single_content_recall = native_single_content_runtime.handle_message('/recall query=native-single-content-smoke')
+            write("native-provider-single-content-block-tool-calls.json", json.dumps({
+                "plan": native_single_content_plan_payload,
+                "apply": native_single_content_apply_payload,
+                "result_echo_plan": native_single_content_result_payload,
+                "captured": native_single_content_captured,
+                "recall": native_single_content_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_single_content_original_urlopen
+            native_single_content_runtime.close()
+        native_single_content_calls = native_single_content_plan_payload.get("tool_calls", []) if isinstance(native_single_content_plan_payload.get("tool_calls"), list) else []
+        native_single_content_metadata = native_single_content_plan_payload.get("metadata", {}) if isinstance(native_single_content_plan_payload.get("metadata"), dict) else {}
+        native_single_content_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_single_content_calls]
+        native_single_content_ledger = native_single_content_apply_payload.get("execution_ledger", []) if isinstance(native_single_content_apply_payload.get("execution_ledger"), list) else []
+        native_single_content_result_warnings = json.dumps(native_single_content_result_payload.get("warnings", []))
+        checks["native_provider_single_content_block_tool_call_ok"] = (
+            native_single_content_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_single_content_calls] == ["remember"]
+            and "native content-block tool_use" in native_single_content_calls[0].get("reason", "")
+            and native_single_content_calls[0].get("args", {}).get("key") == "native-single-content-smoke"
+            and native_single_content_metadata.get("native_tool_calls") is True
+            and native_single_content_metadata.get("native_tool_call_count") == 1
+            and [item.get("provider_tool_call_id") for item in native_single_content_call_metadata] == ["single_content_memory"]
+            and native_single_content_call_metadata[0].get("native_tool_call_source") == "native content-block tool_use"
+            and native_single_content_call_metadata[0].get("native_tool_call_index") == 1
+            and [item.get("result", {}).get("status") for item in native_single_content_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("provider_tool_call_id") for item in native_single_content_ledger] == ["single_content_memory"]
+            and native_single_content_ledger[0].get("native_tool_call_source") == "native content-block tool_use"
+            and native_single_content_result_payload.get("tool_calls") == []
+            and native_single_content_result_payload.get("no_tools_executed") is True
+            and "tool_result" in native_single_content_result_warnings.lower()
+            and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
+            and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single content-block native tool call translated" in native_single_content_recall
+            and native_single_content_captured.get("tool_choice") == "auto"
+            and native_single_content_captured.get("tool_count", 0) > 0
+            and native_single_content_result_marker not in native_single_content_plan + native_single_content_apply + native_single_content_result_plan + native_single_content_recall + json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
+            and "native-single-content-secret" not in native_single_content_plan + native_single_content_apply + native_single_content_result_plan + native_single_content_recall + json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
+            and "native-single-result-secret" not in native_single_content_plan + native_single_content_apply + native_single_content_result_plan + native_single_content_recall + json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -2613,6 +2725,7 @@ def main(argv: list[str] | None = None) -> int:
         checks["native_provider_tool_result_ignore_ok"] = (
             "tool_result" in native_edge_warnings.lower()
             and "tool_result" in native_content_warnings.lower()
+            and "tool_result" in native_single_content_result_warnings.lower()
             and "tool_result" in native_responses_warnings.lower()
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_response" in native_status_data.get("provider_tool_result_block_types_ignored", [])
@@ -2620,10 +2733,12 @@ def main(argv: list[str] | None = None) -> int:
             and native_provider_result_marker not in native_content_plan + native_content_apply + native_content_recall
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall
             and native_provider_result_marker not in native_candidate_plan + native_candidate_apply + native_candidate_recall
+            and native_single_content_result_marker not in native_single_content_plan + native_single_content_apply + native_single_content_result_plan + native_single_content_recall
             and native_provider_result_marker not in json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and native_provider_result_marker not in json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
             and native_provider_result_marker not in json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and native_provider_result_marker not in json.dumps(native_candidate_plan_payload) + json.dumps(native_candidate_apply_payload)
+            and native_single_content_result_marker not in json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
         )
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
@@ -3540,6 +3655,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
+            "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_custom_tool_call_reject_ok",
