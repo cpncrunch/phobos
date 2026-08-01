@@ -851,6 +851,7 @@ native_provider_root_function_calls_snake_alias_ok=True
 native_provider_root_function_calls_snake_nested_function_call_alias_ok=True
 native_provider_message_function_call_alias_ok=True
 native_provider_message_function_calls_alias_ok=True
+native_provider_message_function_calls_nested_function_call_alias_ok=True
 native_provider_tool_call_edge_cases_ok=True
 native_provider_legacy_function_call_ok=True
 native_provider_content_block_tool_call_ok=True
@@ -956,7 +957,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=599
+artifact_count=605
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

@@ -2000,6 +2000,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_function_calls_snake_nested_function_call_translation") is True
             and native_status_milestone_contract.get("message_function_call_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
+            and native_status_milestone_contract.get("message_function_calls_nested_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
@@ -2043,6 +2044,7 @@ def main(argv: list[str] | None = None) -> int:
             and "message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -2960,6 +2962,17 @@ def main(argv: list[str] | None = None) -> int:
             and native_message_function_captured.get("tool_count", 0) > 0
             and native_message_function_result_marker not in native_message_function_outputs
             and "native-message-function-secret" not in native_message_function_outputs + json.dumps(native_message_function_call_metadata) + json.dumps(native_message_function_ledger)
+        )
+        checks["native_provider_message_function_calls_nested_function_call_alias_ok"] = (
+            checks["native_provider_message_function_calls_alias_ok"]
+            and len(native_message_function_calls) == 4
+            and native_message_function_calls[3].get("tool") == "remember"
+            and native_message_function_call_metadata[3].get("provider_tool_call_id") == "message_function_calls_snake_memory"
+            and native_message_function_call_metadata[3].get("native_tool_call_source") == "native provider message function_calls"
+            and native_message_function_ledger[3].get("provider_tool_call_id") == "message_function_calls_snake_memory"
+            and native_message_function_ledger[3].get("native_tool_call_source") == "native provider message function_calls"
+            and native_status_milestone_contract.get("message_function_calls_nested_function_call_translation") is True
+            and "message_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
