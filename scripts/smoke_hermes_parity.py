@@ -1997,6 +1997,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_nested_function_call_translation") is True
+            and native_status_milestone_contract.get("root_function_calls_snake_nested_function_call_translation") is True
             and native_status_milestone_contract.get("message_function_call_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
@@ -2038,6 +2039,7 @@ def main(argv: list[str] | None = None) -> int:
             and "root_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCalls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2751,6 +2753,13 @@ def main(argv: list[str] | None = None) -> int:
                                 "arguments": json.dumps({"status": "all", "limit": 1}),
                             },
                         },
+                        {
+                            "toolUseId": "root_function_calls_snake_nested_memory",
+                            "functionCall": {
+                                "name": "remember",
+                                "args": {"key": "native-root-function-calls-snake-nested-smoke", "value": "root function_calls nested functionCall native tool call translated"},
+                            },
+                        },
                     ],
                     "function_response": {
                         "name": "remember",
@@ -2781,11 +2790,13 @@ def main(argv: list[str] | None = None) -> int:
             native_root_function_snake_apply = native_root_function_snake_runtime.handle_message('/auto apply=true model=true prompt="native root function_calls smoke token=native-root-function-snake-secret"')
             native_root_function_snake_apply_payload = json.loads(native_root_function_snake_apply.split("\n", 1)[1])
             native_root_function_snake_recall = native_root_function_snake_runtime.handle_message('/recall query=native-root-function-calls-snake-smoke')
+            native_root_function_snake_nested_recall = native_root_function_snake_runtime.handle_message('/recall query=native-root-function-calls-snake-nested-smoke')
             write("native-provider-root-function-calls-snake.json", json.dumps({
                 "plan": native_root_function_snake_plan_payload,
                 "apply": native_root_function_snake_apply_payload,
                 "captured": native_root_function_snake_captured,
                 "recall": native_root_function_snake_recall,
+                "recall_nested": native_root_function_snake_nested_recall,
             }, indent=2, sort_keys=True))
         finally:
             model_adapters.urllib.request.urlopen = native_root_function_snake_original_urlopen
@@ -2796,21 +2807,33 @@ def main(argv: list[str] | None = None) -> int:
         native_root_function_snake_ledger = native_root_function_snake_apply_payload.get("execution_ledger", []) if isinstance(native_root_function_snake_apply_payload.get("execution_ledger"), list) else []
         checks["native_provider_root_function_calls_snake_alias_ok"] = (
             native_root_function_snake_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_root_function_snake_calls] == ["remember", "list_tasks"]
+            and [call.get("tool") for call in native_root_function_snake_calls] == ["remember", "list_tasks", "remember"]
             and native_root_function_snake_metadata.get("native_tool_calls") is True
-            and native_root_function_snake_metadata.get("native_tool_call_count") == 2
+            and native_root_function_snake_metadata.get("native_tool_call_count") == 3
             and all("native provider root function_calls" in call.get("reason", "") for call in native_root_function_snake_calls)
-            and [item.get("provider_tool_call_id") for item in native_root_function_snake_call_metadata] == ["root_function_calls_snake_memory", "root_function_calls_snake_tasks"]
-            and [item.get("native_tool_call_source") for item in native_root_function_snake_call_metadata] == ["native provider root function_calls", "native provider root function_calls"]
-            and [item.get("result", {}).get("status") for item in native_root_function_snake_apply_payload.get("results", [])] == ["ok", "ok"]
-            and [item.get("native_tool_call_source") for item in native_root_function_snake_ledger] == ["native provider root function_calls", "native provider root function_calls"]
+            and [item.get("provider_tool_call_id") for item in native_root_function_snake_call_metadata] == ["root_function_calls_snake_memory", "root_function_calls_snake_tasks", "root_function_calls_snake_nested_memory"]
+            and [item.get("native_tool_call_source") for item in native_root_function_snake_call_metadata] == ["native provider root function_calls", "native provider root function_calls", "native provider root function_calls"]
+            and [item.get("result", {}).get("status") for item in native_root_function_snake_apply_payload.get("results", [])] == ["ok", "ok", "ok"]
+            and [item.get("native_tool_call_source") for item in native_root_function_snake_ledger] == ["native provider root function_calls", "native provider root function_calls", "native provider root function_calls"]
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
+            and native_status_milestone_contract.get("root_function_calls_snake_nested_function_call_translation") is True
             and "root_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root function_calls native tool call translated" in native_root_function_snake_recall
+            and "root function_calls nested functionCall native tool call translated" in native_root_function_snake_nested_recall
             and native_root_function_snake_captured.get("tool_choice") == "auto"
             and native_root_function_snake_captured.get("tool_count", 0) > 0
-            and native_root_snake_result_marker not in native_root_function_snake_plan + native_root_function_snake_apply + native_root_function_snake_recall + json.dumps(native_root_function_snake_plan_payload) + json.dumps(native_root_function_snake_apply_payload)
-            and "native-root-function-snake-secret" not in native_root_function_snake_plan + native_root_function_snake_apply + native_root_function_snake_recall + json.dumps(native_root_function_snake_plan_payload) + json.dumps(native_root_function_snake_apply_payload) + json.dumps(native_root_function_snake_call_metadata) + json.dumps(native_root_function_snake_ledger)
+            and native_root_snake_result_marker not in native_root_function_snake_plan + native_root_function_snake_apply + native_root_function_snake_recall + native_root_function_snake_nested_recall + json.dumps(native_root_function_snake_plan_payload) + json.dumps(native_root_function_snake_apply_payload)
+            and "native-root-function-snake-secret" not in native_root_function_snake_plan + native_root_function_snake_apply + native_root_function_snake_recall + native_root_function_snake_nested_recall + json.dumps(native_root_function_snake_plan_payload) + json.dumps(native_root_function_snake_apply_payload) + json.dumps(native_root_function_snake_call_metadata) + json.dumps(native_root_function_snake_ledger)
+        )
+        checks["native_provider_root_function_calls_snake_nested_function_call_alias_ok"] = (
+            checks["native_provider_root_function_calls_snake_alias_ok"]
+            and len(native_root_function_snake_calls) == 3
+            and native_root_function_snake_calls[2].get("tool") == "remember"
+            and native_root_function_snake_call_metadata[2].get("provider_tool_call_id") == "root_function_calls_snake_nested_memory"
+            and native_root_function_snake_call_metadata[2].get("native_tool_call_source") == "native provider root function_calls"
+            and native_root_function_snake_ledger[2].get("provider_tool_call_id") == "root_function_calls_snake_nested_memory"
+            and native_root_function_snake_ledger[2].get("native_tool_call_source") == "native provider root function_calls"
         )
 
         native_message_function_captured = {}

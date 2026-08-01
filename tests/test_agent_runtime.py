@@ -4330,6 +4330,13 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "arguments": json.dumps({"status": "all", "limit": 1}),
                                 },
                             },
+                            {
+                                "toolUseId": "root_functions_snake_nested_function_call",
+                                "functionCall": {
+                                    "name": "remember",
+                                    "args": {"key": "native-root-function-calls-snake-nested", "value": "root function_calls nested functionCall accepted"},
+                                },
+                            },
                         ],
                         "function_response": {
                             "name": "remember",
@@ -4355,27 +4362,30 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native root function_calls token=root-functions-snake-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
-                    self.assertTrue(all("native provider root function_calls" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember"])
+                    self.assertTrue(all("native provider root function_calls" in call.get("reason", "") for call in payload["tool_calls"][:3]))
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_functions_snake_memory", "root_functions_snake_tasks"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root function_calls", "native provider root function_calls"])
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_functions_snake_memory", "root_functions_snake_tasks", "root_functions_snake_nested_function_call"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root function_calls", "native provider root function_calls", "native provider root function_calls"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
                     self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
                     self.assertNotIn("root-functions-snake-secret", planned)
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native root function_calls token=root-functions-snake-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_functions_snake_memory", "root_functions_snake_tasks"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root function_calls", "native provider root function_calls"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_functions_snake_memory", "root_functions_snake_tasks", "root_functions_snake_nested_function_call"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root function_calls", "native provider root function_calls", "native provider root function_calls"])
                 recall = runtime.handle_message('/recall query=native-root-function-calls-snake')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("root function_calls array accepted", recall)
+                self.assertIn("root function_calls nested functionCall accepted", recall)
                 self.assertIn("root_function_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("root_function_calls_nested_functionCall", status.get("provider_native_tool_call_variants", []))
                 self.assertTrue(status.get("milestone_contract", {}).get("root_function_calls_snake_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("root_function_calls_snake_nested_function_call_translation"), status)
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 self.assertNotIn("root-functions-snake-secret", applied + recall + json.dumps(status))
@@ -5801,6 +5811,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("root_function_calls_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_snake_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_nested_function_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("root_function_calls_snake_nested_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("legacy_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("custom_freeform_tool_calls_rejected"), native_status)
                 self.assertTrue(milestone_contract.get("followup_prompt_secret_redaction"), native_status)
@@ -5827,6 +5838,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("root_functionCalls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCalls_nested_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_function_calls", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("root_function_calls_nested_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("message_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
