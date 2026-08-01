@@ -32,6 +32,7 @@ _ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
 _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "natural_language_model_planning": True,
     "provider_native_tool_call_translation": True,
+    "single_top_level_tool_call_translation": True,
     "legacy_function_call_translation": True,
     "responses_output_tool_call_translation": True,
     "candidate_function_call_translation": True,
@@ -1330,6 +1331,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "terminal_no_tool_no_dispatch_step": True,
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
+                "single_top_level_tool_call",
                 "flat_tool_calls",
                 "content_block_tool_use",
                 "content_block_function_call",

@@ -527,15 +527,23 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
     rejected: list[dict[str, Any]] = []
     warnings: list[str] = []
     raw_calls = message.get("tool_calls")
+    raw_call_items: list[Any] = []
     if isinstance(raw_calls, list):
-        for index, item in enumerate(raw_calls, start=1):
-            parsed, rejected_item, warning = _parse_native_tool_call(item, index=index)
-            if warning:
-                warnings.append(warning)
-            if parsed:
-                calls.append(parsed)
-            if rejected_item:
-                rejected.append(rejected_item)
+        raw_call_items = raw_calls
+    elif isinstance(raw_calls, dict):
+        # A few OpenAI-compatible shims collapse a one-call top-level
+        # ``tool_calls`` array into a single object.  Normalize it at the
+        # adapter boundary so the runtime can still apply the exact same
+        # schema/ROE/runtime-policy validation before any dispatch.
+        raw_call_items = [dict(raw_calls, _provider_shape="single_top_level.tool_calls")]
+    for index, item in enumerate(raw_call_items, start=1):
+        parsed, rejected_item, warning = _parse_native_tool_call(item, index=index)
+        if warning:
+            warnings.append(warning)
+        if parsed:
+            calls.append(parsed)
+        if rejected_item:
+            rejected.append(rejected_item)
     content_calls, content_rejected, content_warnings = _parse_native_content_tool_blocks(
         content_value,
         start_index=len(calls) + len(rejected) + 1,
@@ -663,9 +671,17 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         return _reject_unsupported_native_tool_call(item, index=index, native_type=str(native_type))
     if native_type not in {None, "function", "tool_call", "tool_use"}:
         return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
+    provider_shape = str(item.get("_provider_shape") or "")
     function = item.get("function")
     if isinstance(function, dict):
-        return _parse_native_function_call(function, index=index, legacy=False, call_id=str(item.get("id") or ""))
+        label = "native provider single top-level tool_call" if provider_shape == "single_top_level.tool_calls" else None
+        return _parse_native_function_call(
+            function,
+            index=index,
+            legacy=False,
+            call_id=str(item.get("id") or item.get("call_id") or item.get("tool_call_id") or ""),
+            label=label,
+        )
     # Several OpenAI-compatible shims flatten top-level tool calls instead of
     # nesting them under {"function": {"name", "arguments"}}.  Treat these as
     # planner proposals only; runtime schema/ROE validation remains authoritative.
@@ -678,6 +694,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output function_call"
         elif item.get("_provider_shape") == "gemini.candidate":
             label = "native provider candidate functionCall"
+        elif provider_shape == "single_top_level.tool_calls":
+            label = "native provider single top-level tool_call"
         else:
             label = "native provider flat tool_call"
         return _parse_native_function_call(

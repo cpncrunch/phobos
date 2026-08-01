@@ -10,7 +10,7 @@ This is **not** a malware, evasion, persistence, DoS, or mass-exploitation frame
 - **Burp MCP adapter** — probes a JSON-RPC/MCP endpoint, creates Repeater tabs from saved raw HTTP requests, and writes raw/redacted request artifacts. Dry-run by default.
 - **BloodHound / ADCS importer** — parses BloodHound-style JSON directories/files/ZIPs offline, inventories high-value relationships, identifies ADCS-related edges, and classifies principal-to-privileged graph paths without touching AD.
 - **CVE advisor** — matches a local CVE catalog and optionally queries NVD, then recommends non-invasive validation and flags DoS/destructive PoC risk.
-- **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting; OpenAI-compatible endpoints can also return provider-native `tool_calls` (including nested function calls and flattened top-level `name`/`arguments` variants), content-block `tool_use`/`function_call`, Responses-style top-level `output`/`function_call`, candidate/parts `functionCall`, or legacy `function_call` payloads for guarded `/auto`, `/auto-loop`, and the public `phobos-agent auto`/`phobos-agent auto-loop` CLI entrypoints; provider `tool_result`/`functionResponse` echoes are ignored rather than summarized or dispatched, custom/freeform native tool calls such as `custom_tool_call` are rejected without surfacing their input, and provider tool-call IDs are preserved as bounded provenance in plan/result ledgers. Phobos provides bounded redacted runtime context, translates model-requested calls into the same validated plan boundary before any dispatch, keeps approval-control actions under explicit direct operator commands, stops loops at explicit max-step budgets, and emits redacted plan-preview, one-shot apply, and loop transcripts plus metadata-only transcript index/detail views and execution ledgers so dry-runs/approvals/blocks are never described as executed commands while explicitly allowed execution is claimable only when the registry returns an executed/started result.
+- **Model adapter layer** — supports a deterministic offline heuristic adapter plus OpenAI-compatible/local/Hermes-CLI adapters for role-specific drafting; OpenAI-compatible endpoints can also return provider-native `tool_calls` (including nested function calls, single-object top-level `tool_calls`, and flattened top-level `name`/`arguments` variants), content-block `tool_use`/`function_call`, Responses-style top-level `output`/`function_call`, candidate/parts `functionCall`, or legacy `function_call` payloads for guarded `/auto`, `/auto-loop`, and the public `phobos-agent auto`/`phobos-agent auto-loop` CLI entrypoints; provider `tool_result`/`functionResponse` echoes are ignored rather than summarized or dispatched, custom/freeform native tool calls such as `custom_tool_call` are rejected without surfacing their input, and provider tool-call IDs are preserved as bounded provenance in plan/result ledgers. Phobos provides bounded redacted runtime context, translates model-requested calls into the same validated plan boundary before any dispatch, keeps approval-control actions under explicit direct operator commands, stops loops at explicit max-step budgets, and emits redacted plan-preview, one-shot apply, and loop transcripts plus metadata-only transcript index/detail views and execution ledgers so dry-runs/approvals/blocks are never described as executed commands while explicitly allowed execution is claimable only when the registry returns an executed/started result.
 - **Finding Markdown exporter + QA/closeout review** — renders confirmed finding JSON into report-ready Markdown, packages redacted per-finding evidence bundles, and reviews stored finding records plus engagement closeout state for blocking/advisory evidence gaps before operator/client delivery.
 - **Standalone Phobos Agent runtime** — SQLite sessions/memory/tasks with FTS recall, Hindsight/LCM-style local recall aliases, schema-versioned local state, structured nmap/httpx/nuclei/ffuf wrapper evidence, finding lifecycle records, tool schemas with scalar/bounds/pattern/nested array-object validation before approval queueing, local skills, guarded natural-language `/auto` planning, plugins, background processes, jobs, authenticated local/VPS web gateway with typed JSON `400` query/body validation plus validated deploy-kit templates and remote browser client, Discord/Slack/Telegram bridges with safe media/voice attachment handling, redacted evidence timelines/manifests/closeout reviews, audit-event drill-down refs, operator briefings, portable session handoffs, sealed DB backup/restore, runtime tool policy, and redacted engagement-pack export.
 
@@ -599,7 +599,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 85 tests
+Ran 86 tests
 OK
 ```
 
@@ -651,6 +651,7 @@ native_tool_call_status_contract_ok=True
 native_tool_call_natural_auto_provenance_ok=True
 native_openai_tool_call_adapter_ok=True
 native_provider_flat_tool_call_ok=True
+native_provider_single_top_level_tool_call_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
 native_tool_call_transcript_provenance_ok=True
 native_provider_tool_call_edge_cases_ok=True
@@ -678,10 +679,12 @@ native_tool_call_feedback_loop_ok=True
 native_tool_call_step_ledger_delta_ok=True
 native_tool_call_planner_trace_ok=True
 native_tool_call_cumulative_feedback_ok=True
+native_tool_call_feedback_prompt_redaction_ok=True
 native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
 native_tool_call_execution_summary_ok=True
 native_tool_call_gateway_chat_ok=True
+native_tool_call_cli_entrypoints_ok=True
 native_tool_call_milestone_contract_ok=True
 memory_hygiene_forget_ok=True
 message_memory_context_media_storage_redaction_ok=True
@@ -751,7 +754,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=527
+artifact_count=533
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

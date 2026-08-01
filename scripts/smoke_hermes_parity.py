@@ -1912,6 +1912,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
             and native_status_milestone_contract.get("transcript_provider_call_provenance") is True
+            and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
@@ -1938,6 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("model_error_stop_enforced") is True
             and native_status_data.get("invalid_plan_stop_enforced") is True
             and native_status_data.get("provider_tool_result_echo_ignored") is True
+            and "single_top_level_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2217,6 +2219,89 @@ def main(argv: list[str] | None = None) -> int:
             and "provider_call_id=`flat_dry`" in native_flat_transcript_markdown
             and "source=`native provider flat tool_call`" in native_flat_transcript_markdown
             and "native-flat-secret" not in json.dumps(native_flat_transcript_detail) + native_flat_transcript_markdown
+        )
+
+        native_single_top_captured = {}
+
+        class NativeOpenAISingleTopLevelSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native single top-level smoke token=native-single-top-secret",
+                                "tool_calls": {
+                                    "id": "single_top_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-single-top-smoke", "value": "single top-level native tool call translated"}),
+                                    },
+                                },
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_single_top_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_single_top_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_single_top_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAISingleTopLevelSmokeResponse()
+
+        native_single_top_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-single-top-level.db"),
+                session_name="native-provider-single-top-level-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-single-top-level-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_single_top_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_single_top_urlopen
+            native_single_top_plan = native_single_top_runtime.handle_message('/auto model=true prompt="native single top-level smoke token=native-single-top-secret"')
+            native_single_top_plan_payload = json.loads(native_single_top_plan.split("\n", 1)[1])
+            native_single_top_apply = native_single_top_runtime.handle_message('/auto apply=true model=true prompt="native single top-level smoke token=native-single-top-secret"')
+            native_single_top_apply_payload = json.loads(native_single_top_apply.split("\n", 1)[1])
+            native_single_top_recall = native_single_top_runtime.handle_message('/recall query=native-single-top-smoke')
+            write("native-provider-single-top-level-tool-call.json", json.dumps({
+                "plan": native_single_top_plan_payload,
+                "apply": native_single_top_apply_payload,
+                "captured": native_single_top_captured,
+                "recall": native_single_top_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_single_top_original_urlopen
+            native_single_top_runtime.close()
+        native_single_top_calls = native_single_top_plan_payload.get("tool_calls", []) if isinstance(native_single_top_plan_payload.get("tool_calls"), list) else []
+        native_single_top_metadata = native_single_top_plan_payload.get("metadata", {}) if isinstance(native_single_top_plan_payload.get("metadata"), dict) else {}
+        native_single_top_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_single_top_calls]
+        native_single_top_ledger = native_single_top_apply_payload.get("execution_ledger", []) if isinstance(native_single_top_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_single_top_level_tool_call_ok"] = (
+            native_single_top_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_single_top_calls] == ["remember"]
+            and "native provider single top-level tool_call" in native_single_top_calls[0].get("reason", "")
+            and native_single_top_metadata.get("native_tool_calls") is True
+            and native_single_top_metadata.get("native_tool_call_count") == 1
+            and [item.get("provider_tool_call_id") for item in native_single_top_call_metadata] == ["single_top_memory"]
+            and native_single_top_call_metadata[0].get("native_tool_call_source") == "native provider single top-level tool_call"
+            and [item.get("result", {}).get("status") for item in native_single_top_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("provider_tool_call_id") for item in native_single_top_ledger] == ["single_top_memory"]
+            and native_single_top_ledger[0].get("native_tool_call_source") == "native provider single top-level tool_call"
+            and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
+            and "single_top_level_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single top-level native tool call translated" in native_single_top_recall
+            and native_single_top_captured.get("tool_choice") == "auto"
+            and native_single_top_captured.get("tool_count", 0) > 0
+            and "native-single-top-secret" not in native_single_top_plan + native_single_top_apply + native_single_top_recall + json.dumps(native_single_top_plan_payload) + json.dumps(native_single_top_apply_payload)
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
@@ -3678,6 +3763,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_provider_flat_tool_call_ok",
+            "native_provider_single_top_level_tool_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_tool_call_transcript_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
