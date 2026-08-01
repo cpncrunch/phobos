@@ -2705,6 +2705,85 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_plan_enforces_per_step_tool_call_budget_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Tool Call Budget",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+
+            class FakeOverBudgetToolPlanAdapter(BaseModelAdapter):
+                provider = "fake-tool-call-budget"
+
+                def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+                    calls = [
+                        {
+                            "tool": "remember",
+                            "args": {"key": f"native-budget-{index:02d}", "value": f"accepted budget call {index}"},
+                            "reason": "prove bounded native planner dispatch",
+                        }
+                        for index in range(22)
+                    ]
+                    calls[-1]["args"]["value"] = "over-budget sentinel token=native-budget-secret"
+                    return ModelResponse(
+                        provider=self.provider,
+                        role="impact",
+                        content=json.dumps({"summary": "over-budget native model plan", "tool_calls": calls, "warnings": []}),
+                        raw={"model": "fake-budget-model", "native_tool_calls": True, "native_tool_call_count": len(calls), "rejected_native_tool_call_count": 0},
+                    )
+
+                def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+                    return ModelResponse(provider=self.provider, role=role, content="fake response")
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-tool-call-budget",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeOverBudgetToolPlanAdapter(),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="native tool budget token=native-budget-secret"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(payload["mode"], "plan_only")
+                self.assertTrue(payload["no_tools_executed"])
+                self.assertEqual(len(payload.get("tool_calls", [])), 20)
+                self.assertEqual(len(payload.get("rejected_tool_calls", [])), 2)
+                metadata = payload.get("metadata", {})
+                self.assertEqual(metadata.get("max_model_tool_calls_per_step"), 20)
+                self.assertEqual(metadata.get("raw_model_tool_call_count"), 22)
+                self.assertEqual(metadata.get("tool_call_budget_excess_count"), 2)
+                self.assertTrue(metadata.get("tool_call_budget_exhausted"))
+                trace = payload.get("planner_trace", [{}])[0]
+                self.assertEqual(trace.get("tool_call_count"), 20)
+                self.assertEqual(trace.get("rejected_tool_call_count"), 2)
+                self.assertEqual(trace.get("tool_call_budget_excess_count"), 2)
+                self.assertTrue(trace.get("tool_call_budget_exhausted"))
+                self.assertIn("only the first 20", json.dumps(payload.get("warnings", [])))
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="native tool budget token=native-budget-secret"')
+                applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(applied_payload["mode"], "applied")
+                self.assertEqual(len(applied_payload.get("results", [])), 20)
+                self.assertEqual([item.get("result", {}).get("status") for item in applied_payload.get("results", [])], ["ok"] * 20)
+                self.assertIsNotNone(runtime.store.get_memory(key="native-budget-00"))
+                self.assertIsNotNone(runtime.store.get_memory(key="native-budget-19"))
+                self.assertIsNone(runtime.store.get_memory(key="native-budget-20"))
+                self.assertIsNone(runtime.store.get_memory(key="native-budget-21"))
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("per_step_model_tool_call_budget_enforced"), status)
+                self.assertEqual(status.get("max_model_tool_calls_per_step"), 20)
+                self.assertTrue(status.get("milestone_contract", {}).get("per_step_model_tool_call_budget"), status)
+                self.assertNotIn("native-budget-secret", planned + applied + json.dumps(payload) + json.dumps(applied_payload) + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_model_plan_extracts_wrapped_or_fenced_json_before_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

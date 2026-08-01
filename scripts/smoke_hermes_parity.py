@@ -50,6 +50,30 @@ class SmokeToolCallValidationAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeToolCallBudgetAdapter(BaseModelAdapter):
+    provider = "smoke-tool-call-budget"
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        calls = [
+            {
+                "tool": "remember",
+                "args": {"key": f"native-budget-smoke-{index:02d}", "value": f"accepted budget smoke call {index}"},
+                "reason": "prove native planner enforces a per-step call budget before dispatch",
+            }
+            for index in range(22)
+        ]
+        calls[-1]["args"]["value"] = "over-budget smoke sentinel token=native-budget-smoke-secret"
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({"summary": "smoke over-budget native model plan", "tool_calls": calls, "warnings": []}),
+            raw={"model": "fake-budget-smoke", "native_tool_calls": True, "native_tool_call_count": len(calls), "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeWrappedJsonToolPlanAdapter(BaseModelAdapter):
     provider = "smoke-wrapped-json-tool-plan"
 
@@ -1597,6 +1621,66 @@ def main(argv: list[str] | None = None) -> int:
             and "native-plan-secret" not in json.dumps(native_plan_trace + native_apply_trace) + json.dumps(native_plan_detail)
         )
 
+        native_budget_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-tool-call-budget.db"),
+                session_name="native-tool-call-budget-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeToolCallBudgetAdapter(),
+        )
+        try:
+            native_budget_plan = native_budget_runtime.handle_message('/auto model=true prompt="native budget smoke token=native-budget-smoke-secret"')
+            native_budget_plan_payload = json.loads(native_budget_plan.split("\n", 1)[1])
+            native_budget_apply = native_budget_runtime.handle_message('/auto apply=true model=true prompt="native budget smoke token=native-budget-smoke-secret"')
+            native_budget_apply_payload = json.loads(native_budget_apply.split("\n", 1)[1])
+            native_budget_status = native_budget_runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+            native_budget_first = native_budget_runtime.store.get_memory(key="native-budget-smoke-00")
+            native_budget_last_accepted = native_budget_runtime.store.get_memory(key="native-budget-smoke-19")
+            native_budget_first_rejected = native_budget_runtime.store.get_memory(key="native-budget-smoke-20")
+            native_budget_last_rejected = native_budget_runtime.store.get_memory(key="native-budget-smoke-21")
+            write("native-tool-call-budget.json", json.dumps({
+                "plan": native_budget_plan_payload,
+                "apply": native_budget_apply_payload,
+                "status": native_budget_status,
+                "accepted_first": bool(native_budget_first),
+                "accepted_last": bool(native_budget_last_accepted),
+                "rejected_first": bool(native_budget_first_rejected),
+                "rejected_last": bool(native_budget_last_rejected),
+            }, indent=2, sort_keys=True))
+        finally:
+            native_budget_runtime.close()
+        native_budget_metadata = native_budget_plan_payload.get("metadata", {}) if isinstance(native_budget_plan_payload.get("metadata"), dict) else {}
+        native_budget_trace = native_budget_plan_payload.get("planner_trace", [{}])[0] if isinstance(native_budget_plan_payload.get("planner_trace"), list) and native_budget_plan_payload.get("planner_trace") else {}
+        native_budget_blob = json.dumps({
+            "plan": native_budget_plan_payload,
+            "apply": native_budget_apply_payload,
+            "status": native_budget_status,
+        }, sort_keys=True)
+        checks["native_tool_call_per_step_budget_ok"] = (
+            native_budget_plan_payload.get("mode") == "plan_only"
+            and len(native_budget_plan_payload.get("tool_calls", [])) == 20
+            and len(native_budget_plan_payload.get("rejected_tool_calls", [])) == 2
+            and native_budget_metadata.get("max_model_tool_calls_per_step") == 20
+            and native_budget_metadata.get("raw_model_tool_call_count") == 22
+            and native_budget_metadata.get("tool_call_budget_excess_count") == 2
+            and native_budget_metadata.get("tool_call_budget_exhausted") is True
+            and native_budget_trace.get("tool_call_count") == 20
+            and native_budget_trace.get("rejected_tool_call_count") == 2
+            and native_budget_trace.get("tool_call_budget_excess_count") == 2
+            and len(native_budget_apply_payload.get("results", [])) == 20
+            and [item.get("result", {}).get("status") for item in native_budget_apply_payload.get("results", [])] == ["ok"] * 20
+            and native_budget_first is not None
+            and native_budget_last_accepted is not None
+            and native_budget_first_rejected is None
+            and native_budget_last_rejected is None
+            and native_budget_status.get("per_step_model_tool_call_budget_enforced") is True
+            and native_budget_status.get("max_model_tool_calls_per_step") == 20
+            and native_budget_status.get("milestone_contract", {}).get("per_step_model_tool_call_budget") is True
+            and "native-budget-smoke-secret" not in native_budget_blob
+        )
+
         native_wrapped_marker = root / "native-wrapped-json-should-not-run.txt"
         native_wrapped_runtime = PhobosAgentRuntime(
             AgentRuntimeConfig(
@@ -2027,11 +2111,14 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
+            and native_status_milestone_contract.get("per_step_model_tool_call_budget") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
             and native_status_data.get("execution_requires_operator_execute_true") is True
+            and native_status_data.get("per_step_model_tool_call_budget_enforced") is True
+            and native_status_data.get("max_model_tool_calls_per_step") == 20
             and native_status_data.get("per_step_execution_ledger_delta") is True
             and native_status_data.get("per_step_planner_trace") is True
             and native_status_data.get("one_shot_planner_trace") is True
@@ -7269,9 +7356,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
-            "native_tool_call_wrapped_json_plan_ok",
             "native_tool_call_plan_transcript_ok",
             "native_tool_call_one_shot_planner_trace_ok",
+            "native_tool_call_per_step_budget_ok",
+            "native_tool_call_wrapped_json_plan_ok",
             "native_tool_call_context_handoff_ok",
             "native_tool_call_fallback_chain_ok",
             "native_tool_call_natural_auto_provenance_ok",

@@ -29,6 +29,7 @@ _TARGET_AFFECTING_PLANNED_TOOLS = {
 }
 _EXECUTION_CAPABLE_TOOLS = {"run_command", "start_process", "nmap_scan", "httpx_probe", "nuclei_scan", "ffuf_scan"}
 _ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
+_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP = 20
 _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "natural_language_model_planning": True,
     "wrapped_json_plan_extraction": True,
@@ -85,6 +86,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "content_parts_function_call_translation": True,
     "provider_argument_alias_translation": True,
     "provider_tool_name_alias_translation": True,
+    "per_step_model_tool_call_budget": True,
     "schema_validation_before_dispatch": True,
     "runtime_policy_boundary": True,
     "guardrail_preview_before_target_activity": True,
@@ -796,6 +798,7 @@ class OffSecAgentRuntime:
                 "confirm_tools": sorted(self.registry.confirm_tools),
                 "approval_control_tools_omitted_from_model_specs": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
                 "command_execution_requires_operator_execute_true": True,
+                "max_tool_calls_per_model_step": _MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP,
             },
             "latest_context_summary": latest_summary or {},
             "recent_messages": recent_messages,
@@ -826,7 +829,46 @@ class OffSecAgentRuntime:
                     rejected.append(item)
                 else:
                     rejected.append({"tool": None, "reason": "Rejected tool call must be an object.", "args": {"value_type": type(item).__name__}})
-        for item in parsed.get("tool_calls", []):
+        raw_tool_calls = parsed.get("tool_calls", [])
+        raw_tool_call_count = len(raw_tool_calls) if isinstance(raw_tool_calls, list) else 0
+        budget_excess_count = 0
+        if raw_tool_calls in (None, ""):
+            raw_tool_calls = []
+        elif not isinstance(raw_tool_calls, list):
+            warnings.append("Model planner returned tool_calls as a non-list value; skipped before dispatch.")
+            rejected.append({
+                "tool": None,
+                "reason": "tool_calls must be an array.",
+                "args": {"value_type": type(raw_tool_calls).__name__},
+            })
+            raw_tool_calls = []
+        elif len(raw_tool_calls) > _MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP:
+            budget_excess_count = len(raw_tool_calls) - _MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP
+            warnings.append(
+                "Model planner returned "
+                f"{len(raw_tool_calls)} tool calls; only the first {_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP} "
+                f"are accepted per step and {budget_excess_count} were rejected before dispatch."
+            )
+            for item in raw_tool_calls[_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP:]:
+                if isinstance(item, dict):
+                    tool = str(item.get("tool") or "").strip() or None
+                    tool_args = item.get("args", {})
+                    if not isinstance(tool_args, dict):
+                        tool_args = {"value_type": type(tool_args).__name__}
+                    rejected.append(_redact_runtime_value({
+                        "tool": tool,
+                        "reason": f"Exceeded per-step model tool-call budget ({_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP}).",
+                        "args": tool_args,
+                        "metadata": _model_planned_call_metadata(item),
+                    }))
+                else:
+                    rejected.append({
+                        "tool": None,
+                        "reason": f"Exceeded per-step model tool-call budget ({_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP}).",
+                        "args": {"value_type": type(item).__name__},
+                    })
+            raw_tool_calls = raw_tool_calls[:_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP]
+        for item in raw_tool_calls:
             if not isinstance(item, dict):
                 warnings.append("Model planner returned a non-object tool call; skipped.")
                 rejected.append({"tool": None, "reason": "tool call must be an object", "args": {"value_type": type(item).__name__}})
@@ -855,7 +897,14 @@ class OffSecAgentRuntime:
                 )
             )
         metadata = _model_plan_metadata(response)
-        metadata.update({"context_provided": bool(context), "context_chars": len(context)})
+        metadata.update({
+            "context_provided": bool(context),
+            "context_chars": len(context),
+            "max_model_tool_calls_per_step": _MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP,
+            "raw_model_tool_call_count": raw_tool_call_count,
+            "tool_call_budget_excess_count": budget_excess_count,
+            "tool_call_budget_exhausted": budget_excess_count > 0,
+        })
         return AgentPlan(
             prompt=prompt,
             summary=str(parsed.get("summary") or f"Model planned {len(calls)} tool call(s)."),
@@ -1130,6 +1179,10 @@ def _auto_loop_planner_trace_entry(step: int, plan: AgentPlan) -> dict[str, Any]
         "rejected_native_tool_call_count": metadata_int("rejected_native_tool_call_count"),
         "attempted_tool_call_count": metadata_int("attempted_tool_call_count"),
         "accepted_tool_call_count": metadata_int("accepted_tool_call_count"),
+        "max_model_tool_calls_per_step": metadata_int("max_model_tool_calls_per_step"),
+        "raw_model_tool_call_count": metadata_int("raw_model_tool_call_count"),
+        "tool_call_budget_excess_count": metadata_int("tool_call_budget_excess_count"),
+        "tool_call_budget_exhausted": bool(metadata.get("tool_call_budget_exhausted", False)),
         "all_tool_calls_rejected": bool(metadata.get("all_tool_calls_rejected", False)),
         "invalid_model_tool_plan": bool(metadata.get("invalid_model_tool_plan", False)),
         "tool_plan_fallback": bool(metadata.get("tool_plan_fallback", False)),
@@ -1362,6 +1415,8 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "wrapped_json_plan_extraction": True,
             "natural_auto_execute_enabled": bool(config.auto_execute_natural),
             "max_auto_steps": int(config.max_auto_steps),
+            "max_model_tool_calls_per_step": _MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP,
+            "per_step_model_tool_call_budget_enforced": True,
             "plan_only_default": True,
             "execution_requires_operator_execute_true": True,
             "per_step_execution_ledger_delta": True,
