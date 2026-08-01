@@ -3132,6 +3132,7 @@ class AgentRuntimeTests(unittest.TestCase):
             captured_requests = []
             dry_run_marker = tmp_path / "native-openai-responses-should-not-execute.txt"
             result_marker = "RESPONSES_ENDPOINT_RESULT_SHOULD_NOT_SURFACE"
+            result_alias_marker = "RESPONSES_CAMEL_RESULT_SHOULD_NOT_SURFACE"
             hosted_marker = "RESPONSES_HOSTED_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
             class FakeResponsesHTTPResponse:
@@ -3175,6 +3176,8 @@ class AgentRuntimeTests(unittest.TestCase):
                                 "arguments": {"query": hosted_marker + " nested token=responses-hosted-secret"},
                             },
                             {"type": "function_call_output", "call_id": "responses_endpoint_result", "output": result_marker + " token=responses-endpoint-secret"},
+                            {"type": "functionCallOutput", "callId": "responses_endpoint_result_camel", "output": result_alias_marker + " token=responses-endpoint-secret"},
+                            {"toolCallResult": {"content": result_alias_marker + " token=responses-endpoint-secret"}},
                         ],
                     }).encode("utf-8")
 
@@ -3239,8 +3242,11 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("openai_responses_api", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("file_search_call", status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("mcp_call", status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("functionCallOutput", status.get("provider_tool_result_block_types_ignored", []))
+                self.assertIn("toolCallResult", status.get("provider_tool_result_block_types_ignored", []))
                 self.assertFalse(dry_run_marker.exists())
                 self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn(result_alias_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn(hosted_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("responses-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("responses-hosted-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
@@ -3487,6 +3493,7 @@ class AgentRuntimeTests(unittest.TestCase):
             ).save(engagement)
             captured_payloads = []
             custom_input_marker = "CUSTOM_NATIVE_TOOL_INPUT_SHOULD_NOT_SURFACE"
+            result_alias_marker = "PROVIDER_CAMEL_RESULT_CONTENT_SHOULD_NOT_SURFACE"
 
             class FakeEdgeHTTPResponse:
                 def __enter__(self):
@@ -3507,6 +3514,8 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"id": "call_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=edge-secret}"}},
                                         {"id": "call_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
                                         {"id": "call_tool_result", "type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
+                                        {"id": "call_tool_result_camel", "type": "toolResult", "content": result_alias_marker + " token=edge-secret"},
+                                        {"id": "call_function_result_alias", "functionResult": {"content": result_alias_marker + " token=edge-secret"}},
                                         {"id": "call_custom_freeform", "type": "custom_tool_call", "name": "run_command", "input": custom_input_marker + " token=edge-secret"},
                                         {
                                             "id": "call_valid_memory",
@@ -3557,6 +3566,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("tool_result", json.dumps(plan_payload.get("warnings", [])).lower())
                     self.assertIn("custom/freeform", json.dumps(plan_payload.get("warnings", [])).lower())
                     self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(plan_payload))
+                    self.assertNotIn(result_alias_marker, planned + rejected_blob + json.dumps(plan_payload))
                     self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(plan_payload))
                     metadata = plan_payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
@@ -3573,6 +3583,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 recall = runtime.handle_message('/recall query=native-edge')
                 self.assertIn("legacy/native edge case accepted", recall)
                 self.assertNotIn("edge-secret", applied + recall)
+                self.assertNotIn(result_alias_marker, applied + recall)
                 self.assertTrue(captured_payloads)
                 self.assertIn("tools", captured_payloads[0])
                 self.assertNotIn("approve", [item["function"]["name"] for item in captured_payloads[0].get("tools", [])])
@@ -4464,6 +4475,7 @@ class AgentRuntimeTests(unittest.TestCase):
             captured_payloads = []
             custom_input_marker = "CONTENT_BLOCK_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
             function_response_marker = "CONTENT_BLOCK_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
+            result_alias_marker = "CONTENT_BLOCK_CAMEL_RESULT_SHOULD_NOT_SURFACE"
 
             class FakeContentBlockHTTPResponse:
                 def __enter__(self):
@@ -4496,6 +4508,8 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"type": "tool_use", "tool_use_id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
                                         {"type": "custom_tool_call", "id": "toolu_custom", "name": "run_command", "input": custom_input_marker + " token=content-secret"},
                                         {"type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
+                                        {"type": "toolResult", "content": result_alias_marker + " token=content-secret"},
+                                        {"functionResult": {"content": result_alias_marker + " token=content-secret"}},
                                         {"type": "functionResponse", "content": function_response_marker + " token=content-secret"},
                                     ],
                                 }
@@ -4536,6 +4550,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("custom/freeform", warnings_blob)
                     self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(payload))
                     self.assertNotIn(function_response_marker, planned + rejected_blob + json.dumps(payload))
+                    self.assertNotIn(result_alias_marker, planned + rejected_blob + json.dumps(payload))
                     self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(payload))
                     metadata = payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
@@ -4552,6 +4567,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 recall = runtime.handle_message('/recall query=native-content-block')
                 self.assertIn("content block native tool call accepted", recall)
                 self.assertNotIn("content-secret", applied + recall)
+                self.assertNotIn(result_alias_marker, applied + recall)
                 self.assertTrue(captured_payloads)
                 self.assertIn("tools", captured_payloads[0])
             finally:
@@ -9116,6 +9132,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
+                self.assertIn("toolResult", native_status.get("provider_tool_result_block_types_ignored", []))
+                self.assertIn("functionCallOutput", native_status.get("provider_tool_result_block_types_ignored", []))
+                self.assertIn("toolCallResult", native_status.get("provider_tool_result_block_types_ignored", []))
                 self.assertIn("custom_tool_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("server_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("mcp_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))

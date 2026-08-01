@@ -2254,6 +2254,9 @@ def main(argv: list[str] | None = None) -> int:
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "toolResult" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "functionCallOutput" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "toolCallResult" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "custom_tool_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "server_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "mcp_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
@@ -4283,6 +4286,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
+        native_provider_result_alias_marker = "PROVIDER_CAMEL_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
         native_edge_captured = {}
         native_provider_custom_marker = "NATIVE_CUSTOM_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
@@ -4305,6 +4309,8 @@ def main(argv: list[str] | None = None) -> int:
                                     {"id": "edge_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=native-edge-secret}"}},
                                     {"id": "edge_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
                                     {"id": "edge_tool_result", "type": "tool_result", "content": native_provider_result_marker},
+                                    {"id": "edge_tool_result_camel", "type": "toolResult", "content": native_provider_result_alias_marker + " token=native-edge-secret"},
+                                    {"id": "edge_function_result_alias", "functionResult": {"content": native_provider_result_alias_marker + " token=native-edge-secret"}},
                                     {"id": "edge_custom_freeform", "type": "custom_tool_call", "name": "run_command", "input": native_provider_custom_marker + " token=native-edge-secret"},
                                     {
                                         "id": "edge_memory",
@@ -4378,6 +4384,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_edge_captured.get("tool_choice") == "auto"
             and native_edge_captured.get("tool_count", 0) > 0
             and native_provider_custom_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
+            and native_provider_result_alias_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and "native-edge-secret" not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
         )
         checks["native_provider_legacy_function_call_ok"] = (
@@ -4424,6 +4431,8 @@ def main(argv: list[str] | None = None) -> int:
                                     },
                                     {"type": "tool_use", "id": "content_bad", "name": "remember", "input": ["not", "object"]},
                                     {"type": "tool_result", "content": native_provider_result_marker},
+                                    {"type": "toolResult", "content": native_provider_result_alias_marker + " token=native-content-block-secret"},
+                                    {"functionResult": {"content": native_provider_result_alias_marker + " token=native-content-block-secret"}},
                                     {"type": "functionResponse", "content": native_provider_result_marker + " token=native-content-block-secret"},
                                 ],
                             }
@@ -4483,6 +4492,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_content_block_captured.get("tool_choice") == "auto"
             and native_content_block_captured.get("tool_count", 0) > 0
             and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
+            and native_provider_result_alias_marker not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
         )
         checks["native_provider_content_block_call_id_alias_ok"] = (
             [item.get("provider_tool_call_id") for item in native_content_call_metadata] == ["content_memory_alias", "content_tasks_alias"]
@@ -6891,6 +6901,10 @@ def main(argv: list[str] | None = None) -> int:
             and "tool_result" in native_responses_warnings.lower()
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_response" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "toolResult" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "functionResult" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "functionCallOutput" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "toolCallResult" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and native_provider_result_marker not in native_edge_plan + native_edge_apply + native_edge_recall
             and native_provider_result_marker not in native_content_plan + native_content_apply + native_content_recall
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall
@@ -6900,6 +6914,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_provider_result_marker not in json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
             and native_provider_result_marker not in json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and native_provider_result_marker not in json.dumps(native_candidate_plan_payload) + json.dumps(native_candidate_apply_payload)
+            and native_provider_result_alias_marker not in native_edge_plan + native_edge_apply + native_edge_recall + native_content_plan + native_content_apply + native_content_recall
+            and native_provider_result_alias_marker not in json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload) + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
             and native_single_content_result_marker not in json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
         )
 

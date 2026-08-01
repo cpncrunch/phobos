@@ -1581,10 +1581,15 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "provider_tool_result_echo_ignored": True,
             "provider_tool_result_block_types_ignored": [
                 "tool_result",
+                "toolResult",
                 "function_result",
+                "functionResult",
                 "function_call_output",
+                "functionCallOutput",
                 "functionResponse",
                 "function_response",
+                "tool_call_result",
+                "toolCallResult",
             ],
             "provider_unsupported_tool_call_types_rejected": [
                 "custom_tool_call",

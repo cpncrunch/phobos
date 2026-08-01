@@ -803,11 +803,11 @@ def _provider_message_wrapper_to_message(raw: dict[str, Any], *, provider_shape_
     _extend_responses_message_tool_calls(tool_calls, raw, provider_shape_prefix=provider_shape_prefix)
     if tool_calls:
         message["tool_calls"] = tool_calls
-    function_response = raw.get("functionResponse") or raw.get("function_response")
+    function_response = _native_provider_result_alias_value(raw)
     if isinstance(function_response, dict):
         _append_message_content_block(
             message,
-            {"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""},
+            {"type": "tool_result", "content": _native_provider_result_content(function_response)},
         )
     return message if message else {}
 
@@ -825,7 +825,10 @@ def _message_content_text(content: Any) -> str:
         for item in content:
             if isinstance(item, dict):
                 block_type = str(item.get("type") or "").strip()
-                if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES | _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
+                if (
+                    block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES | _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
+                    or _native_provider_result_alias_value(item) is not None
+                ):
                     # Provider-side tool-call/result blocks are planner state,
                     # not assistant summary text.  In particular, ``tool_result``
                     # content may contain raw tool output from an upstream model
@@ -959,11 +962,11 @@ def _root_message_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     _extend_responses_message_tool_calls(tool_calls, root_message, provider_shape_prefix="root.message")
     if tool_calls:
         message["tool_calls"] = tool_calls
-    function_response = root_message.get("functionResponse") or root_message.get("function_response")
+    function_response = _native_provider_result_alias_value(root_message)
     if isinstance(function_response, dict):
         _append_message_content_block(
             message,
-            {"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""},
+            {"type": "tool_result", "content": _native_provider_result_content(function_response)},
         )
     return message if message else {}
 
@@ -1018,9 +1021,9 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 "call_id": str(call_id),
                 "_provider_shape": "gemini.candidate",
             })
-        function_response = part.get("functionResponse") or part.get("function_response")
+        function_response = _native_provider_result_alias_value(part)
         if isinstance(function_response, dict):
-            content_blocks.append({"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""})
+            content_blocks.append({"type": "tool_result", "content": _native_provider_result_content(function_response)})
     if not content_blocks and not tool_calls:
         return {}
     return {"content": content_blocks, "tool_calls": tool_calls}
@@ -1136,8 +1139,8 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 "_provider_shape": provider_shape,
             })
             continue
-        if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
-            content_blocks.append({"type": "tool_result", "content": item.get("output") or item.get("content") or item.get("response") or ""})
+        if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES or _native_provider_result_alias_value(item) is not None:
+            content_blocks.append({"type": "tool_result", "content": _native_provider_result_content(item)})
             continue
     output_text = raw.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -1232,8 +1235,8 @@ def _anthropic_message_with_provider_shape(message: dict[str, Any]) -> dict[str,
             block_type = str(item.get("type") or "").strip()
             has_native_alias = any(
                 isinstance(item.get(key), dict)
-                for key in ("functionCall", "function_call", "toolUse", "tool_use", "functionResponse", "function_response")
-            )
+                for key in ("functionCall", "function_call", "toolUse", "tool_use")
+            ) or _native_provider_result_alias_value(item) is not None
             if (
                 block_type in _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
                 or block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
@@ -1252,7 +1255,7 @@ def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> d
     block_type = str(out.get("type") or "").strip()
     has_native_call_alias = isinstance(out.get("functionCall") or out.get("function_call"), dict)
     has_native_tool_use_alias = isinstance(out.get("toolUse") or out.get("tool_use"), dict)
-    has_native_result_alias = isinstance(out.get("functionResponse") or out.get("function_response"), dict)
+    has_native_result_alias = _native_provider_result_alias_value(out) is not None
     if provider_shape and "_provider_shape" not in out and (
         block_type in (
             _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
@@ -1398,11 +1401,11 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
     for provider_shape, root_tool_uses in root_tool_use_batches:
         for call in _native_tool_use_batch_items(provider_shape, root_tool_uses):
             _append_message_tool_call(message, call)
-    root_function_response = raw.get("functionResponse") or raw.get("function_response")
+    root_function_response = _native_provider_result_alias_value(raw)
     if isinstance(root_function_response, dict):
         _append_message_content_block(
             message,
-            {"type": "tool_result", "content": root_function_response.get("response") or root_function_response.get("content") or ""},
+            {"type": "tool_result", "content": _native_provider_result_content(root_function_response)},
         )
     if isinstance(raw.get("function_call"), dict):
         message["function_call"] = raw.get("function_call")
@@ -1645,9 +1648,9 @@ def _parse_native_content_tool_blocks(
         if not isinstance(item, dict):
             continue
         block_type = str(item.get("type") or "").strip()
-        function_response = item.get("functionResponse") or item.get("function_response")
-        if isinstance(function_response, dict) and (not block_type or block_type in {"functionResponse", "function_response"}):
-            warnings.append("Native provider functionResponse content ignored; Phobos only accepts model-requested tool calls at this boundary.")
+        function_response = _native_provider_result_alias_value(item)
+        if isinstance(function_response, dict) and (not block_type or block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES):
+            warnings.append("Native provider tool_result/functionResponse content ignored; Phobos only accepts model-requested tool calls at this boundary.")
             continue
         function_call = item.get("functionCall") or item.get("function_call")
         if isinstance(function_call, dict) and (not block_type or block_type in {"functionCall", "function_call"}):
@@ -1847,7 +1850,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     if not isinstance(item, dict):
         return None, {"tool": None, "reason": "Native tool call must be an object.", "args": {"value_type": type(item).__name__}}, "Native tool call was not an object; skipped."
     native_type = item.get("type")
-    if native_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
+    if native_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES or _native_provider_result_alias_value(item) is not None:
         return None, None, "Native provider tool_result entry ignored; Phobos only accepts model-requested tool calls at this boundary."
     if native_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
         return _reject_unsupported_native_tool_call(item, index=index, native_type=str(native_type))
@@ -2140,11 +2143,28 @@ def _sanitize_native_call_id(value: Any, *, limit: int = 200) -> str:
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "toolUse", "tool_call", "function_call", "functionCall"}
 _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
     "tool_result",
+    "toolResult",
     "function_result",
+    "functionResult",
+    "function_call_output",
+    "functionCallOutput",
+    "functionResponse",
+    "function_response",
+    "tool_call_result",
+    "toolCallResult",
+}
+_NATIVE_PROVIDER_RESULT_ALIAS_KEYS = (
+    "toolResult",
+    "tool_result",
+    "functionResult",
+    "function_result",
+    "functionCallOutput",
     "function_call_output",
     "functionResponse",
     "function_response",
-}
+    "toolCallResult",
+    "tool_call_result",
+)
 _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {
     "custom_tool_call",
     "computer_call",
@@ -2159,6 +2179,47 @@ _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {
     "mcp_list_tools",
     "mcp_approval_request",
 }
+
+
+def _native_provider_result_alias_value(mapping: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a provider result-echo alias payload without surfacing content.
+
+    Provider bridges are inconsistent about result blocks: some use typed
+    ``tool_result`` / ``function_call_output`` entries while others put
+    camelCase aliases such as ``toolResult`` or ``functionCallOutput`` on a
+    typeless content block.  Treat every form as prior-tool output that must be
+    ignored at the planning boundary, not as assistant text or a fresh tool call.
+    """
+
+    if not isinstance(mapping, dict):
+        return None
+    for key in _NATIVE_PROVIDER_RESULT_ALIAS_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return {"content": value}
+    return None
+
+
+def _native_provider_result_content(mapping: dict[str, Any]) -> str:
+    """Extract bounded result echo text for internal ignored blocks only."""
+
+    if not isinstance(mapping, dict):
+        return ""
+    alias_value = _native_provider_result_alias_value(mapping)
+    source = alias_value if isinstance(alias_value, dict) else mapping
+    for key in ("output", "content", "response", "result", "text"):
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return ""
 
 
 def _reject_unsupported_native_tool_call(
