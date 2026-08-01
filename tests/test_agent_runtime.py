@@ -3007,6 +3007,107 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_output_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Output Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-responses-should-not-run.txt"
+            provider_result_marker = "PROVIDER_RESPONSES_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesOutputHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "responses provider selected tool calls token=responses-secret",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": "responses provider selected tool calls token=responses-secret"},
+                                ],
+                            },
+                            {
+                                "type": "function_call",
+                                "call_id": "resp_memory",
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-responses", "value": "responses output native tool call accepted"}),
+                            },
+                            {
+                                "type": "function_call",
+                                "call_id": "resp_dry_run",
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "responses output native dry-run boundary",
+                                    "command": f"printf native-responses > {dry_run_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                            {"type": "function_call_output", "call_id": "resp_result", "output": provider_result_marker},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesOutputHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-output",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses output token=responses-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertIn("native provider responses output function_call", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses output function_call", payload["tool_calls"][1]["reason"])
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_memory", "resp_dry_run"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses output function_call", "native provider responses output function_call"])
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+                    metadata = payload.get("metadata", {})
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertNotIn("responses-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses output token=responses-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_memory", "resp_dry_run"])
+                    self.assertEqual(ledger[1].get("native_tool_call_source"), "native provider responses output function_call")
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-responses')
+                self.assertIn("responses output native tool call accepted", recall)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("responses-secret", applied + recall)
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

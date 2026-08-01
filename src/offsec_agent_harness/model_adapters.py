@@ -336,6 +336,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
         first = choices[0]
         if isinstance(first, dict) and isinstance(first.get("message"), dict):
             return first["message"]
+    responses_message = _responses_output_to_message(raw)
+    if responses_message:
+        return responses_message
     return {}
 
 
@@ -360,6 +363,80 @@ def _message_content_text(content: Any) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return "" if content is None else str(content)
+
+
+def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Responses-style output blocks into a chat message shape.
+
+    OpenAI-compatible shims usually return Chat Completions ``choices``. Some
+    newer provider bridges expose a Responses-style top-level ``output`` array
+    with ``function_call`` items instead.  Treat those as planner proposals only
+    and convert them into the existing message/tool-call boundary so Phobos still
+    performs schema validation, runtime policy, ROE preview, and guarded apply.
+    Provider-side result echoes remain content blocks that are ignored later.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    output = raw.get("output")
+    if not isinstance(output, list):
+        return {}
+    content_blocks: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        block_type = str(item.get("type") or "").strip()
+        if block_type == "message":
+            _extend_responses_content_blocks(content_blocks, item.get("content"))
+            continue
+        if block_type in {"output_text", "text"}:
+            text = item.get("text") or item.get("content")
+            if isinstance(text, str):
+                content_blocks.append({"type": "text", "text": text})
+            continue
+        if block_type in {"function_call", "tool_call", "tool_use"}:
+            name = item.get("name") or item.get("tool")
+            arguments = item.get("arguments", item.get("input", item.get("args", {})))
+            call_id = item.get("call_id") or item.get("id") or item.get("tool_call_id") or ""
+            tool_calls.append({
+                "type": "tool_call",
+                "name": name,
+                "arguments": arguments,
+                "call_id": str(call_id),
+                "_provider_shape": "responses.output",
+            })
+            continue
+        if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
+            content_blocks.append({"type": "tool_result", "content": item.get("output") or item.get("content") or ""})
+            continue
+    output_text = raw.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        has_text = any(
+            isinstance(block, dict)
+            and str(block.get("type") or "") not in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
+            and str(block.get("text") or block.get("content") or "").strip()
+            for block in content_blocks
+        )
+        if not has_text:
+            content_blocks.insert(0, {"type": "text", "text": output_text})
+    content_value: Any = content_blocks if content_blocks else (output_text if isinstance(output_text, str) else "")
+    if not tool_calls and not content_value:
+        return {}
+    return {"content": content_value, "tool_calls": tool_calls}
+
+
+def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any) -> None:
+    if isinstance(content, str):
+        blocks.append({"type": "text", "text": content})
+        return
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if isinstance(block, dict):
+            blocks.append(dict(block))
+        elif isinstance(block, str):
+            blocks.append({"type": "text", "text": block})
 
 
 def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -500,18 +577,19 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         name = function
     if name:
         arguments = item.get("arguments", item.get("args", item.get("input", {})))
+        label = "native provider responses output function_call" if item.get("_provider_shape") == "responses.output" else "native provider flat tool_call"
         return _parse_native_function_call(
             {"name": name, "arguments": arguments},
             index=index,
             legacy=False,
             call_id=str(item.get("id") or item.get("call_id") or ""),
-            label="native provider flat tool_call",
+            label=label,
         )
     return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
 
 
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
-_NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {"tool_result", "function_result"}
+_NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {"tool_result", "function_result", "function_call_output"}
 
 
 def _parse_native_function_call(

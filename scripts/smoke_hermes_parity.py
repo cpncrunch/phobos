@@ -1912,6 +1912,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
+            and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
             and native_status_data.get("plan_only_default") is True
@@ -1933,7 +1934,9 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("provider_tool_result_echo_ignored") is True
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -2358,13 +2361,110 @@ def main(argv: list[str] | None = None) -> int:
             and native_content_block_captured.get("tool_count", 0) > 0
             and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
         )
+
+        native_responses_marker = root / "native-responses-should-not-run.txt"
+        native_responses_captured = {}
+
+        class NativeOpenAIResponsesOutputSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native responses output smoke token=native-responses-secret",
+                    "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "native responses output smoke token=native-responses-secret"}]},
+                        {
+                            "type": "function_call",
+                            "call_id": "responses_memory",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-responses-smoke", "value": "responses output native tool call translated"}),
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "responses_dry",
+                            "name": "run_command",
+                            "arguments": json.dumps({
+                                "target": "app.example.test",
+                                "purpose": "native responses dry-run smoke",
+                                "command": f"printf native-responses > {native_responses_marker}",
+                                "execute": True,
+                            }),
+                        },
+                        {"type": "function_call_output", "call_id": "responses_result", "output": native_provider_result_marker},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesOutputSmokeResponse()
+
+        native_responses_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-output.db"),
+                session_name="native-provider-responses-output-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-output-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_urlopen
+            native_responses_plan = native_responses_runtime.handle_message('/auto model=true prompt="native responses output smoke token=native-responses-secret"')
+            native_responses_plan_payload = json.loads(native_responses_plan.split("\n", 1)[1])
+            native_responses_apply = native_responses_runtime.handle_message('/auto apply=true model=true prompt="native responses output smoke token=native-responses-secret"')
+            native_responses_apply_payload = json.loads(native_responses_apply.split("\n", 1)[1])
+            native_responses_recall = native_responses_runtime.handle_message('/recall query=native-responses-smoke')
+            write("native-provider-responses-output-tool-calls.json", json.dumps({
+                "plan": native_responses_plan_payload,
+                "apply": native_responses_apply_payload,
+                "captured": native_responses_captured,
+                "recall": native_responses_recall,
+                "marker_exists": native_responses_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_original_urlopen
+            native_responses_runtime.close()
+        native_responses_calls = native_responses_plan_payload.get("tool_calls", []) if isinstance(native_responses_plan_payload.get("tool_calls"), list) else []
+        native_responses_warnings = json.dumps(native_responses_plan_payload.get("warnings", []))
+        native_responses_metadata = native_responses_plan_payload.get("metadata", {}) if isinstance(native_responses_plan_payload.get("metadata"), dict) else {}
+        native_responses_ledger = native_responses_apply_payload.get("execution_ledger", []) if isinstance(native_responses_apply_payload.get("execution_ledger"), list) else []
+        native_responses_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_calls]
+        checks["native_provider_responses_output_tool_call_ok"] = (
+            native_responses_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_calls] == ["remember", "run_command"]
+            and all("native provider responses output function_call" in call.get("reason", "") for call in native_responses_calls)
+            and native_responses_calls[1].get("args", {}).get("execute") is False
+            and native_responses_metadata.get("native_tool_calls") is True
+            and native_responses_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_responses_call_metadata] == ["responses_memory", "responses_dry"]
+            and [item.get("provider_tool_call_id") for item in native_responses_ledger] == ["responses_memory", "responses_dry"]
+            and native_responses_ledger[1].get("native_tool_call_source") == "native provider responses output function_call"
+            and [item.get("result", {}).get("status") for item in native_responses_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and "responses output native tool call translated" in native_responses_recall
+            and "tool_result" in native_responses_warnings.lower()
+            and native_responses_captured.get("tool_choice") == "auto"
+            and native_responses_captured.get("tool_count", 0) > 0
+            and not native_responses_marker.exists()
+            and "native-responses-secret" not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+            and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+        )
         checks["native_provider_tool_result_ignore_ok"] = (
             "tool_result" in native_edge_warnings.lower()
             and "tool_result" in native_content_warnings.lower()
+            and "tool_result" in native_responses_warnings.lower()
             and native_provider_result_marker not in native_edge_plan + native_edge_apply + native_edge_recall
             and native_provider_result_marker not in native_content_plan + native_content_apply + native_content_recall
+            and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall
             and native_provider_result_marker not in json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and native_provider_result_marker not in json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
+            and native_provider_result_marker not in json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
         )
 
         native_confirm_marker = root / "native-confirm-should-not-run.txt"
@@ -3280,6 +3380,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_content_block_tool_call_ok",
+            "native_provider_responses_output_tool_call_ok",
             "native_provider_tool_result_ignore_ok",
             "native_tool_call_guardrail_approval_ok",
             "native_tool_call_loop_approval_stop_ok",
