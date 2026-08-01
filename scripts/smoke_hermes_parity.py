@@ -4168,16 +4168,51 @@ def main(argv: list[str] | None = None) -> int:
                                     },
                                 }
                             ],
+                            "toolCalls": [
+                                {
+                                    "toolUseId": "responses_output_direct_message_toolcalls_memory",
+                                    "function": {
+                                        "name": "remember",
+                                        "argumentsJson": {"key": "native-responses-output-direct-message-toolcalls-smoke", "value": "Typeless direct Responses output message toolCalls native tool call translated"},
+                                    },
+                                }
+                            ],
+                            "tool_call": {
+                                "tool_call_id": "responses_output_direct_message_tool_call_memory",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-responses-output-direct-message-tool-call-smoke", "value": "Typeless direct Responses output message tool_call native tool call translated"}),
+                                },
+                            },
                             "toolCall": {
                                 "toolCallId": "responses_output_direct_message_tool_camel_memory",
                                 "name": "remember",
                                 "args": {"key": "native-responses-output-direct-message-tool-camel-smoke", "value": "Typeless direct Responses output message toolCall native tool call translated"},
+                            },
+                            "functionCall": {
+                                "callId": "responses_output_direct_message_function_alias_memory",
+                                "name": "remember",
+                                "parameters": {"key": "native-responses-output-direct-message-functioncall-smoke", "value": "Typeless direct Responses output message functionCall native tool call translated"},
+                            },
+                            "function_call": {
+                                "call_id": "responses_output_direct_message_function_call_memory",
+                                "name": "remember",
+                                "parameters": {"key": "native-responses-output-direct-message-function-call-smoke", "value": "Typeless direct Responses output message function_call native tool call translated"},
                             },
                             "functionCalls": {
                                 "callId": "responses_output_direct_message_function_calls_memory",
                                 "name": "remember",
                                 "args": {"key": "native-responses-output-direct-message-functioncalls-smoke", "value": "Typeless direct Responses output message functionCalls native tool call translated"},
                             },
+                            "function_calls": [
+                                {
+                                    "call_id": "responses_output_direct_message_function_calls_snake_memory",
+                                    "function_call": {
+                                        "name": "remember",
+                                        "parameters": {"key": "native-responses-output-direct-message-function-calls-snake-smoke", "value": "Typeless direct Responses output message function_calls native tool call translated"},
+                                    },
+                                }
+                            ],
                         }
                     ],
                 }).encode("utf-8")
@@ -4220,26 +4255,58 @@ def main(argv: list[str] | None = None) -> int:
         native_responses_output_direct_message_outputs = native_responses_output_direct_message_plan + native_responses_output_direct_message_apply + native_responses_output_direct_message_recall + json.dumps(native_responses_output_direct_message_plan_payload) + json.dumps(native_responses_output_direct_message_apply_payload)
         checks["native_provider_responses_output_message_typeless_direct_ok"] = (
             native_responses_output_direct_message_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_responses_output_direct_message_calls] == ["remember", "remember", "remember", "remember"]
+            and [call.get("tool") for call in native_responses_output_direct_message_calls] == ["remember"] * 9
             and [item.get("native_tool_call_source") for item in native_responses_output_direct_message_call_metadata] == [
                 "native provider typeless responses output message tool_calls",
+                "native provider typeless responses output message toolCalls",
+                "native provider typeless responses output message tool_call",
                 "native provider typeless responses output message toolCall",
+                "native provider typeless responses output message functionCall",
+                "native provider typeless responses output message function_call",
                 "native provider typeless responses output message functionCalls",
+                "native provider typeless responses output message function_calls",
                 "native provider typeless responses output message content parts functionCall",
             ]
             and [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_call_metadata] == [
                 "responses_output_direct_message_tool_calls_memory",
+                "responses_output_direct_message_toolcalls_memory",
+                "responses_output_direct_message_tool_call_memory",
                 "responses_output_direct_message_tool_camel_memory",
+                "responses_output_direct_message_function_alias_memory",
+                "responses_output_direct_message_function_call_memory",
                 "responses_output_direct_message_function_calls_memory",
+                "responses_output_direct_message_function_calls_snake_memory",
                 "responses_output_direct_message_parts_memory",
             ]
             and [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_ledger] == [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_call_metadata]
-            and [item.get("result", {}).get("status") for item in native_responses_output_direct_message_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok"]
+            and [item.get("native_tool_call_source") for item in native_responses_output_direct_message_ledger] == [item.get("native_tool_call_source") for item in native_responses_output_direct_message_call_metadata]
+            and [item.get("result", {}).get("status") for item in native_responses_output_direct_message_apply_payload.get("results", [])] == ["ok"] * 9
             and native_status_milestone_contract.get("responses_output_message_typeless_direct_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_tool_calls_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_tool_calls_camel_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_tool_call_singular_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_tool_call_camel_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_function_call_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_function_calls_alias_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_function_calls_snake_alias_translation") is True
             and "responses_output_message_typeless_direct" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_toolCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "Typeless direct Responses output message tool_calls native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message toolCalls native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message tool_call native tool call translated" in native_responses_output_direct_message_recall
             and "Typeless direct Responses output message toolCall native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message functionCall native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message function_call native tool call translated" in native_responses_output_direct_message_recall
             and "Typeless direct Responses output message functionCalls native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message function_calls native tool call translated" in native_responses_output_direct_message_recall
             and "Typeless direct Responses output message content parts native tool call translated" in native_responses_output_direct_message_recall
             and "functionResponse" in json.dumps(native_responses_output_direct_message_plan_payload.get("warnings", []))
             and native_responses_output_direct_message_captured.get("tool_choice") == "auto"
@@ -4247,6 +4314,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_output_direct_message_result_marker not in native_responses_output_direct_message_outputs
             and "native-responses-output-direct-message-secret" not in native_responses_output_direct_message_outputs + json.dumps(native_responses_output_direct_message_call_metadata) + json.dumps(native_responses_output_direct_message_ledger)
         )
+        checks["native_provider_responses_output_message_typeless_direct_aliases_ok"] = checks["native_provider_responses_output_message_typeless_direct_ok"]
 
         native_responses_message_tool_captured = {}
 
@@ -5982,6 +6050,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_output_message_typeless_direct_ok",
+            "native_provider_responses_output_message_typeless_direct_aliases_ok",
             "native_provider_responses_message_tool_call_alias_ok",
             "native_provider_responses_message_function_calls_alias_ok",
             "native_provider_responses_message_content_tool_call_ok",

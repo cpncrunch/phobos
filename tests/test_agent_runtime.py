@@ -4888,16 +4888,51 @@ class AgentRuntimeTests(unittest.TestCase):
                                         },
                                     }
                                 ],
+                                "toolCalls": [
+                                    {
+                                        "toolUseId": "typeless_direct_output_message_toolcalls_memory",
+                                        "function": {
+                                            "name": "remember",
+                                            "argumentsJson": {"key": "native-typeless-direct-output-message-toolcalls", "value": "typeless direct Responses output message toolCalls accepted"},
+                                        },
+                                    }
+                                ],
+                                "tool_call": {
+                                    "tool_call_id": "typeless_direct_output_message_tool_call_memory",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-typeless-direct-output-message-tool-call", "value": "typeless direct Responses output message tool_call accepted"}),
+                                    },
+                                },
                                 "toolCall": {
                                     "toolCallId": "typeless_direct_output_message_tool_camel_memory",
                                     "name": "remember",
                                     "args": {"key": "native-typeless-direct-output-message-tool-camel", "value": "typeless direct Responses output message toolCall accepted"},
+                                },
+                                "functionCall": {
+                                    "callId": "typeless_direct_output_message_function_alias_memory",
+                                    "name": "remember",
+                                    "parameters": {"key": "native-typeless-direct-output-message-functioncall", "value": "typeless direct Responses output message functionCall accepted"},
+                                },
+                                "function_call": {
+                                    "call_id": "typeless_direct_output_message_function_call_memory",
+                                    "name": "remember",
+                                    "parameters": {"key": "native-typeless-direct-output-message-function-call", "value": "typeless direct Responses output message function_call accepted"},
                                 },
                                 "functionCalls": {
                                     "callId": "typeless_direct_output_message_function_calls_memory",
                                     "name": "remember",
                                     "args": {"key": "native-typeless-direct-output-message-functioncalls", "value": "typeless direct Responses output message functionCalls accepted"},
                                 },
+                                "function_calls": [
+                                    {
+                                        "call_id": "typeless_direct_output_message_function_calls_snake_memory",
+                                        "function_call": {
+                                            "name": "remember",
+                                            "parameters": {"key": "native-typeless-direct-output-message-function-calls-snake", "value": "typeless direct Responses output message function_calls accepted"},
+                                        },
+                                    }
+                                ],
                             }
                         ],
                     }).encode("utf-8")
@@ -4920,18 +4955,28 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native typeless direct responses output message token=typeless-direct-output-message-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "remember", "remember", "remember"])
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"] * 9)
                     self.assertIn("native provider typeless responses output message tool_calls", payload["tool_calls"][0]["reason"])
-                    self.assertIn("native provider typeless responses output message toolCall", payload["tool_calls"][1]["reason"])
-                    self.assertIn("native provider typeless responses output message functionCalls", payload["tool_calls"][2]["reason"])
-                    self.assertIn("native provider typeless responses output message content parts functionCall", payload["tool_calls"][3]["reason"])
+                    self.assertIn("native provider typeless responses output message toolCalls", payload["tool_calls"][1]["reason"])
+                    self.assertIn("native provider typeless responses output message tool_call", payload["tool_calls"][2]["reason"])
+                    self.assertIn("native provider typeless responses output message toolCall", payload["tool_calls"][3]["reason"])
+                    self.assertIn("native provider typeless responses output message functionCall", payload["tool_calls"][4]["reason"])
+                    self.assertIn("native provider typeless responses output message function_call", payload["tool_calls"][5]["reason"])
+                    self.assertIn("native provider typeless responses output message functionCalls", payload["tool_calls"][6]["reason"])
+                    self.assertIn("native provider typeless responses output message function_calls", payload["tool_calls"][7]["reason"])
+                    self.assertIn("native provider typeless responses output message content parts functionCall", payload["tool_calls"][8]["reason"])
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
                     self.assertEqual(
                         [item.get("provider_tool_call_id") for item in call_metadata],
                         [
                             "typeless_direct_output_message_tool_calls_memory",
+                            "typeless_direct_output_message_toolcalls_memory",
+                            "typeless_direct_output_message_tool_call_memory",
                             "typeless_direct_output_message_tool_camel_memory",
+                            "typeless_direct_output_message_function_alias_memory",
+                            "typeless_direct_output_message_function_call_memory",
                             "typeless_direct_output_message_function_calls_memory",
+                            "typeless_direct_output_message_function_calls_snake_memory",
                             "typeless_direct_output_message_parts_memory",
                         ],
                     )
@@ -4939,30 +4984,62 @@ class AgentRuntimeTests(unittest.TestCase):
                         [item.get("native_tool_call_source") for item in call_metadata],
                         [
                             "native provider typeless responses output message tool_calls",
+                            "native provider typeless responses output message toolCalls",
+                            "native provider typeless responses output message tool_call",
                             "native provider typeless responses output message toolCall",
+                            "native provider typeless responses output message functionCall",
+                            "native provider typeless responses output message function_call",
                             "native provider typeless responses output message functionCalls",
+                            "native provider typeless responses output message function_calls",
                             "native provider typeless responses output message content parts functionCall",
                         ],
                     )
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 9)
                     self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
                     self.assertNotIn("typeless-direct-output-message-secret", planned + json.dumps(payload))
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native typeless direct responses output message token=typeless-direct-output-message-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"] * 9)
                     ledger = applied_payload.get("execution_ledger", [])
                     self.assertEqual([item.get("provider_tool_call_id") for item in ledger], [item.get("provider_tool_call_id") for item in call_metadata])
                     self.assertEqual([item.get("native_tool_call_source") for item in ledger], [item.get("native_tool_call_source") for item in call_metadata])
                 recall = runtime.handle_message('/recall query=native-typeless-direct-output-message')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("typeless direct Responses output message tool_calls accepted", recall)
+                self.assertIn("typeless direct Responses output message toolCalls accepted", recall)
+                self.assertIn("typeless direct Responses output message tool_call accepted", recall)
                 self.assertIn("typeless direct Responses output message toolCall accepted", recall)
+                self.assertIn("typeless direct Responses output message functionCall accepted", recall)
+                self.assertIn("typeless direct Responses output message function_call accepted", recall)
                 self.assertIn("typeless direct Responses output message functionCalls accepted", recall)
+                self.assertIn("typeless direct Responses output message function_calls accepted", recall)
                 self.assertIn("typeless direct Responses output message content parts accepted", recall)
                 self.assertTrue(status.get("milestone_contract", {}).get("responses_output_message_typeless_direct_translation"), status)
-                self.assertIn("responses_output_message_typeless_direct", status.get("provider_native_tool_call_variants", []))
+                for contract_key in (
+                    "responses_output_message_typeless_direct_tool_calls_alias_translation",
+                    "responses_output_message_typeless_direct_tool_calls_camel_alias_translation",
+                    "responses_output_message_typeless_direct_tool_call_singular_alias_translation",
+                    "responses_output_message_typeless_direct_tool_call_camel_alias_translation",
+                    "responses_output_message_typeless_direct_function_call_alias_translation",
+                    "responses_output_message_typeless_direct_function_calls_alias_translation",
+                    "responses_output_message_typeless_direct_function_calls_snake_alias_translation",
+                ):
+                    self.assertTrue(status.get("milestone_contract", {}).get(contract_key), status)
+                for variant in (
+                    "responses_output_message_typeless_direct",
+                    "responses_output_message_typeless_direct_tool_calls",
+                    "responses_output_message_typeless_direct_toolCalls",
+                    "responses_output_message_typeless_direct_tool_call",
+                    "responses_output_message_typeless_direct_toolCall",
+                    "responses_output_message_typeless_direct_function_call",
+                    "responses_output_message_typeless_direct_functionCall",
+                    "responses_output_message_typeless_direct_functionCalls",
+                    "responses_output_message_typeless_direct_function_calls",
+                    "responses_output_message_typeless_direct_content_parts_functionCall",
+                ):
+                    self.assertIn(variant, status.get("provider_native_tool_call_variants", []))
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 self.assertNotIn("typeless-direct-output-message-secret", applied + recall + json.dumps(status))
