@@ -877,6 +877,21 @@ def _parse_native_content_tool_blocks(
         if not isinstance(item, dict):
             continue
         block_type = str(item.get("type") or "").strip()
+        function_response = item.get("functionResponse") or item.get("function_response")
+        if isinstance(function_response, dict) and (not block_type or block_type in {"functionResponse", "function_response"}):
+            warnings.append("Native provider functionResponse content ignored; Phobos only accepts model-requested tool calls at this boundary.")
+            continue
+        function_call = item.get("functionCall") or item.get("function_call")
+        if isinstance(function_call, dict) and (not block_type or block_type in {"functionCall", "function_call"}):
+            parsed, rejected_item, warning = _parse_native_content_function_call_block(item, function_call, index=index)
+            if warning:
+                warnings.append(warning)
+            if parsed:
+                calls.append(parsed)
+            if rejected_item:
+                rejected.append(rejected_item)
+            index += 1
+            continue
         if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
             warnings.append("Native provider tool_result content ignored; Phobos only accepts model-requested tool calls at this boundary.")
             continue
@@ -927,6 +942,33 @@ def _parse_native_content_tool_block(
         index=index,
         legacy=False,
         call_id=call_id,
+        label=label,
+    )
+
+
+def _parse_native_content_function_call_block(
+    item: dict[str, Any],
+    function_call: dict[str, Any],
+    *,
+    index: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Translate Gemini-style content-block functionCall aliases.
+
+    Some OpenAI-compatible and Gemini bridge shims place camelCase
+    ``functionCall`` objects directly inside ``message.content`` parts rather
+    than top-level ``tool_calls`` or ``candidates[].content.parts[]``. Keep them
+    in the native planning boundary only: schema validation, runtime policy,
+    ROE preview, approval, and execution gates still happen in the runtime.
+    """
+
+    provider_shape = str(item.get("_provider_shape") or "")
+    label = "native provider responses message content functionCall" if provider_shape == "responses.message.content" else "native content-block functionCall"
+    arguments = _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params"))
+    return _parse_native_function_call(
+        {"name": function_call.get("name") or function_call.get("tool"), "arguments": arguments},
+        index=index,
+        legacy=False,
+        call_id=_native_call_id(item, function_call),
         label=label,
     )
 

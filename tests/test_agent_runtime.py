@@ -3265,6 +3265,105 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_content_block_function_call_alias_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Content Block FunctionCall Alias",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            function_response_marker = "CONTENT_BLOCK_FUNCTIONCALL_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeContentBlockFunctionCallHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": [
+                                        {"type": "text", "text": "native content-block functionCall plan token=content-function-secret"},
+                                        {
+                                            "functionCall": {
+                                                "toolUseId": "content_function_alias_memory",
+                                                "name": "remember",
+                                                "args": {"key": "native-content-functioncall", "value": "content-block functionCall alias accepted"},
+                                            },
+                                        },
+                                        {
+                                            "type": "functionCall",
+                                            "callId": "content_function_alias_tasks",
+                                            "functionCall": {
+                                                "name": "list_tasks",
+                                                "argumentsJson": {"status": "all", "limit": "1"},
+                                            },
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": function_response_marker + " token=content-function-secret"},
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeContentBlockFunctionCallHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-content-block-functioncall-alias",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-content-functioncall", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native content functionCall token=content-function-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertTrue(all("native content-block functionCall" in call.get("reason", "") for call in payload["tool_calls"]))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["content_function_alias_memory", "content_function_alias_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native content-block functionCall", "native content-block functionCall"])
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn(function_response_marker, planned + json.dumps(payload))
+                    self.assertNotIn("content-function-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native content functionCall token=content-function-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["content_function_alias_memory", "content_function_alias_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native content-block functionCall", "native content-block functionCall"])
+                recall = runtime.handle_message('/recall query=native-content-functioncall')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("content-block functionCall alias accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("content_block_function_call_alias_translation"), status)
+                self.assertIn("content_block_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("content-function-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_top_level_content_blocks_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -2005,6 +2005,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("message_function_calls_nested_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
+            and native_status_milestone_contract.get("content_block_function_call_alias_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
@@ -2032,6 +2033,7 @@ def main(argv: list[str] | None = None) -> int:
             and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "content_block_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3189,6 +3191,108 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_content_ledger] == ["content_memory_alias", "content_tasks_alias"]
             and [item.get("native_tool_call_source") for item in native_content_ledger] == ["native content-block tool_use", "native content-block function_call"]
             and "native-content-block-secret" not in json.dumps(native_content_call_metadata) + json.dumps(native_content_ledger)
+        )
+
+        native_content_function_alias_captured = {}
+        native_content_function_alias_result_marker = "CONTENT_BLOCK_FUNCTIONCALL_RESULT_SHOULD_BE_IGNORED_SMOKE"
+
+        class NativeContentBlockFunctionCallAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "native content-block functionCall smoke token=native-content-function-secret"},
+                                    {
+                                        "functionCall": {
+                                            "toolUseId": "content_function_alias_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-content-functioncall-smoke", "value": "content-block functionCall alias translated"},
+                                        },
+                                    },
+                                    {
+                                        "type": "functionCall",
+                                        "callId": "content_function_alias_tasks",
+                                        "functionCall": {
+                                            "name": "list_tasks",
+                                            "argumentsJson": {"status": "all", "limit": "1"},
+                                        },
+                                    },
+                                    {
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": native_content_function_alias_result_marker + " token=native-content-function-secret"},
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_content_function_alias_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_content_function_alias_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_content_function_alias_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeContentBlockFunctionCallAliasSmokeResponse()
+
+        native_content_function_alias_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-content-block-functioncall.db"),
+                session_name="native-provider-content-block-functioncall-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-content-functioncall-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_content_function_alias_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_content_function_alias_urlopen
+            native_content_function_alias_plan = native_content_function_alias_runtime.handle_message('/auto model=true prompt="native content functionCall smoke token=native-content-function-secret"')
+            native_content_function_alias_plan_payload = json.loads(native_content_function_alias_plan.split("\n", 1)[1])
+            native_content_function_alias_apply = native_content_function_alias_runtime.handle_message('/auto apply=true model=true prompt="native content functionCall smoke token=native-content-function-secret"')
+            native_content_function_alias_apply_payload = json.loads(native_content_function_alias_apply.split("\n", 1)[1])
+            native_content_function_alias_recall = native_content_function_alias_runtime.handle_message('/recall query=native-content-functioncall-smoke')
+            write("native-provider-content-block-functioncall-alias.json", json.dumps({
+                "plan": native_content_function_alias_plan_payload,
+                "apply": native_content_function_alias_apply_payload,
+                "captured": native_content_function_alias_captured,
+                "recall": native_content_function_alias_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_content_function_alias_original_urlopen
+            native_content_function_alias_runtime.close()
+        native_content_function_alias_calls = native_content_function_alias_plan_payload.get("tool_calls", []) if isinstance(native_content_function_alias_plan_payload.get("tool_calls"), list) else []
+        native_content_function_alias_metadata = native_content_function_alias_plan_payload.get("metadata", {}) if isinstance(native_content_function_alias_plan_payload.get("metadata"), dict) else {}
+        native_content_function_alias_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_content_function_alias_calls]
+        native_content_function_alias_ledger = native_content_function_alias_apply_payload.get("execution_ledger", []) if isinstance(native_content_function_alias_apply_payload.get("execution_ledger"), list) else []
+        native_content_function_alias_warnings = json.dumps(native_content_function_alias_plan_payload.get("warnings", []))
+        checks["native_provider_content_block_function_call_alias_ok"] = (
+            native_content_function_alias_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_content_function_alias_calls] == ["remember", "list_tasks"]
+            and all("native content-block functionCall" in call.get("reason", "") for call in native_content_function_alias_calls)
+            and [item.get("provider_tool_call_id") for item in native_content_function_alias_call_metadata] == ["content_function_alias_memory", "content_function_alias_tasks"]
+            and [item.get("native_tool_call_source") for item in native_content_function_alias_call_metadata] == ["native content-block functionCall", "native content-block functionCall"]
+            and native_content_function_alias_metadata.get("native_tool_calls") is True
+            and native_content_function_alias_metadata.get("native_tool_call_count") == 2
+            and [item.get("result", {}).get("status") for item in native_content_function_alias_apply_payload.get("results", [])] == ["ok", "ok"]
+            and [item.get("provider_tool_call_id") for item in native_content_function_alias_ledger] == ["content_function_alias_memory", "content_function_alias_tasks"]
+            and [item.get("native_tool_call_source") for item in native_content_function_alias_ledger] == ["native content-block functionCall", "native content-block functionCall"]
+            and "functionResponse" in native_content_function_alias_warnings
+            and native_status_milestone_contract.get("content_block_function_call_alias_translation") is True
+            and "content_block_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "content-block functionCall alias translated" in native_content_function_alias_recall
+            and native_content_function_alias_captured.get("tool_choice") == "auto"
+            and native_content_function_alias_captured.get("tool_count", 0) > 0
+            and native_content_function_alias_result_marker not in native_content_function_alias_plan + native_content_function_alias_apply + native_content_function_alias_recall + json.dumps(native_content_function_alias_plan_payload) + json.dumps(native_content_function_alias_apply_payload)
+            and "native-content-function-secret" not in native_content_function_alias_plan + native_content_function_alias_apply + native_content_function_alias_recall + json.dumps(native_content_function_alias_plan_payload) + json.dumps(native_content_function_alias_apply_payload)
         )
 
         native_top_level_content_captured = {}
@@ -4977,6 +5081,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_content_block_call_id_alias_ok",
+            "native_provider_content_block_function_call_alias_ok",
             "native_provider_argument_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
