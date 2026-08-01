@@ -3364,6 +3364,115 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_content_parts_function_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Content Parts Function Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-content-parts-should-not-run.txt"
+            function_response_marker = "CONTENT_PARTS_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeContentPartsHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": {
+                                        "parts": [
+                                            {"text": "native content parts plan token=content-parts-secret"},
+                                            {
+                                                "functionCall": {
+                                                    "callId": "content_parts_memory",
+                                                    "name": "remember",
+                                                    "args": {"key": "native-content-parts", "value": "content parts functionCall accepted"},
+                                                },
+                                            },
+                                            {
+                                                "functionCall": {
+                                                    "toolUseId": "content_parts_dry_run",
+                                                    "name": "run_command",
+                                                    "parameters": {
+                                                        "target": "app.example.test",
+                                                        "purpose": "content parts native dry-run boundary",
+                                                        "command": f"printf native-content-parts > {dry_run_marker}",
+                                                        "execute": True,
+                                                    },
+                                                },
+                                            },
+                                            {
+                                                "functionResponse": {
+                                                    "name": "remember",
+                                                    "response": {"content": function_response_marker + " token=content-parts-secret"},
+                                                },
+                                            },
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeContentPartsHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-content-parts-functioncall",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-content-parts", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native content parts token=content-parts-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider content parts functionCall" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["content_parts_memory", "content_parts_dry_run"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider content parts functionCall", "native provider content parts functionCall"])
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn(function_response_marker, planned + json.dumps(payload))
+                    self.assertNotIn("content-parts-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native content parts token=content-parts-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["content_parts_memory", "content_parts_dry_run"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider content parts functionCall", "native provider content parts functionCall"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-content-parts')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("content parts functionCall accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("content_parts_function_call_translation"), status)
+                self.assertIn("content_parts_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("content-parts-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_top_level_content_blocks_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6116,6 +6225,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("single_top_level_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("single_content_block_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("top_level_content_block_tool_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("content_parts_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("single_responses_output_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_alias_translation"), native_status)
@@ -6148,6 +6258,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_content_block_tool_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("top_level_content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("content_parts_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCalls", native_status.get("provider_native_tool_call_variants", []))

@@ -352,6 +352,9 @@ def _message_content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, dict):
+        content_parts = _native_content_parts(content)
+        if content_parts is not None:
+            return _message_content_text(content_parts)
         return _message_content_text([content])
     if isinstance(content, list):
         parts: list[str] = []
@@ -413,6 +416,27 @@ def _native_argument_value(
         if value not in (None, ""):
             return value
     return first_present if has_present else {}
+
+
+def _native_content_parts(content: Any) -> list[Any] | None:
+    """Return Gemini-style content parts from a message/content object.
+
+    A few OpenAI-compatible shims wrap Gemini-style ``parts`` under
+    ``choices[].message.content`` or a top-level ``content`` object instead of
+    returning a top-level ``candidates`` array.  Normalize those parts at the
+    adapter boundary so functionCall proposals still enter Phobos' normal
+    schema/runtime-policy/ROE validation path and provider result echoes remain
+    ignored planner state.
+    """
+
+    if not isinstance(content, dict) or "parts" not in content:
+        return None
+    parts = content.get("parts")
+    if isinstance(parts, dict):
+        return [parts]
+    if isinstance(parts, list):
+        return parts
+    return None
 
 
 def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
@@ -864,7 +888,16 @@ def _parse_native_content_tool_blocks(
     """
 
     if isinstance(content, dict):
-        content_items = [content]
+        content_parts = _native_content_parts(content)
+        if content_parts is not None:
+            content_items = [
+                dict(item, _provider_shape=str(item.get("_provider_shape") or "content.parts"))
+                if isinstance(item, dict)
+                else item
+                for item in content_parts
+            ]
+        else:
+            content_items = [content]
     elif isinstance(content, list):
         content_items = content
     else:
@@ -927,7 +960,12 @@ def _parse_native_content_tool_block(
     function = item.get("function")
     call_id = _native_call_id(item, function if isinstance(function, dict) else None)
     provider_shape = str(item.get("_provider_shape") or "")
-    label = f"native provider responses message content {block_type}" if provider_shape == "responses.message.content" else f"native content-block {block_type}"
+    if provider_shape == "responses.message.content":
+        label = f"native provider responses message content {block_type}"
+    elif provider_shape == "content.parts":
+        label = f"native provider content parts {block_type}"
+    else:
+        label = f"native content-block {block_type}"
     if isinstance(function, dict):
         return _parse_native_function_call(
             function,
@@ -962,7 +1000,12 @@ def _parse_native_content_function_call_block(
     """
 
     provider_shape = str(item.get("_provider_shape") or "")
-    label = "native provider responses message content functionCall" if provider_shape == "responses.message.content" else "native content-block functionCall"
+    if provider_shape == "responses.message.content":
+        label = "native provider responses message content functionCall"
+    elif provider_shape == "content.parts":
+        label = "native provider content parts functionCall"
+    else:
+        label = "native content-block functionCall"
     arguments = _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params"))
     return _parse_native_function_call(
         {"name": function_call.get("name") or function_call.get("tool"), "arguments": arguments},
