@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 import re
 import shlex
@@ -12,9 +12,18 @@ class PlannedToolCall:
     args: dict[str, Any]
     reason: str
     validation: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = {
+            "tool": self.tool,
+            "args": self.args,
+            "reason": self.reason,
+            "validation": self.validation,
+        }
+        if self.metadata:
+            data["metadata"] = self.metadata
+        return data
 
 
 @dataclass(slots=True)

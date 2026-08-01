@@ -46,6 +46,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "duplicate_plan_stops": True,
     "redacted_transcripts_and_audit": True,
     "execution_ledger_claim_contract": True,
+    "provider_tool_call_id_provenance": True,
     "gateway_and_bridge_surfaces": True,
 }
 
@@ -614,7 +615,8 @@ class OffSecAgentRuntime:
                 elif guardrail_status == "block":
                     warnings.append(f"Planned tool {tool} will be blocked by guardrails if applied.")
             validation_payload.update({"status": "ok", "schema_validated": True, "runtime_policy": runtime_policy})
-            validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload))
+            call_metadata = _redact_runtime_value(dict(call.metadata or {})) if isinstance(call.metadata, dict) else {}
+            validated_calls.append(PlannedToolCall(tool=tool, args=validated_args, reason=reason, validation=validation_payload, metadata=call_metadata))
         metadata = dict(plan.metadata or {})
         if attempted_tool_call_count:
             metadata["attempted_tool_call_count"] = attempted_tool_call_count
@@ -788,7 +790,14 @@ class OffSecAgentRuntime:
                 tool_args = dict(tool_args)
                 tool_args["execute"] = False
                 warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
-            calls.append(PlannedToolCall(tool=tool, args=tool_args, reason=str(item.get("reason") or "Model planner selected this tool.")))
+            calls.append(
+                PlannedToolCall(
+                    tool=tool,
+                    args=tool_args,
+                    reason=str(item.get("reason") or "Model planner selected this tool."),
+                    metadata=_model_planned_call_metadata(item),
+                )
+            )
         metadata = _model_plan_metadata(response)
         metadata.update({"context_provided": bool(context), "context_chars": len(context)})
         return AgentPlan(
@@ -1141,6 +1150,60 @@ def _guardrail_preview_for_planned_call(roe: EngagementROE, registry: OffSecTool
         return {"status": "error", "error": redact_secrets(str(exc)) or "guardrail preview failed"}
 
 
+def _model_planned_call_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """Extract bounded, redacted per-call native planner provenance.
+
+    Provider-native tool calls often carry an opaque call id that operators need
+    to correlate plan previews, applied results, and feedback-loop transcripts.
+    Preserve only that correlation metadata, not arbitrary raw provider payloads
+    or model-controlled blobs.
+    """
+
+    metadata: dict[str, Any] = {}
+    raw = item.get("metadata") if isinstance(item, dict) else None
+    if isinstance(raw, dict):
+        for key in ("provider_tool_call_id", "tool_call_id", "call_id", "id"):
+            value = raw.get(key)
+            if value not in (None, ""):
+                metadata["provider_tool_call_id"] = _bounded_metadata_string(value, 200)
+                break
+        source = raw.get("native_tool_call_source") or raw.get("source")
+        if source not in (None, ""):
+            metadata["native_tool_call_source"] = _bounded_metadata_string(source, 120)
+        if "native_tool_call_index" in raw:
+            index = _safe_int(raw.get("native_tool_call_index"))
+            if index is not None:
+                metadata["native_tool_call_index"] = index
+    for key in ("provider_tool_call_id", "tool_call_id", "call_id", "id"):
+        value = item.get(key)
+        if value not in (None, ""):
+            metadata["provider_tool_call_id"] = _bounded_metadata_string(value, 200)
+            break
+    source = item.get("native_tool_call_source") or item.get("source")
+    if source not in (None, ""):
+        metadata["native_tool_call_source"] = _bounded_metadata_string(source, 120)
+    if "native_tool_call_index" in item:
+        index = _safe_int(item.get("native_tool_call_index"))
+        if index is not None:
+            metadata["native_tool_call_index"] = index
+    return _redact_runtime_value(metadata) if metadata else {}
+
+
+def _bounded_metadata_string(value: Any, limit: int) -> str:
+    text = redact_secrets(str(value)) or ""
+    return text[:limit]
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value.strip())
+    return None
+
+
 def _model_plan_metadata(response: Any) -> dict[str, Any]:
     """Return redacted model-planner metadata safe for auto transcripts.
 
@@ -1250,6 +1313,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "planner_trace_redacted": True,
             "followup_feedback_prompt_redacted": True,
             "execution_summary_contract": True,
+            "provider_tool_call_id_provenance": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
@@ -1775,6 +1839,7 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
     data = result.data if isinstance(result.data, dict) else {}
     decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
     planned_validation = call.validation if isinstance(call.validation, dict) else {}
+    call_metadata = call.metadata if isinstance(call.metadata, dict) else {}
     guardrail_status = decision.get("status") if isinstance(decision, dict) else None
     if not guardrail_status:
         guardrail_status = planned_validation.get("guardrail_status")
@@ -1818,6 +1883,16 @@ def _planned_call_execution_ledger(call: PlannedToolCall, result: ToolResult, *,
         "safe_to_claim_tool_ran": tool_completed_or_executed,
         "safe_to_claim_command_executed": actual_command_or_process_activity,
     }
+    provider_tool_call_id = call_metadata.get("provider_tool_call_id") or call_metadata.get("tool_call_id") or call_metadata.get("call_id")
+    if provider_tool_call_id not in (None, ""):
+        ledger["provider_tool_call_id"] = _bounded_metadata_string(provider_tool_call_id, 200)
+    native_tool_call_source = call_metadata.get("native_tool_call_source") or call_metadata.get("source")
+    if native_tool_call_source not in (None, ""):
+        ledger["native_tool_call_source"] = _bounded_metadata_string(native_tool_call_source, 120)
+    if "native_tool_call_index" in call_metadata:
+        native_index = _safe_int(call_metadata.get("native_tool_call_index"))
+        if native_index is not None:
+            ledger["native_tool_call_index"] = native_index
     if step is not None:
         ledger["step"] = step
     if data.get("approval_id"):

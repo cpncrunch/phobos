@@ -1910,6 +1910,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("guardrail_preview_before_target_activity") is True
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
+            and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
@@ -1922,6 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("followup_feedback_prompt_redacted") is True
             and native_status_milestone_contract.get("followup_prompt_secret_redaction") is True
             and native_status_data.get("execution_summary_contract") is True
+            and native_status_data.get("provider_tool_call_id_provenance") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
@@ -2151,6 +2153,7 @@ def main(argv: list[str] | None = None) -> int:
         native_flat_calls = native_flat_plan_payload.get("tool_calls", []) if isinstance(native_flat_plan_payload.get("tool_calls"), list) else []
         native_flat_metadata = native_flat_plan_payload.get("metadata", {}) if isinstance(native_flat_plan_payload.get("metadata"), dict) else {}
         native_flat_ledger = native_flat_apply_payload.get("execution_ledger", []) if isinstance(native_flat_apply_payload.get("execution_ledger"), list) else []
+        native_flat_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_flat_calls]
         checks["native_provider_flat_tool_call_ok"] = (
             native_flat_plan_payload.get("mode") == "plan_only"
             and [call.get("tool") for call in native_flat_calls] == ["remember", "run_command"]
@@ -2168,6 +2171,13 @@ def main(argv: list[str] | None = None) -> int:
             and native_flat_captured.get("tool_count", 0) > 0
             and not native_flat_marker.exists()
             and "native-flat-secret" not in native_flat_plan + native_flat_apply + native_flat_recall + json.dumps(native_flat_plan_payload) + json.dumps(native_flat_apply_payload)
+        )
+        checks["native_tool_call_provider_call_id_provenance_ok"] = (
+            [item.get("provider_tool_call_id") for item in native_flat_call_metadata] == ["flat_memory", "flat_dry"]
+            and all(item.get("native_tool_call_source") == "native provider flat tool_call" for item in native_flat_call_metadata)
+            and [item.get("provider_tool_call_id") for item in native_flat_ledger] == ["flat_memory", "flat_dry"]
+            and native_flat_ledger[1].get("native_tool_call_source") == "native provider flat tool_call"
+            and "native-flat-secret" not in json.dumps(native_flat_call_metadata) + json.dumps(native_flat_ledger)
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
@@ -3267,6 +3277,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_provider_flat_tool_call_ok",
+            "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_tool_result_ignore_ok",

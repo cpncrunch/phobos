@@ -530,7 +530,13 @@ def _parse_native_function_call(
         return None, {"tool": name, "reason": error, "args": {}}, f"Native arguments for {name} were invalid; skipped."
     label = label or ("legacy native function_call" if legacy else "native provider tool_call")
     suffix = f" ({call_id})" if call_id else f" #{index}"
-    return {"tool": name, "args": args, "reason": f"Model requested {label}{suffix}."}, None, None
+    metadata: dict[str, Any] = {
+        "native_tool_call_source": label,
+        "native_tool_call_index": index,
+    }
+    if call_id:
+        metadata["provider_tool_call_id"] = call_id
+    return {"tool": name, "args": args, "reason": f"Model requested {label}{suffix}.", "metadata": metadata}, None, None
 
 
 def _parse_native_arguments(value: Any) -> tuple[dict[str, Any], str | None]:
