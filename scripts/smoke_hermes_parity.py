@@ -2018,6 +2018,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("content_block_function_call_alias_translation") is True
+            and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_data.get("model_planning_enabled") is True
@@ -2046,7 +2047,9 @@ def main(argv: list[str] | None = None) -> int:
             and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "content_block_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "content_parts_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3849,6 +3852,148 @@ def main(argv: list[str] | None = None) -> int:
             and native_content_function_alias_captured.get("tool_count", 0) > 0
             and native_content_function_alias_result_marker not in native_content_function_alias_plan + native_content_function_alias_apply + native_content_function_alias_recall + json.dumps(native_content_function_alias_plan_payload) + json.dumps(native_content_function_alias_apply_payload)
             and "native-content-function-secret" not in native_content_function_alias_plan + native_content_function_alias_apply + native_content_function_alias_recall + json.dumps(native_content_function_alias_plan_payload) + json.dumps(native_content_function_alias_apply_payload)
+        )
+
+        native_content_tooluse_marker = root / "native-content-tooluse-should-not-run.txt"
+        native_content_tooluse_captured = {}
+        native_content_tooluse_result_marker = "CONTENT_BLOCK_TOOLUSE_RESULT_SHOULD_BE_IGNORED_SMOKE"
+
+        class NativeContentBlockToolUseAliasSmokeResponse:
+            def __init__(self, *, parts: bool = False):
+                self.parts = parts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                if self.parts:
+                    content = {
+                        "parts": [
+                            {"text": "native content parts toolUse smoke token=native-content-tooluse-secret"},
+                            {
+                                "toolUse": {
+                                    "toolUseId": "content_parts_tooluse_memory",
+                                    "toolName": "remember",
+                                    "inputJson": {"key": "native-content-parts-tooluse-smoke", "value": "content parts toolUse native tool call translated"},
+                                }
+                            },
+                            {
+                                "type": "toolUse",
+                                "toolUse": {
+                                    "toolUseId": "content_parts_tooluse_dry",
+                                    "name": "run_command",
+                                    "input": {
+                                        "target": "app.example.test",
+                                        "purpose": "content parts toolUse dry-run smoke",
+                                        "command": f"printf native-content-tooluse > {native_content_tooluse_marker}",
+                                        "execute": True,
+                                    },
+                                },
+                            },
+                            {
+                                "functionResponse": {
+                                    "name": "remember",
+                                    "response": {"content": native_content_tooluse_result_marker + " token=native-content-tooluse-secret"},
+                                },
+                            },
+                        ]
+                    }
+                else:
+                    content = [
+                        {"type": "text", "text": "native content-block toolUse smoke token=native-content-tooluse-secret"},
+                        {
+                            "toolUse": {
+                                "toolUseId": "content_tooluse_memory",
+                                "toolName": "remember",
+                                "inputJson": {"key": "native-content-tooluse-smoke", "value": "content-block toolUse native tool call translated"},
+                            }
+                        },
+                        {
+                            "type": "toolUse",
+                            "toolUseId": "content_tooluse_direct",
+                            "name": "list_tasks",
+                            "input": {"status": "all", "limit": "1"},
+                        },
+                        {"type": "functionResponse", "content": native_content_tooluse_result_marker + " token=native-content-tooluse-secret"},
+                    ]
+                return json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+
+        def fake_native_content_tooluse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_content_tooluse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_content_tooluse_captured["tool_choice"] = payload.get("tool_choice")
+            user_text = "\n".join(str(item.get("content") or "") for item in payload.get("messages", []) if isinstance(item, dict))
+            return NativeContentBlockToolUseAliasSmokeResponse(parts="parts toolUse" in user_text)
+
+        native_content_tooluse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-content-block-tooluse.db"),
+                session_name="native-provider-content-block-tooluse-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-content-tooluse-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_content_tooluse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_content_tooluse_urlopen
+            native_content_tooluse_plan = native_content_tooluse_runtime.handle_message('/auto model=true prompt="native content toolUse smoke token=native-content-tooluse-secret"')
+            native_content_tooluse_plan_payload = json.loads(native_content_tooluse_plan.split("\n", 1)[1])
+            native_content_tooluse_apply = native_content_tooluse_runtime.handle_message('/auto apply=true model=true prompt="native content toolUse smoke token=native-content-tooluse-secret"')
+            native_content_tooluse_apply_payload = json.loads(native_content_tooluse_apply.split("\n", 1)[1])
+            native_content_tooluse_parts_plan = native_content_tooluse_runtime.handle_message('/auto model=true prompt="native content parts toolUse smoke token=native-content-tooluse-secret"')
+            native_content_tooluse_parts_plan_payload = json.loads(native_content_tooluse_parts_plan.split("\n", 1)[1])
+            native_content_tooluse_parts_apply = native_content_tooluse_runtime.handle_message('/auto apply=true model=true prompt="native content parts toolUse smoke token=native-content-tooluse-secret"')
+            native_content_tooluse_parts_apply_payload = json.loads(native_content_tooluse_parts_apply.split("\n", 1)[1])
+            native_content_tooluse_recall = native_content_tooluse_runtime.handle_message('/recall query=native-content-tooluse-smoke')
+            native_content_tooluse_parts_recall = native_content_tooluse_runtime.handle_message('/recall query=native-content-parts-tooluse-smoke')
+            write("native-provider-content-block-tooluse-alias.json", json.dumps({
+                "plan": native_content_tooluse_plan_payload,
+                "apply": native_content_tooluse_apply_payload,
+                "parts_plan": native_content_tooluse_parts_plan_payload,
+                "parts_apply": native_content_tooluse_parts_apply_payload,
+                "captured": native_content_tooluse_captured,
+                "recall": native_content_tooluse_recall,
+                "parts_recall": native_content_tooluse_parts_recall,
+                "marker_exists": native_content_tooluse_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_content_tooluse_original_urlopen
+            native_content_tooluse_runtime.close()
+        native_content_tooluse_calls = native_content_tooluse_plan_payload.get("tool_calls", []) if isinstance(native_content_tooluse_plan_payload.get("tool_calls"), list) else []
+        native_content_tooluse_parts_calls = native_content_tooluse_parts_plan_payload.get("tool_calls", []) if isinstance(native_content_tooluse_parts_plan_payload.get("tool_calls"), list) else []
+        native_content_tooluse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_content_tooluse_calls]
+        native_content_tooluse_parts_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_content_tooluse_parts_calls]
+        native_content_tooluse_ledger = native_content_tooluse_apply_payload.get("execution_ledger", []) if isinstance(native_content_tooluse_apply_payload.get("execution_ledger"), list) else []
+        native_content_tooluse_parts_ledger = native_content_tooluse_parts_apply_payload.get("execution_ledger", []) if isinstance(native_content_tooluse_parts_apply_payload.get("execution_ledger"), list) else []
+        native_content_tooluse_variants = native_status_data.get("provider_native_tool_call_variants", [])
+        checks["native_provider_content_block_tool_use_alias_ok"] = (
+            native_content_tooluse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_content_tooluse_calls] == ["remember", "list_tasks"]
+            and [item.get("provider_tool_call_id") for item in native_content_tooluse_call_metadata] == ["content_tooluse_memory", "content_tooluse_direct"]
+            and [item.get("native_tool_call_source") for item in native_content_tooluse_call_metadata] == ["native content-block toolUse", "native content-block toolUse"]
+            and [item.get("result", {}).get("status") for item in native_content_tooluse_apply_payload.get("results", [])] == ["ok", "ok"]
+            and [item.get("native_tool_call_source") for item in native_content_tooluse_ledger] == ["native content-block toolUse", "native content-block toolUse"]
+            and native_content_tooluse_parts_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_content_tooluse_parts_calls] == ["remember", "run_command"]
+            and native_content_tooluse_parts_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_content_tooluse_parts_metadata] == ["content_parts_tooluse_memory", "content_parts_tooluse_dry"]
+            and [item.get("native_tool_call_source") for item in native_content_tooluse_parts_metadata] == ["native provider content parts toolUse", "native provider content parts toolUse"]
+            and [item.get("result", {}).get("status") for item in native_content_tooluse_parts_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("native_tool_call_source") for item in native_content_tooluse_parts_ledger] == ["native provider content parts toolUse", "native provider content parts toolUse"]
+            and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
+            and "content_block_toolUse" in native_content_tooluse_variants
+            and "content_parts_toolUse" in native_content_tooluse_variants
+            and "content-block toolUse native tool call translated" in native_content_tooluse_recall
+            and "content parts toolUse native tool call translated" in native_content_tooluse_parts_recall
+            and native_content_tooluse_captured.get("tool_choice") == "auto"
+            and native_content_tooluse_captured.get("tool_count", 0) > 0
+            and not native_content_tooluse_marker.exists()
+            and native_content_tooluse_result_marker not in native_content_tooluse_plan + native_content_tooluse_apply + native_content_tooluse_parts_plan + native_content_tooluse_parts_apply + native_content_tooluse_recall + native_content_tooluse_parts_recall + json.dumps(native_content_tooluse_plan_payload) + json.dumps(native_content_tooluse_apply_payload) + json.dumps(native_content_tooluse_parts_plan_payload) + json.dumps(native_content_tooluse_parts_apply_payload)
+            and "native-content-tooluse-secret" not in native_content_tooluse_plan + native_content_tooluse_apply + native_content_tooluse_parts_plan + native_content_tooluse_parts_apply + native_content_tooluse_recall + native_content_tooluse_parts_recall + json.dumps(native_content_tooluse_plan_payload) + json.dumps(native_content_tooluse_apply_payload) + json.dumps(native_content_tooluse_parts_plan_payload) + json.dumps(native_content_tooluse_parts_apply_payload)
         )
 
         native_content_parts_marker = root / "native-content-parts-should-not-run.txt"
@@ -6581,6 +6726,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_content_block_tool_call_ok",
             "native_provider_content_block_call_id_alias_ok",
             "native_provider_content_block_function_call_alias_ok",
+            "native_provider_content_block_tool_use_alias_ok",
             "native_provider_content_parts_function_call_ok",
             "native_provider_argument_aliases_ok",
             "native_provider_tool_name_aliases_ok",

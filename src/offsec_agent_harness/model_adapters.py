@@ -756,6 +756,7 @@ def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> d
     out = dict(block)
     block_type = str(out.get("type") or "").strip()
     has_native_call_alias = isinstance(out.get("functionCall") or out.get("function_call"), dict)
+    has_native_tool_use_alias = isinstance(out.get("toolUse") or out.get("tool_use"), dict)
     has_native_result_alias = isinstance(out.get("functionResponse") or out.get("function_response"), dict)
     if provider_shape and "_provider_shape" not in out and (
         block_type in (
@@ -764,6 +765,7 @@ def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> d
             | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
         )
         or has_native_call_alias
+        or has_native_tool_use_alias
         or has_native_result_alias
     ):
         # Responses API output[].type=message commonly nests function/tool-call
@@ -1163,6 +1165,22 @@ def _parse_native_content_tool_blocks(
                 rejected.append(rejected_item)
             index += 1
             continue
+        tool_use_alias_key, tool_use_alias = _native_content_tool_use_alias(item)
+        if isinstance(tool_use_alias, dict) and (not block_type or block_type in {"toolUse", "tool_use"}):
+            parsed, rejected_item, warning = _parse_native_content_tool_use_alias_block(
+                item,
+                tool_use_alias,
+                alias_key=tool_use_alias_key,
+                index=index,
+            )
+            if warning:
+                warnings.append(warning)
+            if parsed:
+                calls.append(parsed)
+            if rejected_item:
+                rejected.append(rejected_item)
+            index += 1
+            continue
         if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
             warnings.append("Native provider tool_result content ignored; Phobos only accepts model-requested tool calls at this boundary.")
             continue
@@ -1189,6 +1207,46 @@ def _parse_native_content_tool_blocks(
     return calls, rejected, warnings
 
 
+def _native_content_tool_use_alias(item: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """Return nested content-block ``toolUse``/``tool_use`` wrappers.
+
+    Bedrock/Anthropic-compatible gateways sometimes place the actual tool-use
+    payload under a camelCase or snake_case key inside a content block, e.g.
+    ``{"toolUse": {"toolUseId": "...", "name": "remember", "input": {}}}``,
+    instead of using the Anthropic ``type=tool_use`` flat block.  Normalize that
+    at the adapter boundary only; the runtime still owns name/schema validation,
+    runtime policy, ROE preview, approval queueing, and execution gating.
+    """
+
+    for key in ("toolUse", "tool_use"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            return key, value
+    return "", None
+
+
+def _native_content_label(provider_shape: str, native_kind: str) -> str:
+    if provider_shape == "responses.message.content":
+        return f"native provider responses message content {native_kind}"
+    if provider_shape == "responses.message.content.parts":
+        return f"native provider responses message content parts {native_kind}"
+    if provider_shape == "responses.output.message_typeless.content":
+        return f"native provider typeless responses output message content {native_kind}"
+    if provider_shape == "responses.output.message_typeless.content.parts":
+        return f"native provider typeless responses output message content parts {native_kind}"
+    if provider_shape == "responses.output.message.content":
+        return f"native provider responses output message content {native_kind}"
+    if provider_shape == "responses.output.message.content.parts":
+        return f"native provider responses output message content parts {native_kind}"
+    if provider_shape == "root.message.content":
+        return f"native provider root message content {native_kind}"
+    if provider_shape == "root.message.content.parts":
+        return f"native provider root message content parts {native_kind}"
+    if provider_shape == "content.parts":
+        return f"native provider content parts {native_kind}"
+    return f"native content-block {native_kind}"
+
+
 def _parse_native_content_tool_block(
     item: dict[str, Any],
     *,
@@ -1198,26 +1256,7 @@ def _parse_native_content_tool_block(
     function = item.get("function")
     call_id = _native_call_id(item, function if isinstance(function, dict) else None)
     provider_shape = str(item.get("_provider_shape") or "")
-    if provider_shape == "responses.message.content":
-        label = f"native provider responses message content {block_type}"
-    elif provider_shape == "responses.message.content.parts":
-        label = f"native provider responses message content parts {block_type}"
-    elif provider_shape == "responses.output.message_typeless.content":
-        label = f"native provider typeless responses output message content {block_type}"
-    elif provider_shape == "responses.output.message_typeless.content.parts":
-        label = f"native provider typeless responses output message content parts {block_type}"
-    elif provider_shape == "responses.output.message.content":
-        label = f"native provider responses output message content {block_type}"
-    elif provider_shape == "responses.output.message.content.parts":
-        label = f"native provider responses output message content parts {block_type}"
-    elif provider_shape == "root.message.content":
-        label = f"native provider root message content {block_type}"
-    elif provider_shape == "root.message.content.parts":
-        label = f"native provider root message content parts {block_type}"
-    elif provider_shape == "content.parts":
-        label = f"native provider content parts {block_type}"
-    else:
-        label = f"native content-block {block_type}"
+    label = _native_content_label(provider_shape, block_type)
     if isinstance(function, dict):
         return _parse_native_function_call(
             function,
@@ -1232,6 +1271,25 @@ def _parse_native_content_tool_block(
         index=index,
         legacy=False,
         call_id=call_id,
+        label=label,
+    )
+
+
+def _parse_native_content_tool_use_alias_block(
+    item: dict[str, Any],
+    tool_use: dict[str, Any],
+    *,
+    alias_key: str,
+    index: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    provider_shape = str(item.get("_provider_shape") or "")
+    label = _native_content_label(provider_shape, alias_key or "toolUse")
+    arguments = _native_argument_value(tool_use, preferred=("input", "arguments", "args", "parameters", "params"))
+    return _parse_native_function_call(
+        {"name": _native_tool_name(tool_use), "arguments": arguments},
+        index=index,
+        legacy=False,
+        call_id=_native_call_id(item, tool_use),
         label=label,
     )
 
@@ -1290,7 +1348,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         return None, None, "Native provider tool_result entry ignored; Phobos only accepts model-requested tool calls at this boundary."
     if native_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
         return _reject_unsupported_native_tool_call(item, index=index, native_type=str(native_type))
-    if native_type not in {None, "function", "tool_call", "tool_use"}:
+    if native_type not in {None, "function", "tool_call", "tool_use", "toolUse"}:
         return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
     provider_shape = str(item.get("_provider_shape") or "")
     function = item.get("function")
@@ -1508,7 +1566,7 @@ def _native_call_id(*items: Any) -> str:
     return ""
 
 
-_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call", "functionCall"}
+_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "toolUse", "tool_call", "function_call", "functionCall"}
 _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
     "tool_result",
     "function_result",
