@@ -607,13 +607,28 @@ def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any,
         blocks.append({"type": "text", "text": content})
         return
     if isinstance(content, dict):
+        content_parts = _native_content_parts(content)
+        if content_parts is not None:
+            # Some Responses-compatible shims nest Gemini-style content parts
+            # inside output[].message.content instead of returning a top-level
+            # candidates[] object. Flatten those parts but preserve provider
+            # provenance so transcripts/ledgers still show the native boundary
+            # while runtime schema/ROE/policy validation remains authoritative.
+            part_shape = f"{provider_shape}.parts" if provider_shape else "content.parts"
+            _extend_responses_content_blocks(blocks, content_parts, provider_shape=part_shape)
+            return
         blocks.append(_responses_content_block(content, provider_shape=provider_shape))
         return
     if not isinstance(content, list):
         return
     for block in content:
         if isinstance(block, dict):
-            blocks.append(_responses_content_block(block, provider_shape=provider_shape))
+            content_parts = _native_content_parts(block)
+            if content_parts is not None:
+                part_shape = f"{provider_shape}.parts" if provider_shape else "content.parts"
+                _extend_responses_content_blocks(blocks, content_parts, provider_shape=part_shape)
+            else:
+                blocks.append(_responses_content_block(block, provider_shape=provider_shape))
         elif isinstance(block, str):
             blocks.append({"type": "text", "text": block})
 
@@ -621,16 +636,23 @@ def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any,
 def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> dict[str, Any]:
     out = dict(block)
     block_type = str(out.get("type") or "").strip()
-    if provider_shape and "_provider_shape" not in out and block_type in (
-        _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
-        | _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
-        | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
+    has_native_call_alias = isinstance(out.get("functionCall") or out.get("function_call"), dict)
+    has_native_result_alias = isinstance(out.get("functionResponse") or out.get("function_response"), dict)
+    if provider_shape and "_provider_shape" not in out and (
+        block_type in (
+            _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
+            | _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
+            | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
+        )
+        or has_native_call_alias
+        or has_native_result_alias
     ):
         # Responses API output[].type=message commonly nests function/tool-call
         # content blocks.  Preserve this provider provenance through the normal
         # content-block parser so transcripts and ledgers distinguish these
         # calls from top-level Anthropic-style content blocks without weakening
-        # schema/ROE/runtime-policy validation.
+        # schema/ROE/runtime-policy validation.  Gemini-style parts may omit a
+        # type and carry functionCall/functionResponse aliases directly.
         out["_provider_shape"] = provider_shape
     return out
 
@@ -962,6 +984,8 @@ def _parse_native_content_tool_block(
     provider_shape = str(item.get("_provider_shape") or "")
     if provider_shape == "responses.message.content":
         label = f"native provider responses message content {block_type}"
+    elif provider_shape == "responses.message.content.parts":
+        label = f"native provider responses message content parts {block_type}"
     elif provider_shape == "content.parts":
         label = f"native provider content parts {block_type}"
     else:
@@ -1002,6 +1026,8 @@ def _parse_native_content_function_call_block(
     provider_shape = str(item.get("_provider_shape") or "")
     if provider_shape == "responses.message.content":
         label = "native provider responses message content functionCall"
+    elif provider_shape == "responses.message.content.parts":
+        label = "native provider responses message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
     else:

@@ -4267,6 +4267,116 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_message_content_parts_function_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Message Content Parts",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-responses-message-parts-should-not-run.txt"
+            provider_result_marker = "PROVIDER_RESPONSES_MESSAGE_PARTS_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesMessageContentPartsHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "responses message content parts token=responses-message-parts-secret",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": {
+                                    "parts": [
+                                        {"text": "responses message content parts token=responses-message-parts-secret"},
+                                        {
+                                            "functionCall": {
+                                                "callId": "resp_message_parts_memory",
+                                                "name": "remember",
+                                                "args": {"key": "native-responses-message-parts", "value": "Responses message content parts functionCall accepted"},
+                                            },
+                                        },
+                                        {
+                                            "functionCall": {
+                                                "toolUseId": "resp_message_parts_dry",
+                                                "name": "run_command",
+                                                "parameters": {
+                                                    "target": "app.example.test",
+                                                    "purpose": "responses message content parts dry-run proof",
+                                                    "command": f"printf native-responses-message-parts > {dry_run_marker}",
+                                                    "execute": True,
+                                                },
+                                            },
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": provider_result_marker + " token=responses-message-parts-secret"},
+                                            },
+                                        },
+                                    ]
+                                },
+                            }
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesMessageContentPartsHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-message-content-parts",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses-message-content-parts", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses message content parts token=responses-message-parts-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider responses message content parts functionCall" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_parts_memory", "resp_message_parts_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses message content parts functionCall", "native provider responses message content parts functionCall"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertNotIn("responses-message-parts-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses message content parts token=responses-message-parts-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_parts_memory", "resp_message_parts_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider responses message content parts functionCall", "native provider responses message content parts functionCall"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-responses-message-parts')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses message content parts functionCall accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_content_parts_function_call_translation"), status)
+                self.assertIn("responses_message_content_parts_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn("responses-message-parts-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_single_responses_output_tool_call_object_is_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

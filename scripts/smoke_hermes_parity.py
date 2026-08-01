@@ -4021,6 +4021,120 @@ def main(argv: list[str] | None = None) -> int:
             and "native-responses-message-secret" not in native_responses_message_content_outputs + json.dumps(native_responses_message_content_call_metadata) + json.dumps(native_responses_message_content_ledger)
         )
 
+        native_responses_message_parts_marker = root / "native-responses-message-parts-should-not-run.txt"
+        native_responses_message_parts_captured = {}
+        native_responses_message_parts_result_marker = "RESPONSES_MESSAGE_CONTENT_PARTS_RESULT_SHOULD_BE_IGNORED_SMOKE"
+
+        class NativeOpenAIResponsesMessageContentPartsSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native responses message content parts smoke token=native-responses-message-parts-secret",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": {
+                                "parts": [
+                                    {"text": "native responses message content parts smoke token=native-responses-message-parts-secret"},
+                                    {
+                                        "functionCall": {
+                                            "callId": "responses_message_parts_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-responses-message-parts-smoke", "value": "Responses message content parts functionCall native tool call translated"},
+                                        }
+                                    },
+                                    {
+                                        "functionCall": {
+                                            "toolUseId": "responses_message_parts_dry",
+                                            "name": "run_command",
+                                            "parameters": {
+                                                "target": "app.example.test",
+                                                "purpose": "responses message content parts native dry-run smoke",
+                                                "command": f"printf native-responses-message-parts > {native_responses_message_parts_marker}",
+                                                "execute": True,
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": native_responses_message_parts_result_marker + " token=native-responses-message-parts-secret"},
+                                        }
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_message_parts_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_message_parts_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_message_parts_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesMessageContentPartsSmokeResponse()
+
+        native_responses_message_parts_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-message-content-parts.db"),
+                session_name="native-provider-responses-message-content-parts-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-message-content-parts-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_message_parts_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_message_parts_urlopen
+            native_responses_message_parts_plan = native_responses_message_parts_runtime.handle_message('/auto model=true prompt="native responses message content parts smoke token=native-responses-message-parts-secret"')
+            native_responses_message_parts_plan_payload = json.loads(native_responses_message_parts_plan.split("\n", 1)[1])
+            native_responses_message_parts_apply = native_responses_message_parts_runtime.handle_message('/auto apply=true model=true prompt="native responses message content parts smoke token=native-responses-message-parts-secret"')
+            native_responses_message_parts_apply_payload = json.loads(native_responses_message_parts_apply.split("\n", 1)[1])
+            native_responses_message_parts_recall = native_responses_message_parts_runtime.handle_message('/recall query=native-responses-message-parts-smoke')
+            write("native-provider-responses-message-content-parts-functioncall.json", json.dumps({
+                "plan": native_responses_message_parts_plan_payload,
+                "apply": native_responses_message_parts_apply_payload,
+                "captured": native_responses_message_parts_captured,
+                "recall": native_responses_message_parts_recall,
+                "marker_exists": native_responses_message_parts_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_message_parts_original_urlopen
+            native_responses_message_parts_runtime.close()
+        native_responses_message_parts_calls = native_responses_message_parts_plan_payload.get("tool_calls", []) if isinstance(native_responses_message_parts_plan_payload.get("tool_calls"), list) else []
+        native_responses_message_parts_metadata = native_responses_message_parts_plan_payload.get("metadata", {}) if isinstance(native_responses_message_parts_plan_payload.get("metadata"), dict) else {}
+        native_responses_message_parts_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_message_parts_calls]
+        native_responses_message_parts_ledger = native_responses_message_parts_apply_payload.get("execution_ledger", []) if isinstance(native_responses_message_parts_apply_payload.get("execution_ledger"), list) else []
+        native_responses_message_parts_warnings = json.dumps(native_responses_message_parts_plan_payload.get("warnings", []))
+        native_responses_message_parts_outputs = native_responses_message_parts_plan + native_responses_message_parts_apply + native_responses_message_parts_recall + json.dumps(native_responses_message_parts_plan_payload) + json.dumps(native_responses_message_parts_apply_payload)
+        checks["native_provider_responses_message_content_parts_function_call_ok"] = (
+            native_responses_message_parts_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_message_parts_calls] == ["remember", "run_command"]
+            and all("native provider responses message content parts functionCall" in call.get("reason", "") for call in native_responses_message_parts_calls)
+            and native_responses_message_parts_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_responses_message_parts_call_metadata] == ["responses_message_parts_memory", "responses_message_parts_dry"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_parts_call_metadata] == ["native provider responses message content parts functionCall", "native provider responses message content parts functionCall"]
+            and native_responses_message_parts_metadata.get("native_tool_calls") is True
+            and native_responses_message_parts_metadata.get("native_tool_call_count") == 2
+            and [item.get("result", {}).get("status") for item in native_responses_message_parts_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_responses_message_parts_ledger] == ["responses_message_parts_memory", "responses_message_parts_dry"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_parts_ledger] == ["native provider responses message content parts functionCall", "native provider responses message content parts functionCall"]
+            and native_responses_message_parts_ledger[1].get("actual_command_or_process_activity") is False
+            and "functionResponse" in native_responses_message_parts_warnings
+            and native_status_milestone_contract.get("responses_message_content_parts_function_call_translation") is True
+            and "responses_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses message content parts functionCall native tool call translated" in native_responses_message_parts_recall
+            and native_responses_message_parts_captured.get("tool_choice") == "auto"
+            and native_responses_message_parts_captured.get("tool_count", 0) > 0
+            and not native_responses_message_parts_marker.exists()
+            and native_responses_message_parts_result_marker not in native_responses_message_parts_outputs
+            and "native-responses-message-parts-secret" not in native_responses_message_parts_outputs + json.dumps(native_responses_message_parts_call_metadata) + json.dumps(native_responses_message_parts_ledger)
+        )
+
         native_single_responses_captured = {}
 
         class NativeOpenAISingleResponsesOutputSmokeResponse:
@@ -5241,6 +5355,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_message_content_tool_call_ok",
             "native_provider_responses_message_content_function_call_alias_ok",
+            "native_provider_responses_message_content_parts_function_call_ok",
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
