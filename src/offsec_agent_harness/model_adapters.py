@@ -478,7 +478,8 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
 
     OpenAI-compatible shims usually return Chat Completions ``choices``. Some
     newer provider bridges expose a Responses-style top-level ``output`` array
-    with ``function_call`` items instead.  Treat those as planner proposals only
+    with flat ``function_call`` items, OpenAI-style nested ``function`` items,
+    or Gemini-style nested ``functionCall`` items instead.  Treat those as
     and convert them into the existing message/tool-call boundary so Phobos still
     performs schema validation, runtime policy, ROE preview, and guarded apply.
     Provider-side result echoes remain content blocks that are ignored later.
@@ -520,6 +521,33 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             })
             continue
         if block_type in {"function_call", "tool_call", "tool_use"}:
+            function = item.get("function")
+            if isinstance(function, dict):
+                # Some Responses-compatible shims keep the OpenAI Chat
+                # Completions nesting even inside output[] items. Preserve it as
+                # a provider-native proposal only; runtime schema, ROE,
+                # runtime-policy, approval, and execution boundaries still own
+                # the decision before any tool dispatch can occur.
+                tool_calls.append({
+                    "type": "tool_call",
+                    "function": function,
+                    "call_id": str(_native_call_id(item, function)),
+                    "_provider_shape": f"{provider_shape}.function",
+                })
+                continue
+            function_call = item.get("functionCall") or item.get("function_call")
+            if isinstance(function_call, dict):
+                # Gemini-style wrappers may put functionCall under a Responses
+                # output item. Normalize the name/args shape but do not copy any
+                # provider result/input blobs outside the validated plan path.
+                tool_calls.append({
+                    "type": "tool_call",
+                    "name": function_call.get("name") or function_call.get("tool"),
+                    "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
+                    "call_id": str(_native_call_id(item, function_call)),
+                    "_provider_shape": f"{provider_shape}.functionCall",
+                })
+                continue
             name = item.get("name") or item.get("tool")
             arguments = _native_argument_value(item, preferred=("arguments", "input", "args", "parameters", "params"))
             call_id = _native_call_id(item)
@@ -903,6 +931,10 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider singular tool_call"
         elif provider_shape in {"camelCase.toolCalls", "singular.toolCall"}:
             label = "native provider camelCase toolCall"
+        elif provider_shape == "responses.output.function":
+            label = "native provider responses output nested function"
+        elif provider_shape == "single_responses.output.function":
+            label = "native provider single responses output nested function"
         elif provider_shape == "root.functionCalls":
             label = "native provider root functionCalls"
         elif provider_shape == "root.function_calls":
@@ -934,6 +966,10 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output function_call"
         elif item.get("_provider_shape") == "single_responses.output":
             label = "native provider single responses output function_call"
+        elif item.get("_provider_shape") == "responses.output.functionCall":
+            label = "native provider responses output nested functionCall"
+        elif item.get("_provider_shape") == "single_responses.output.functionCall":
+            label = "native provider single responses output nested functionCall"
         elif item.get("_provider_shape") == "gemini.candidate":
             label = "native provider candidate functionCall"
         elif item.get("_provider_shape") == "root.functionCall":

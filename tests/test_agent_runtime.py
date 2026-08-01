@@ -3852,6 +3852,99 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_nested_output_function_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Nested Output Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "PROVIDER_RESPONSES_NESTED_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeNestedResponsesOutputHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "nested responses output token=responses-nested-secret",
+                        "output": [
+                            {"type": "message", "content": [{"type": "output_text", "text": "nested responses output token=responses-nested-secret"}]},
+                            {
+                                "type": "function_call",
+                                "call_id": "resp_nested_function_memory",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-responses-nested-function", "value": "Responses nested function tool call accepted"}),
+                                },
+                            },
+                            {
+                                "type": "tool_call",
+                                "toolUseId": "resp_nested_function_call_tasks",
+                                "functionCall": {
+                                    "name": "list_tasks",
+                                    "parameters": {"status": "all", "limit": 1},
+                                },
+                            },
+                            {"type": "function_call_output", "call_id": "resp_nested_result", "output": provider_result_marker + " token=responses-nested-secret"},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeNestedResponsesOutputHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-nested-output",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses-nested", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses nested output token=responses-nested-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertIn("native provider responses output nested function", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses output nested functionCall", payload["tool_calls"][1]["reason"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_nested_function_memory", "resp_nested_function_call_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses output nested function", "native provider responses output nested functionCall"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn("responses-nested-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses nested output token=responses-nested-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_nested_function_memory", "resp_nested_function_call_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider responses output nested function", "native provider responses output nested functionCall"])
+                recall = runtime.handle_message('/recall query=native-responses-nested-function')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses nested function tool call accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_output_nested_function_call_translation"), status)
+                self.assertIn("responses_output_nested_function", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_nested_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("responses-nested-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_single_responses_output_tool_call_object_is_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -1991,6 +1991,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
+            and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
@@ -2034,6 +2035,8 @@ def main(argv: list[str] | None = None) -> int:
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3568,6 +3571,101 @@ def main(argv: list[str] | None = None) -> int:
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
         )
 
+        native_responses_nested_captured = {}
+        native_responses_nested_result_marker = "NATIVE_RESPONSES_NESTED_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesNestedOutputSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native nested responses output smoke token=native-responses-nested-secret",
+                    "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "native nested responses output smoke token=native-responses-nested-secret"}]},
+                        {
+                            "type": "function_call",
+                            "call_id": "responses_nested_function_memory",
+                            "function": {
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-responses-nested-smoke", "value": "nested Responses output function native tool call translated"}),
+                            },
+                        },
+                        {
+                            "type": "tool_call",
+                            "toolUseId": "responses_nested_function_call_tasks",
+                            "functionCall": {
+                                "name": "list_tasks",
+                                "parameters": {"status": "all", "limit": 1},
+                            },
+                        },
+                        {"type": "function_call_output", "call_id": "responses_nested_result", "output": native_responses_nested_result_marker + " token=native-responses-nested-secret"},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_nested_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_nested_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_nested_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesNestedOutputSmokeResponse()
+
+        native_responses_nested_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-nested-output.db"),
+                session_name="native-provider-responses-nested-output-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-nested-output-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_nested_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_nested_urlopen
+            native_responses_nested_plan = native_responses_nested_runtime.handle_message('/auto model=true prompt="native nested responses output smoke token=native-responses-nested-secret"')
+            native_responses_nested_plan_payload = json.loads(native_responses_nested_plan.split("\n", 1)[1])
+            native_responses_nested_apply = native_responses_nested_runtime.handle_message('/auto apply=true model=true prompt="native nested responses output smoke token=native-responses-nested-secret"')
+            native_responses_nested_apply_payload = json.loads(native_responses_nested_apply.split("\n", 1)[1])
+            native_responses_nested_recall = native_responses_nested_runtime.handle_message('/recall query=native-responses-nested-smoke')
+            write("native-provider-responses-nested-output-tool-calls.json", json.dumps({
+                "plan": native_responses_nested_plan_payload,
+                "apply": native_responses_nested_apply_payload,
+                "captured": native_responses_nested_captured,
+                "recall": native_responses_nested_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_nested_original_urlopen
+            native_responses_nested_runtime.close()
+        native_responses_nested_calls = native_responses_nested_plan_payload.get("tool_calls", []) if isinstance(native_responses_nested_plan_payload.get("tool_calls"), list) else []
+        native_responses_nested_metadata = native_responses_nested_plan_payload.get("metadata", {}) if isinstance(native_responses_nested_plan_payload.get("metadata"), dict) else {}
+        native_responses_nested_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_nested_calls]
+        native_responses_nested_ledger = native_responses_nested_apply_payload.get("execution_ledger", []) if isinstance(native_responses_nested_apply_payload.get("execution_ledger"), list) else []
+        native_responses_nested_outputs = native_responses_nested_plan + native_responses_nested_apply + native_responses_nested_recall + json.dumps(native_responses_nested_plan_payload) + json.dumps(native_responses_nested_apply_payload)
+        checks["native_provider_responses_output_nested_function_call_ok"] = (
+            native_responses_nested_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_nested_calls] == ["remember", "list_tasks"]
+            and "native provider responses output nested function" in native_responses_nested_calls[0].get("reason", "")
+            and "native provider responses output nested functionCall" in native_responses_nested_calls[1].get("reason", "")
+            and native_responses_nested_metadata.get("native_tool_calls") is True
+            and native_responses_nested_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_responses_nested_call_metadata] == ["responses_nested_function_memory", "responses_nested_function_call_tasks"]
+            and [item.get("native_tool_call_source") for item in native_responses_nested_call_metadata] == ["native provider responses output nested function", "native provider responses output nested functionCall"]
+            and [item.get("provider_tool_call_id") for item in native_responses_nested_ledger] == ["responses_nested_function_memory", "responses_nested_function_call_tasks"]
+            and [item.get("native_tool_call_source") for item in native_responses_nested_ledger] == ["native provider responses output nested function", "native provider responses output nested functionCall"]
+            and [item.get("result", {}).get("status") for item in native_responses_nested_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
+            and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "nested Responses output function native tool call translated" in native_responses_nested_recall
+            and "tool_result" in json.dumps(native_responses_nested_plan_payload.get("warnings", [])).lower()
+            and native_responses_nested_captured.get("tool_choice") == "auto"
+            and native_responses_nested_captured.get("tool_count", 0) > 0
+            and native_responses_nested_result_marker not in native_responses_nested_outputs
+            and "native-responses-nested-secret" not in native_responses_nested_outputs + json.dumps(native_responses_nested_call_metadata) + json.dumps(native_responses_nested_ledger)
+        )
+
         native_single_responses_captured = {}
 
         class NativeOpenAISingleResponsesOutputSmokeResponse:
@@ -4783,6 +4881,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_argument_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
+            "native_provider_responses_output_nested_function_call_ok",
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
