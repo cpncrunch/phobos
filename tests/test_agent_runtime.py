@@ -18,7 +18,7 @@ from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfi
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 
 
 class FakePlannerAdapter(BaseModelAdapter):
@@ -3045,6 +3045,119 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertFalse(dry_run_marker.exists())
                 self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("responses-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
+    def test_gemini_adapter_native_tool_plan_uses_generate_content_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Gemini Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-gemini-should-not-execute.txt"
+            result_marker = "GEMINI_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeGeminiHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {"text": "native Gemini plan token=gemini-endpoint-secret"},
+                                        {
+                                            "functionCall": {
+                                                "name": "remember",
+                                                "args": {"key": "native-gemini", "value": "Gemini GenerateContent native functionCall translated"},
+                                            },
+                                        },
+                                        {
+                                            "functionCall": {
+                                                "name": "run_command",
+                                                "args": {
+                                                    "target": "app.example.test",
+                                                    "purpose": "Gemini GenerateContent dry-run validation",
+                                                    "command": f"printf native-gemini > {dry_run_marker}",
+                                                    "execute": True,
+                                                },
+                                            },
+                                        },
+                                        {"functionResponse": {"name": "run_command", "response": {"content": result_marker + " token=gemini-endpoint-secret"}}},
+                                    ]
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append({
+                    "url": request.full_url,
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "headers": dict(request.header_items()),
+                })
+                return FakeGeminiHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-gemini-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=GeminiAdapter(model="fake-gemini-model", base_url="http://127.0.0.1:9/v1beta"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Gemini endpoint token=gemini-endpoint-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    self.assertTrue(plan_payload["tool_calls"][1]["validation"].get("schema_validated"))
+                    metadata = plan_payload.get("metadata", {})
+                    self.assertEqual(metadata.get("provider"), "gemini")
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Gemini endpoint token=gemini-endpoint-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-gemini')
+                self.assertIn("Gemini GenerateContent native functionCall translated", recall)
+                self.assertTrue(captured_requests)
+                first = captured_requests[0]
+                self.assertTrue(first["url"].endswith("/models/fake-gemini-model:generateContent"), first["url"])
+                self.assertNotIn("key=", first["url"])
+                self.assertIn("contents", first["payload"])
+                self.assertIn("systemInstruction", first["payload"])
+                self.assertNotIn("messages", first["payload"])
+                self.assertNotIn("input", first["payload"])
+                declarations = first["payload"].get("tools", [{}])[0].get("functionDeclarations", [])
+                declaration_names = [item.get("name") for item in declarations if isinstance(item, dict)]
+                self.assertIn("remember", declaration_names)
+                self.assertNotIn("approve", declaration_names)
+                self.assertNotIn("deny", declaration_names)
+                self.assertEqual(first["payload"].get("toolConfig", {}).get("functionCallingConfig", {}).get("mode"), "AUTO")
+                self.assertNotIn("Authorization", first["headers"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider candidate functionCall", "native provider candidate functionCall"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("gemini_generate_content_planning"), status)
+                self.assertIn("gemini_generate_content", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("gemini-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
             finally:
                 runtime.close()
 

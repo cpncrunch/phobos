@@ -35,6 +35,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "wrapped_json_plan_extraction": True,
     "provider_native_tool_call_translation": True,
     "responses_api_endpoint_planning": True,
+    "gemini_generate_content_planning": True,
     "single_top_level_tool_call_translation": True,
     "singular_tool_call_alias_translation": True,
     "camel_case_tool_call_alias_translation": True,
@@ -1437,6 +1438,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
                 "openai_responses_api",
+                "gemini_generate_content",
                 "single_top_level_tool_call",
                 "singular_tool_call_alias",
                 "camel_case_tool_call_alias",

@@ -23,7 +23,7 @@ if str(SRC) not in sys.path:
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
 import offsec_agent_harness.agent_tools as agent_tools_module
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
 
@@ -5056,6 +5056,116 @@ def main(argv: list[str] | None = None) -> int:
             and "native-responses-endpoint-secret" not in native_responses_endpoint_outputs
         )
 
+        native_gemini_marker = root / "native-gemini-should-not-run.txt"
+        native_gemini_result_marker = "NATIVE_GEMINI_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
+        native_gemini_captured = []
+
+        class NativeGeminiEndpointSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "native Gemini smoke token=native-gemini-secret"},
+                                    {"functionCall": {"name": "remember", "args": {"key": "native-gemini-smoke", "value": "Gemini GenerateContent native tool call translated"}}},
+                                    {
+                                        "functionCall": {
+                                            "name": "run_command",
+                                            "args": {
+                                                "target": "app.example.test",
+                                                "purpose": "Gemini GenerateContent dry-run smoke",
+                                                "command": f"printf native-gemini > {native_gemini_marker}",
+                                                "execute": True,
+                                            },
+                                        }
+                                    },
+                                    {"functionResponse": {"name": "run_command", "response": {"content": native_gemini_result_marker + " token=native-gemini-secret"}}},
+                                ]
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_gemini_urlopen(request, timeout=0):
+            native_gemini_captured.append({
+                "url": request.full_url,
+                "payload": json.loads(request.data.decode("utf-8")),
+                "headers": dict(request.header_items()),
+            })
+            return NativeGeminiEndpointSmokeResponse()
+
+        native_gemini_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-gemini-endpoint.db"),
+                session_name="native-gemini-endpoint-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=GeminiAdapter(model="fake-gemini-smoke-model", base_url="http://127.0.0.1:9/v1beta"),
+        )
+        native_gemini_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_gemini_urlopen
+            native_gemini_plan = native_gemini_runtime.handle_message('/auto model=true prompt="native Gemini smoke token=native-gemini-secret"')
+            native_gemini_plan_payload = json.loads(native_gemini_plan.split("\n", 1)[1])
+            native_gemini_apply = native_gemini_runtime.handle_message('/auto apply=true model=true prompt="native Gemini smoke token=native-gemini-secret"')
+            native_gemini_apply_payload = json.loads(native_gemini_apply.split("\n", 1)[1])
+            native_gemini_recall = native_gemini_runtime.handle_message('/recall query=native-gemini-smoke')
+            write("native-gemini-endpoint-tool-calls.json", json.dumps({
+                "plan": native_gemini_plan_payload,
+                "apply": native_gemini_apply_payload,
+                "captured": native_gemini_captured,
+                "recall": native_gemini_recall,
+                "marker_exists": native_gemini_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_gemini_original_urlopen
+            native_gemini_runtime.close()
+        native_gemini_calls = native_gemini_plan_payload.get("tool_calls", []) if isinstance(native_gemini_plan_payload.get("tool_calls"), list) else []
+        native_gemini_metadata = native_gemini_plan_payload.get("metadata", {}) if isinstance(native_gemini_plan_payload.get("metadata"), dict) else {}
+        native_gemini_ledger = native_gemini_apply_payload.get("execution_ledger", []) if isinstance(native_gemini_apply_payload.get("execution_ledger"), list) else []
+        native_gemini_first = native_gemini_captured[0] if native_gemini_captured else {"url": "", "payload": {}, "headers": {}}
+        native_gemini_payload = native_gemini_first.get("payload", {}) if isinstance(native_gemini_first.get("payload"), dict) else {}
+        native_gemini_declarations = native_gemini_payload.get("tools", [{}])[0].get("functionDeclarations", []) if isinstance(native_gemini_payload.get("tools"), list) and native_gemini_payload.get("tools") else []
+        native_gemini_declaration_names = [item.get("name") for item in native_gemini_declarations if isinstance(item, dict)]
+        native_gemini_outputs = native_gemini_plan + native_gemini_apply + native_gemini_recall + json.dumps(native_gemini_plan_payload) + json.dumps(native_gemini_apply_payload)
+        checks["native_gemini_adapter_ok"] = (
+            native_gemini_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_gemini_calls] == ["remember", "run_command"]
+            and native_gemini_calls[1].get("args", {}).get("execute") is False
+            and native_gemini_metadata.get("provider") == "gemini"
+            and native_gemini_metadata.get("native_tool_calls") is True
+            and native_gemini_metadata.get("native_tool_call_count") == 2
+            and native_gemini_first.get("url", "").endswith("/models/fake-gemini-smoke-model:generateContent")
+            and "key=" not in native_gemini_first.get("url", "")
+            and "contents" in native_gemini_payload
+            and "systemInstruction" in native_gemini_payload
+            and "messages" not in native_gemini_payload
+            and "input" not in native_gemini_payload
+            and native_gemini_payload.get("toolConfig", {}).get("functionCallingConfig", {}).get("mode") == "AUTO"
+            and "remember" in native_gemini_declaration_names
+            and "approve" not in native_gemini_declaration_names
+            and "deny" not in native_gemini_declaration_names
+            and "Authorization" not in native_gemini_first.get("headers", {})
+            and [item.get("native_tool_call_source") for item in native_gemini_ledger] == ["native provider candidate functionCall", "native provider candidate functionCall"]
+            and [item.get("result", {}).get("status") for item in native_gemini_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_gemini_ledger[1].get("execution_state") == "dry_run_not_executed"
+            and native_gemini_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("gemini_generate_content_planning") is True
+            and "gemini_generate_content" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Gemini GenerateContent native tool call translated" in native_gemini_recall
+            and not native_gemini_marker.exists()
+            and native_gemini_result_marker not in native_gemini_outputs
+            and "native-gemini-secret" not in native_gemini_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -7370,6 +7480,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_openai_responses_adapter_ok",
+            "native_gemini_adapter_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",

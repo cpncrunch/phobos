@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="Agent runtime JSON config with provider fallback, workspace, and plugin settings")
     parser.add_argument("--workspace-dir", help="Engagement workspace directory for local file tools")
     parser.add_argument("--plugin-dir", action="append", default=[], help="Directory of Python plugins exposing register(registry)")
-    parser.add_argument("--provider", default="heuristic", choices=["heuristic", "openai", "openai-compatible", "openai-responses", "responses", "local", "ollama", "hermes", "hermes-cli"])
+    parser.add_argument("--provider", default="heuristic", choices=["heuristic", "openai", "openai-compatible", "openai-responses", "responses", "gemini", "google", "google-gemini", "local", "ollama", "hermes", "hermes-cli"])
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--base-url")
     parser.add_argument("--key-env", default="OPENAI_API_KEY")

@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .models import redact_secrets
@@ -281,6 +282,101 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
             raise RuntimeError(f"Responses endpoint HTTP {exc.code}: {body[:500]}") from exc
 
 
+class GeminiAdapter(BaseModelAdapter):
+    """Google Gemini GenerateContent adapter for native Phobos tool planning.
+
+    Gemini returns function proposals as ``candidates[].content.parts[].functionCall``.
+    This adapter only translates those provider-native calls into the common
+    Phobos JSON plan boundary; schema validation, runtime policy, ROE preview,
+    approvals, explicit execute intent, and transcript redaction still happen in
+    the runtime before any tool can dispatch.
+    """
+
+    provider = "gemini"
+
+    def __init__(self, model: str, base_url: str = "https://generativelanguage.googleapis.com/v1beta", key_env: str = "GEMINI_API_KEY", timeout: int = 60):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.key_env = key_env
+        self.timeout = timeout
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        role = role if role in ROLE_SYSTEM_PROMPTS else "impact"
+        payload = {
+            "systemInstruction": {"parts": [{"text": ROLE_SYSTEM_PROMPTS[role]}]},
+            "contents": [{"role": "user", "parts": [{"text": (context + "\n\n" if context else "") + prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+        raw = self._gemini_completion(payload)
+        message = _first_choice_message(raw)
+        content = _message_content_text(message.get("content", "")).strip()
+        return ModelResponse(provider=self.provider, role=role, content=content, raw={"model": self.model, "base_url": self.base_url, "api": "generateContent"})
+
+    def generate_tool_plan(
+        self,
+        prompt: str,
+        tool_specs: list[dict[str, Any]],
+        *,
+        allow_command_execution: bool = False,
+        context: str = "",
+    ) -> ModelResponse:
+        declarations = [_gemini_function_declaration_from_spec(spec) for spec in tool_specs[:80]]
+        declarations = [declaration for declaration in declarations if declaration is not None]
+        user_content = (
+            (context + "\n\n" if context else "")
+            + "Plan Phobos Agent tool calls for the authorized operator request. "
+            "Use Gemini function calls when a tool is needed. Do not claim a tool ran. "
+            "If no tool is needed, respond with a concise summary and no tool calls. "
+            "Target-affecting tools still go through ROE guardrails after planning. "
+            "If command execution is not explicitly allowed, request execute=false.\n\n"
+            f"Command execution allowed: {allow_command_execution}\n"
+            f"Operator request: {prompt}"
+        )
+        if not declarations:
+            user_content += "\n\n" + _tool_plan_prompt(prompt, tool_specs, allow_command_execution=allow_command_execution)
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": ROLE_SYSTEM_PROMPTS["impact"]}]},
+            "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+        if declarations:
+            payload["tools"] = [{"functionDeclarations": declarations}]
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+        raw = self._gemini_completion(payload)
+        message = _first_choice_message(raw)
+        plan_content, meta = _native_tool_calls_to_plan_content(message)
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=plan_content,
+            raw={
+                "model": self.model,
+                "base_url": self.base_url,
+                "api": "generateContent",
+                "native_tool_calls": meta["native_tool_calls"],
+                "native_tool_call_count": meta["native_tool_call_count"],
+                "rejected_native_tool_call_count": meta["rejected_native_tool_call_count"],
+            },
+        )
+
+    def _gemini_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        api_key = os.environ.get(self.key_env, "")
+        if not api_key and not _is_local_base_url(self.base_url):
+            raise RuntimeError(f"Missing API key environment variable {self.key_env}")
+        model_id = self.model[7:] if self.model.startswith("models/") else self.model
+        url = f"{self.base_url}/models/{urllib.parse.quote(model_id, safe='')}:generateContent"
+        if api_key:
+            url += "?" + urllib.parse.urlencode({"key": api_key})
+        headers = {"Content-Type": "application/json"}
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Gemini endpoint HTTP {exc.code}: {body[:500]}") from exc
+
+
 class HermesCLIAdapter(BaseModelAdapter):
     provider = "hermes-cli"
 
@@ -400,6 +496,9 @@ def build_adapter(provider: str, model: str = "gpt-4o-mini", base_url: str | Non
         return OpenAICompatibleAdapter(model=model, base_url=base_url or "https://api.openai.com/v1", key_env=key_env)
     if provider in {"openai-responses", "responses"}:
         return OpenAIResponsesAdapter(model=model, base_url=base_url or "https://api.openai.com/v1", key_env=key_env)
+    if provider in {"gemini", "google", "google-gemini"}:
+        gemini_key_env = key_env if key_env != "OPENAI_API_KEY" else "GEMINI_API_KEY"
+        return GeminiAdapter(model=model, base_url=base_url or "https://generativelanguage.googleapis.com/v1beta", key_env=gemini_key_env)
     if provider in {"local", "ollama"}:
         return OpenAICompatibleAdapter(model=model, base_url=base_url or "http://127.0.0.1:11434/v1", key_env=key_env)
     if provider in {"hermes", "hermes-cli"}:
@@ -2030,6 +2129,25 @@ def _responses_tool_from_spec(spec: dict[str, Any]) -> dict[str, Any] | None:
         "type": "function",
         "name": name,
         "description": str(raw_function.get("description") or name),
+        "parameters": parameters,
+    }
+
+
+def _gemini_function_declaration_from_spec(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a Gemini functionDeclaration from a registry spec."""
+
+    base = _responses_tool_from_spec(spec)
+    if not isinstance(base, dict):
+        return None
+    name = str(base.get("name") or "").strip()
+    if not name:
+        return None
+    parameters = base.get("parameters")
+    if not isinstance(parameters, dict):
+        parameters = {"type": "object", "properties": {}}
+    return {
+        "name": name,
+        "description": _truncate(str(base.get("description") or name), 1024),
         "parameters": parameters,
     }
 

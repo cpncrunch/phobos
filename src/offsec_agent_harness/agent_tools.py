@@ -1460,7 +1460,7 @@ class OffSecToolRegistry:
         return ToolResult("ok", f"Delegation {delegation_id} returned.", {"delegation": _redacted_mapping(delegation)})
 
     def auth_status(self, args: dict[str, Any]) -> ToolResult:
-        env_names = {"model_key_env": "OPENAI_API_KEY"}
+        env_names = {"model_key_env": "OPENAI_API_KEY", "gemini_key_env": "GEMINI_API_KEY"}
         providers = []
         adapter_provider = getattr(self.model_adapter, "provider", "unknown")
         providers.append({"provider": adapter_provider, "configured": True})
