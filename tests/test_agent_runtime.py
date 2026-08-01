@@ -3622,6 +3622,128 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_camel_case_tool_call_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native CamelCase Tool Call Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeCamelCaseToolCallHTTPResponse:
+                def __init__(self, *, singular: bool = False):
+                    self.singular = singular
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    if self.singular:
+                        message = {
+                            "content": "singular camelCase native toolCall token=camel-secret",
+                            "toolCall": {
+                                "toolUseId": "camel_singular_memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-camel-singular", "value": "singular camelCase toolCall accepted"}),
+                                },
+                            },
+                        }
+                    else:
+                        message = {
+                            "content": "camelCase native toolCalls token=camel-secret",
+                            "toolCalls": [
+                                {
+                                    "toolCallId": "camel_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-camel-case", "value": "camelCase toolCalls accepted"}),
+                                    },
+                                },
+                                {
+                                    "callId": "camel_tasks",
+                                    "type": "function",
+                                    "name": "list_tasks",
+                                    "argumentsJson": {"status": "all", "limit": "1"},
+                                },
+                            ],
+                        }
+                    return json.dumps({"choices": [{"message": message}]}).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                request_payload = json.loads(request.data.decode("utf-8"))
+                captured_payloads.append(request_payload)
+                user_content = "\n".join(
+                    str(item.get("content") or "")
+                    for item in request_payload.get("messages", [])
+                    if isinstance(item, dict)
+                )
+                return FakeCamelCaseToolCallHTTPResponse(singular="singular camelCase" in user_content)
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-camel-case-tool-call-aliases",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-camel-case-tool-call", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native camelCase toolCalls token=camel-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertTrue(all("native provider camelCase toolCall" in call.get("reason", "") for call in payload["tool_calls"]))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["camel_memory", "camel_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider camelCase toolCall", "native provider camelCase toolCall"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn("camel-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native camelCase toolCalls token=camel-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["camel_memory", "camel_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider camelCase toolCall", "native provider camelCase toolCall"])
+
+                    singular_plan = runtime.handle_message('/auto model=true prompt="native singular camelCase toolCall token=camel-secret"')
+                    singular_payload = json.loads(singular_plan.split("\n", 1)[1])
+                    self.assertEqual([call["tool"] for call in singular_payload["tool_calls"]], ["remember"])
+                    singular_metadata = singular_payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(singular_metadata.get("provider_tool_call_id"), "camel_singular_memory")
+                    self.assertEqual(singular_metadata.get("native_tool_call_source"), "native provider camelCase toolCall")
+
+                    singular_apply = runtime.handle_message('/auto apply=true model=true prompt="native singular camelCase toolCall token=camel-secret"')
+                    singular_apply_payload = json.loads(singular_apply.split("\n", 1)[1])
+                    singular_ledger = singular_apply_payload.get("execution_ledger", [])
+                    self.assertEqual(singular_ledger[0].get("provider_tool_call_id"), "camel_singular_memory")
+                recall = runtime.handle_message('/recall query=native-camel')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("camelCase toolCalls accepted", recall)
+                self.assertIn("singular camelCase toolCall accepted", recall)
+                self.assertIn("camel_case_tool_call_alias", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("camel_case_tool_call_alias_translation"))
+                self.assertIn("callId", status.get("provider_tool_call_id_aliases", []))
+                self.assertIn("toolCallId", status.get("provider_tool_call_id_aliases", []))
+                self.assertIn("toolUseId", status.get("provider_tool_call_id_aliases", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("camel-secret", applied + singular_plan + singular_apply + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_responses_output_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

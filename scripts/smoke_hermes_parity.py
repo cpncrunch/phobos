@@ -1985,6 +1985,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("transcript_provider_call_provenance") is True
             and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("singular_tool_call_alias_translation") is True
+            and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
@@ -2019,6 +2020,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("provider_tool_result_echo_ignored") is True
             and "single_top_level_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "singular_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2030,6 +2032,9 @@ def main(argv: list[str] | None = None) -> int:
             and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "toolCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "toolUseId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
             and "inputJson" in native_status_data.get("provider_argument_aliases", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
@@ -2471,6 +2476,123 @@ def main(argv: list[str] | None = None) -> int:
             and native_singular_captured.get("tool_choice") == "auto"
             and native_singular_captured.get("tool_count", 0) > 0
             and "native-singular-secret" not in native_singular_plan + native_singular_apply + native_singular_recall + json.dumps(native_singular_plan_payload) + json.dumps(native_singular_apply_payload)
+        )
+
+        native_camel_captured: dict[str, object] = {}
+
+        class NativeOpenAICamelCaseToolCallSmokeResponse:
+            def __init__(self, *, singular: bool = False):
+                self.singular = singular
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                if self.singular:
+                    message = {
+                        "content": "native camelCase singular toolCall smoke token=native-camel-secret",
+                        "toolCall": {
+                            "toolUseId": "camel_singular_memory",
+                            "type": "function",
+                            "function": {
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-camel-singular-smoke", "value": "singular camelCase native toolCall translated"}),
+                            },
+                        },
+                    }
+                else:
+                    message = {
+                        "content": "native camelCase toolCalls smoke token=native-camel-secret",
+                        "toolCalls": [
+                            {
+                                "toolCallId": "camel_memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-camel-case-smoke", "value": "camelCase native toolCalls translated"}),
+                                },
+                            },
+                            {
+                                "callId": "camel_tasks",
+                                "type": "function",
+                                "name": "list_tasks",
+                                "argumentsJson": {"status": "all", "limit": "1"},
+                            },
+                        ],
+                    }
+                return json.dumps({"choices": [{"message": message}]}).encode("utf-8")
+
+        def fake_native_camel_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_camel_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_camel_captured["tool_choice"] = payload.get("tool_choice")
+            user_text = "\n".join(str(item.get("content") or "") for item in payload.get("messages", []) if isinstance(item, dict))
+            return NativeOpenAICamelCaseToolCallSmokeResponse(singular="singular camelCase" in user_text)
+
+        native_camel_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-camel-case-tool-call.db"),
+                session_name="native-provider-camel-case-tool-call-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-camel-case-tool-call-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_camel_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_camel_urlopen
+            native_camel_plan = native_camel_runtime.handle_message('/auto model=true prompt="native camelCase toolCalls smoke token=native-camel-secret"')
+            native_camel_plan_payload = json.loads(native_camel_plan.split("\n", 1)[1])
+            native_camel_apply = native_camel_runtime.handle_message('/auto apply=true model=true prompt="native camelCase toolCalls smoke token=native-camel-secret"')
+            native_camel_apply_payload = json.loads(native_camel_apply.split("\n", 1)[1])
+            native_camel_singular_plan = native_camel_runtime.handle_message('/auto model=true prompt="native singular camelCase toolCall smoke token=native-camel-secret"')
+            native_camel_singular_payload = json.loads(native_camel_singular_plan.split("\n", 1)[1])
+            native_camel_singular_apply = native_camel_runtime.handle_message('/auto apply=true model=true prompt="native singular camelCase toolCall smoke token=native-camel-secret"')
+            native_camel_singular_apply_payload = json.loads(native_camel_singular_apply.split("\n", 1)[1])
+            native_camel_recall = native_camel_runtime.handle_message('/recall query=native-camel')
+            write("native-provider-camel-case-tool-call-alias.json", json.dumps({
+                "plan": native_camel_plan_payload,
+                "apply": native_camel_apply_payload,
+                "singular_plan": native_camel_singular_payload,
+                "singular_apply": native_camel_singular_apply_payload,
+                "captured": native_camel_captured,
+                "recall": native_camel_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_camel_original_urlopen
+            native_camel_runtime.close()
+        native_camel_calls = native_camel_plan_payload.get("tool_calls", []) if isinstance(native_camel_plan_payload.get("tool_calls"), list) else []
+        native_camel_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_camel_calls]
+        native_camel_ledger = native_camel_apply_payload.get("execution_ledger", []) if isinstance(native_camel_apply_payload.get("execution_ledger"), list) else []
+        native_camel_singular_calls = native_camel_singular_payload.get("tool_calls", []) if isinstance(native_camel_singular_payload.get("tool_calls"), list) else []
+        native_camel_singular_metadata = native_camel_singular_calls[0].get("metadata", {}) if native_camel_singular_calls and isinstance(native_camel_singular_calls[0], dict) else {}
+        native_camel_singular_ledger = native_camel_singular_apply_payload.get("execution_ledger", []) if isinstance(native_camel_singular_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_camel_case_tool_call_alias_ok"] = (
+            native_camel_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_camel_calls] == ["remember", "list_tasks"]
+            and all("native provider camelCase toolCall" in call.get("reason", "") for call in native_camel_calls)
+            and [item.get("provider_tool_call_id") for item in native_camel_call_metadata] == ["camel_memory", "camel_tasks"]
+            and [item.get("native_tool_call_source") for item in native_camel_call_metadata] == ["native provider camelCase toolCall", "native provider camelCase toolCall"]
+            and [item.get("result", {}).get("status") for item in native_camel_apply_payload.get("results", [])] == ["ok", "ok"]
+            and [item.get("provider_tool_call_id") for item in native_camel_ledger] == ["camel_memory", "camel_tasks"]
+            and native_camel_singular_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_camel_singular_calls] == ["remember"]
+            and native_camel_singular_metadata.get("provider_tool_call_id") == "camel_singular_memory"
+            and native_camel_singular_metadata.get("native_tool_call_source") == "native provider camelCase toolCall"
+            and native_camel_singular_ledger[0].get("provider_tool_call_id") == "camel_singular_memory"
+            and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
+            and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "toolCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "toolUseId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "camelCase native toolCalls translated" in native_camel_recall
+            and "singular camelCase native toolCall translated" in native_camel_recall
+            and native_camel_captured.get("tool_choice") == "auto"
+            and int(native_camel_captured.get("tool_count", 0) or 0) > 0
+            and "native-camel-secret" not in native_camel_plan + native_camel_apply + native_camel_singular_plan + native_camel_singular_apply + native_camel_recall + json.dumps(native_camel_plan_payload) + json.dumps(native_camel_apply_payload) + json.dumps(native_camel_singular_payload) + json.dumps(native_camel_singular_apply_payload)
         )
 
         native_root_function_captured = {}
@@ -4350,6 +4472,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_flat_tool_call_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
+            "native_provider_camel_case_tool_call_alias_ok",
             "native_provider_root_function_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_tool_call_transcript_provenance_ok",

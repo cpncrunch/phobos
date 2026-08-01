@@ -590,12 +590,20 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
             message["content"] = content
     if "tool_calls" in raw:
         message["tool_calls"] = raw.get("tool_calls")
+    if "toolCalls" in raw and "tool_calls" not in message:
+        # Some JS/Gemini/OpenAI-compatible shims camel-case provider-native
+        # tool-call arrays. Normalize the alias here so the runtime still owns
+        # schema validation, runtime policy, ROE preview, and guarded dispatch.
+        message["toolCalls"] = raw.get("toolCalls")
     if "tool_call" in raw:
         # Some OpenAI-compatible shims collapse a one-call response into a
         # singular ``tool_call`` field rather than the standard ``tool_calls``
         # array.  Preserve that as planner input only; the runtime still handles
         # schema, runtime-policy, ROE, and approval gating before dispatch.
         message["tool_call"] = raw.get("tool_call")
+    if "toolCall" in raw and "tool_call" not in message:
+        # Camel-case singular alias seen in a few lightweight provider bridges.
+        message["toolCall"] = raw.get("toolCall")
     root_function_call = raw.get("functionCall") or raw.get("function_call_root")
     if isinstance(root_function_call, dict):
         _append_message_tool_call(
@@ -655,19 +663,30 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
     rejected: list[dict[str, Any]] = []
     warnings: list[str] = []
     raw_calls = message.get("tool_calls")
+    raw_calls_shape = ""
+    if raw_calls is None and "toolCalls" in message:
+        raw_calls = message.get("toolCalls")
+        raw_calls_shape = "camelCase.toolCalls"
     if raw_calls is None and "tool_call" in message:
         raw_calls = message.get("tool_call")
         if isinstance(raw_calls, dict):
             raw_calls = dict(raw_calls, _provider_shape="singular.tool_call")
+    if raw_calls is None and "toolCall" in message:
+        raw_calls = message.get("toolCall")
+        if isinstance(raw_calls, dict):
+            raw_calls = dict(raw_calls, _provider_shape="singular.toolCall")
     raw_call_items: list[Any] = []
     if isinstance(raw_calls, list):
-        raw_call_items = list(raw_calls)
+        raw_call_items = [
+            dict(item, _provider_shape=raw_calls_shape) if raw_calls_shape and isinstance(item, dict) and "_provider_shape" not in item else item
+            for item in raw_calls
+        ]
     elif isinstance(raw_calls, dict):
         # A few OpenAI-compatible shims collapse a one-call top-level
         # ``tool_calls`` array into a single object.  Normalize it at the
         # adapter boundary so the runtime can still apply the exact same
         # schema/ROE/runtime-policy validation before any dispatch.
-        provider_shape = str(raw_calls.get("_provider_shape") or "single_top_level.tool_calls")
+        provider_shape = str(raw_calls.get("_provider_shape") or raw_calls_shape or "single_top_level.tool_calls")
         raw_call_items = [dict(raw_calls, _provider_shape=provider_shape)]
     message_function_call = message.get("functionCall")
     if isinstance(message_function_call, dict):
@@ -820,6 +839,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider single top-level tool_call"
         elif provider_shape == "singular.tool_call":
             label = "native provider singular tool_call"
+        elif provider_shape in {"camelCase.toolCalls", "singular.toolCall"}:
+            label = "native provider camelCase toolCall"
         else:
             label = None
         return _parse_native_function_call(
@@ -849,6 +870,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider single top-level tool_call"
         elif provider_shape == "singular.tool_call":
             label = "native provider singular tool_call"
+        elif provider_shape in {"camelCase.toolCalls", "singular.toolCall"}:
+            label = "native provider camelCase toolCall"
         else:
             label = "native provider flat tool_call"
         return _parse_native_function_call(
@@ -874,7 +897,7 @@ def _native_call_id(*items: Any) -> str:
     for item in items:
         if not isinstance(item, dict):
             continue
-        for key in ("id", "call_id", "tool_call_id", "tool_use_id"):
+        for key in ("id", "call_id", "tool_call_id", "tool_use_id", "callId", "toolCallId", "toolUseId"):
             value = item.get(key)
             if value not in (None, ""):
                 return str(value)
