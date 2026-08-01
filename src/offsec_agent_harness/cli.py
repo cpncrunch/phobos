@@ -87,8 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     cve.add_argument("--online", action="store_true", help="Also query NVD keywordSearch; network/API failures become notes")
     cve.add_argument("--out", help="Markdown output path; default: engagement evidence/cve/<component>.md")
 
-    model = sub.add_parser("model-draft", help="Use a heuristic/OpenAI-compatible/Responses/Gemini/local/Hermes adapter for role-specific drafting")
-    model.add_argument("--provider", default="heuristic", choices=["heuristic", "openai", "openai-compatible", "openai-responses", "responses", "gemini", "google", "google-gemini", "local", "ollama", "hermes", "hermes-cli"])
+    model = sub.add_parser("model-draft", help="Use a heuristic/OpenAI-compatible/Responses/Gemini/Anthropic/local/Hermes adapter for role-specific drafting")
+    model.add_argument("--provider", default="heuristic", choices=["heuristic", "openai", "openai-compatible", "openai-responses", "responses", "gemini", "google", "google-gemini", "anthropic", "claude", "local", "ollama", "hermes", "hermes-cli"])
     model.add_argument("--role", default="impact", choices=["scope", "safety", "evidence", "impact", "cve", "report"])
     model.add_argument("--prompt", required=True)
     model.add_argument("--context-file")

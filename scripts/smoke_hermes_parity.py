@@ -23,7 +23,7 @@ if str(SRC) not in sys.path:
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
 import offsec_agent_harness.agent_tools as agent_tools_module
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
+from offsec_agent_harness.model_adapters import AnthropicMessagesAdapter, BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
 
@@ -5166,6 +5166,119 @@ def main(argv: list[str] | None = None) -> int:
             and "native-gemini-secret" not in native_gemini_outputs
         )
 
+        native_anthropic_marker = root / "native-anthropic-should-not-run.txt"
+        native_anthropic_result_marker = "NATIVE_ANTHROPIC_TOOL_RESULT_SHOULD_NOT_SURFACE"
+        native_anthropic_captured = []
+
+        class NativeAnthropicEndpointSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "type": "message",
+                    "content": [
+                        {"type": "text", "text": "native Anthropic smoke token=native-anthropic-secret"},
+                        {"type": "tool_use", "id": "anthropic_memory", "name": "remember", "input": {"key": "native-anthropic-smoke", "value": "Anthropic Messages native tool call translated"}},
+                        {
+                            "type": "tool_use",
+                            "id": "anthropic_dry",
+                            "name": "run_command",
+                            "input": {
+                                "target": "app.example.test",
+                                "purpose": "Anthropic Messages dry-run smoke",
+                                "command": f"printf native-anthropic > {native_anthropic_marker}",
+                                "execute": True,
+                            },
+                        },
+                        {"type": "tool_result", "tool_use_id": "anthropic_result", "content": native_anthropic_result_marker + " token=native-anthropic-secret"},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_anthropic_urlopen(request, timeout=0):
+            native_anthropic_captured.append({
+                "url": request.full_url,
+                "payload": json.loads(request.data.decode("utf-8")),
+                "headers": dict(request.header_items()),
+            })
+            return NativeAnthropicEndpointSmokeResponse()
+
+        native_anthropic_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-anthropic-endpoint.db"),
+                session_name="native-anthropic-endpoint-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=AnthropicMessagesAdapter(
+                model="fake-anthropic-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_SMOKE_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_anthropic_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_anthropic_urlopen
+            native_anthropic_plan = native_anthropic_runtime.handle_message('/auto model=true prompt="native Anthropic smoke token=native-anthropic-secret"')
+            native_anthropic_plan_payload = json.loads(native_anthropic_plan.split("\n", 1)[1])
+            native_anthropic_apply = native_anthropic_runtime.handle_message('/auto apply=true model=true prompt="native Anthropic smoke token=native-anthropic-secret"')
+            native_anthropic_apply_payload = json.loads(native_anthropic_apply.split("\n", 1)[1])
+            native_anthropic_recall = native_anthropic_runtime.handle_message('/recall query=native-anthropic-smoke')
+            write("native-anthropic-endpoint-tool-calls.json", json.dumps({
+                "plan": native_anthropic_plan_payload,
+                "apply": native_anthropic_apply_payload,
+                "captured": native_anthropic_captured,
+                "recall": native_anthropic_recall,
+                "marker_exists": native_anthropic_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_anthropic_original_urlopen
+            native_anthropic_runtime.close()
+        native_anthropic_calls = native_anthropic_plan_payload.get("tool_calls", []) if isinstance(native_anthropic_plan_payload.get("tool_calls"), list) else []
+        native_anthropic_metadata = native_anthropic_plan_payload.get("metadata", {}) if isinstance(native_anthropic_plan_payload.get("metadata"), dict) else {}
+        native_anthropic_ledger = native_anthropic_apply_payload.get("execution_ledger", []) if isinstance(native_anthropic_apply_payload.get("execution_ledger"), list) else []
+        native_anthropic_first = native_anthropic_captured[0] if native_anthropic_captured else {"url": "", "payload": {}, "headers": {}}
+        native_anthropic_payload = native_anthropic_first.get("payload", {}) if isinstance(native_anthropic_first.get("payload"), dict) else {}
+        native_anthropic_headers = {str(key).lower(): value for key, value in native_anthropic_first.get("headers", {}).items()} if isinstance(native_anthropic_first.get("headers"), dict) else {}
+        native_anthropic_tools = native_anthropic_payload.get("tools", []) if isinstance(native_anthropic_payload.get("tools"), list) else []
+        native_anthropic_tool_names = [item.get("name") for item in native_anthropic_tools if isinstance(item, dict)]
+        native_anthropic_outputs = native_anthropic_plan + native_anthropic_apply + native_anthropic_recall + json.dumps(native_anthropic_plan_payload) + json.dumps(native_anthropic_apply_payload)
+        checks["native_anthropic_adapter_ok"] = (
+            native_anthropic_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_anthropic_calls] == ["remember", "run_command"]
+            and native_anthropic_calls[1].get("args", {}).get("execute") is False
+            and native_anthropic_metadata.get("provider") == "anthropic"
+            and native_anthropic_metadata.get("native_tool_calls") is True
+            and native_anthropic_metadata.get("native_tool_call_count") == 2
+            and native_anthropic_first.get("url", "").endswith("/messages")
+            and "messages" in native_anthropic_payload
+            and "system" in native_anthropic_payload
+            and "input" not in native_anthropic_payload
+            and native_anthropic_payload.get("tool_choice") == {"type": "auto"}
+            and "anthropic-version" in native_anthropic_headers
+            and "x-api-key" not in native_anthropic_headers
+            and "remember" in native_anthropic_tool_names
+            and "approve" not in native_anthropic_tool_names
+            and "deny" not in native_anthropic_tool_names
+            and all("input_schema" in item for item in native_anthropic_tools if isinstance(item, dict))
+            and all("parameters" not in item for item in native_anthropic_tools if isinstance(item, dict))
+            and [item.get("native_tool_call_source") for item in native_anthropic_ledger] == ["native provider anthropic messages content tool_use", "native provider anthropic messages content tool_use"]
+            and [item.get("provider_tool_call_id") for item in native_anthropic_ledger] == ["anthropic_memory", "anthropic_dry"]
+            and [item.get("result", {}).get("status") for item in native_anthropic_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_anthropic_ledger[1].get("execution_state") == "dry_run_not_executed"
+            and native_anthropic_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("anthropic_messages_api_planning") is True
+            and "anthropic_messages_api" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "anthropic_messages_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Anthropic Messages native tool call translated" in native_anthropic_recall
+            and not native_anthropic_marker.exists()
+            and native_anthropic_result_marker not in native_anthropic_outputs
+            and "native-anthropic-secret" not in native_anthropic_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -7481,6 +7594,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_openai_tool_call_adapter_ok",
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",
+            "native_anthropic_adapter_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",

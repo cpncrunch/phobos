@@ -377,6 +377,103 @@ class GeminiAdapter(BaseModelAdapter):
             raise RuntimeError(f"Gemini endpoint HTTP {exc.code}: {body[:500]}") from exc
 
 
+class AnthropicMessagesAdapter(BaseModelAdapter):
+    """Anthropic Messages API adapter for native Phobos tool planning.
+
+    Anthropic returns native tool proposals as ``content`` blocks with
+    ``type=tool_use`` and ``input`` JSON.  This adapter only translates those
+    blocks into Phobos' common JSON plan contract; the runtime remains the
+    authoritative boundary for schema validation, runtime policy, ROE preview,
+    approvals, explicit execute intent, transcripts, and dispatch.
+    """
+
+    provider = "anthropic"
+
+    def __init__(self, model: str, base_url: str = "https://api.anthropic.com/v1", key_env: str = "ANTHROPIC_API_KEY", timeout: int = 60):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.key_env = key_env
+        self.timeout = timeout
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        role = role if role in ROLE_SYSTEM_PROMPTS else "impact"
+        payload = {
+            "model": self.model,
+            "system": ROLE_SYSTEM_PROMPTS[role],
+            "messages": [{"role": "user", "content": (context + "\n\n" if context else "") + prompt}],
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        }
+        raw = self._messages_completion(payload)
+        message = _anthropic_message_with_provider_shape(_first_choice_message(raw))
+        content = _message_content_text(message.get("content", "")).strip()
+        return ModelResponse(provider=self.provider, role=role, content=content, raw={"model": self.model, "base_url": self.base_url, "api": "messages"})
+
+    def generate_tool_plan(
+        self,
+        prompt: str,
+        tool_specs: list[dict[str, Any]],
+        *,
+        allow_command_execution: bool = False,
+        context: str = "",
+    ) -> ModelResponse:
+        tools = [_anthropic_tool_from_spec(spec) for spec in tool_specs[:80]]
+        tools = [tool for tool in tools if tool is not None]
+        user_content = (
+            (context + "\n\n" if context else "")
+            + "Plan Phobos Agent tool calls for the authorized operator request. "
+            "Use Anthropic Messages tool_use blocks when a tool is needed. Do not claim a tool ran. "
+            "If no tool is needed, respond with a concise summary and no tool calls. "
+            "Target-affecting tools still go through ROE guardrails after planning. "
+            "If command execution is not explicitly allowed, request execute=false.\n\n"
+            f"Command execution allowed: {allow_command_execution}\n"
+            f"Operator request: {prompt}"
+        )
+        if not tools:
+            user_content += "\n\n" + _tool_plan_prompt(prompt, tool_specs, allow_command_execution=allow_command_execution)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "system": ROLE_SYSTEM_PROMPTS["impact"],
+            "messages": [{"role": "user", "content": user_content}],
+            "temperature": 0.2,
+            "max_tokens": 2048,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = {"type": "auto"}
+        raw = self._messages_completion(payload)
+        message = _anthropic_message_with_provider_shape(_first_choice_message(raw))
+        plan_content, meta = _native_tool_calls_to_plan_content(message)
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=plan_content,
+            raw={
+                "model": self.model,
+                "base_url": self.base_url,
+                "api": "messages",
+                "native_tool_calls": meta["native_tool_calls"],
+                "native_tool_call_count": meta["native_tool_call_count"],
+                "rejected_native_tool_call_count": meta["rejected_native_tool_call_count"],
+            },
+        )
+
+    def _messages_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        api_key = os.environ.get(self.key_env, "")
+        if not api_key and not _is_local_base_url(self.base_url):
+            raise RuntimeError(f"Missing API key environment variable {self.key_env}")
+        headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+        req = urllib.request.Request(self.base_url + "/messages", data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Anthropic Messages endpoint HTTP {exc.code}: {body[:500]}") from exc
+
+
 class HermesCLIAdapter(BaseModelAdapter):
     provider = "hermes-cli"
 
@@ -499,6 +596,9 @@ def build_adapter(provider: str, model: str = "gpt-4o-mini", base_url: str | Non
     if provider in {"gemini", "google", "google-gemini"}:
         gemini_key_env = key_env if key_env != "OPENAI_API_KEY" else "GEMINI_API_KEY"
         return GeminiAdapter(model=model, base_url=base_url or "https://generativelanguage.googleapis.com/v1beta", key_env=gemini_key_env)
+    if provider in {"anthropic", "claude"}:
+        anthropic_key_env = key_env if key_env != "OPENAI_API_KEY" else "ANTHROPIC_API_KEY"
+        return AnthropicMessagesAdapter(model=model, base_url=base_url or "https://api.anthropic.com/v1", key_env=anthropic_key_env)
     if provider in {"local", "ollama"}:
         return OpenAICompatibleAdapter(model=model, base_url=base_url or "http://127.0.0.1:11434/v1", key_env=key_env)
     if provider in {"hermes", "hermes-cli"}:
@@ -1113,6 +1213,40 @@ def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any,
             blocks.append({"type": "text", "text": block})
 
 
+def _anthropic_message_with_provider_shape(message: dict[str, Any]) -> dict[str, Any]:
+    """Mark Anthropic Messages content blocks with provider provenance.
+
+    Anthropic's native ``tool_use`` calls live inside top-level ``content``
+    blocks.  Preserve a bounded provider-shape label for transcripts/ledgers
+    while keeping provider text/result blocks out of summaries and dispatch.
+    """
+
+    if not isinstance(message, dict):
+        return {}
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+    shaped: list[Any] = []
+    for item in content:
+        if isinstance(item, dict):
+            block_type = str(item.get("type") or "").strip()
+            has_native_alias = any(
+                isinstance(item.get(key), dict)
+                for key in ("functionCall", "function_call", "toolUse", "tool_use", "functionResponse", "function_response")
+            )
+            if (
+                block_type in _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES
+                or block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES
+                or block_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES
+                or has_native_alias
+            ):
+                item = dict(item, _provider_shape=str(item.get("_provider_shape") or "anthropic.messages.content"))
+        shaped.append(item)
+    out = dict(message)
+    out["content"] = shaped
+    return out
+
+
 def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> dict[str, Any]:
     out = dict(block)
     block_type = str(out.get("type") or "").strip()
@@ -1605,6 +1739,8 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root message content parts {native_kind}"
     if provider_shape == "content.parts":
         return f"native provider content parts {native_kind}"
+    if provider_shape == "anthropic.messages.content":
+        return f"native provider anthropic messages content {native_kind}"
     if provider_shape.startswith("choice."):
         return f"native provider {provider_shape.replace('.', ' ')} {native_kind}"
     return f"native content-block {native_kind}"
@@ -1691,6 +1827,8 @@ def _parse_native_content_function_call_block(
         label = "native provider root message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
+    elif provider_shape == "anthropic.messages.content":
+        label = "native provider anthropic messages content functionCall"
     elif provider_shape.startswith("choice."):
         label = f"native provider {provider_shape.replace('.', ' ')} functionCall"
     else:
@@ -2149,6 +2287,26 @@ def _gemini_function_declaration_from_spec(spec: dict[str, Any]) -> dict[str, An
         "name": name,
         "description": _truncate(str(base.get("description") or name), 1024),
         "parameters": parameters,
+    }
+
+
+def _anthropic_tool_from_spec(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an Anthropic Messages tool spec from a registry schema."""
+
+    base = _responses_tool_from_spec(spec)
+    if not isinstance(base, dict):
+        return None
+    name = str(base.get("name") or "").strip()
+    if not name:
+        return None
+    input_schema = base.get("parameters")
+    if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+        input_schema = {"type": "object", "properties": {}}
+    input_schema.setdefault("properties", {})
+    return {
+        "name": name,
+        "description": _truncate(str(base.get("description") or name), 1024),
+        "input_schema": input_schema,
     }
 
 

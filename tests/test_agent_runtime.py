@@ -18,7 +18,7 @@ from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfi
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
+from offsec_agent_harness.model_adapters import AnthropicMessagesAdapter, BaseModelAdapter, FallbackModelAdapter, GeminiAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 
 
 class FakePlannerAdapter(BaseModelAdapter):
@@ -3158,6 +3158,121 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertFalse(dry_run_marker.exists())
                 self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("gemini-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
+    def test_anthropic_messages_adapter_native_tool_plan_uses_messages_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Anthropic Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-anthropic-should-not-execute.txt"
+            result_marker = "ANTHROPIC_TOOL_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeAnthropicHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "type": "message",
+                        "content": [
+                            {"type": "text", "text": "native Anthropic plan token=anthropic-endpoint-secret"},
+                            {
+                                "type": "tool_use",
+                                "id": "anthropic_memory",
+                                "name": "remember",
+                                "input": {"key": "native-anthropic", "value": "Anthropic Messages native tool_use translated"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "anthropic_dry",
+                                "name": "run_command",
+                                "input": {
+                                    "target": "app.example.test",
+                                    "purpose": "Anthropic Messages dry-run validation",
+                                    "command": f"printf native-anthropic > {dry_run_marker}",
+                                    "execute": True,
+                                },
+                            },
+                            {"type": "tool_result", "tool_use_id": "anthropic_result", "content": result_marker + " token=anthropic-endpoint-secret"},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append({
+                    "url": request.full_url,
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "headers": dict(request.header_items()),
+                })
+                return FakeAnthropicHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-anthropic-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=AnthropicMessagesAdapter(
+                    model="fake-anthropic-model",
+                    base_url="http://127.0.0.1:9/v1",
+                    key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+                ),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Anthropic endpoint token=anthropic-endpoint-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    metadata = plan_payload.get("metadata", {})
+                    self.assertEqual(metadata.get("provider"), "anthropic")
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Anthropic endpoint token=anthropic-endpoint-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-anthropic')
+                self.assertIn("Anthropic Messages native tool_use translated", recall)
+                self.assertTrue(captured_requests)
+                first = captured_requests[0]
+                first_headers = {str(key).lower(): value for key, value in first["headers"].items()}
+                self.assertTrue(first["url"].endswith("/messages"), first["url"])
+                self.assertIn("messages", first["payload"])
+                self.assertIn("system", first["payload"])
+                self.assertNotIn("input", first["payload"])
+                self.assertEqual(first["payload"].get("tool_choice"), {"type": "auto"})
+                self.assertIn("anthropic-version", first_headers)
+                self.assertNotIn("x-api-key", first_headers)
+                tools = first["payload"].get("tools", [])
+                tool_names = [item.get("name") for item in tools if isinstance(item, dict)]
+                self.assertIn("remember", tool_names)
+                self.assertNotIn("approve", tool_names)
+                self.assertNotIn("deny", tool_names)
+                self.assertTrue(all("input_schema" in item for item in tools if isinstance(item, dict)))
+                self.assertTrue(all("parameters" not in item for item in tools if isinstance(item, dict)))
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["anthropic_memory", "anthropic_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider anthropic messages content tool_use", "native provider anthropic messages content tool_use"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("anthropic_messages_api_planning"), status)
+                self.assertIn("anthropic_messages_api", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("anthropic_messages_tool_use", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("anthropic-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
             finally:
                 runtime.close()
 
