@@ -181,6 +181,106 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             raise RuntimeError(f"Model endpoint HTTP {exc.code}: {body[:500]}") from exc
 
 
+class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
+    """OpenAI Responses API adapter for direct native tool-call planning.
+
+    ``OpenAICompatibleAdapter`` targets Chat Completions compatible shims.  Some
+    operators point Phobos at a real Responses endpoint instead, where function
+    specs are flattened and tool proposals return under ``output[]``.  Keep this
+    as an adapter-level translation boundary only: the runtime still validates
+    names/schemas, runtime policy, ROE previews, approvals, and explicit execute
+    intent before any registry handler can run.
+    """
+
+    provider = "openai-responses"
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        role = role if role in ROLE_SYSTEM_PROMPTS else "impact"
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": ROLE_SYSTEM_PROMPTS[role]},
+                {"role": "user", "content": (context + "\n\n" if context else "") + prompt},
+            ],
+            "temperature": 0.2,
+        }
+        raw = self._responses_completion(payload)
+        message = _first_choice_message(raw)
+        if not message and isinstance(raw.get("output_text"), str):
+            message = {"content": raw.get("output_text")}
+        content = _message_content_text(message.get("content", "")).strip()
+        if not content and isinstance(raw.get("output_text"), str):
+            content = raw.get("output_text", "")
+        return ModelResponse(provider=self.provider, role=role, content=content, raw={"model": self.model, "base_url": self.base_url, "api": "responses"})
+
+    def generate_tool_plan(
+        self,
+        prompt: str,
+        tool_specs: list[dict[str, Any]],
+        *,
+        allow_command_execution: bool = False,
+        context: str = "",
+    ) -> ModelResponse:
+        tools = [_responses_tool_from_spec(spec) for spec in tool_specs[:80]]
+        tools = [tool for tool in tools if tool is not None]
+        user_content = (
+            (context + "\n\n" if context else "")
+            + "Plan Phobos Agent tool calls for the authorized operator request. "
+            "Use Responses API function calls when a tool is needed. Do not claim a tool ran. "
+            "If no tool is needed, respond with a concise summary and no tool calls. "
+            "Target-affecting tools still go through ROE guardrails after planning. "
+            "If command execution is not explicitly allowed, request execute=false.\n\n"
+            f"Command execution allowed: {allow_command_execution}\n"
+            f"Operator request: {prompt}"
+        )
+        if not tools:
+            user_content += "\n\n" + _tool_plan_prompt(prompt, tool_specs, allow_command_execution=allow_command_execution)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": ROLE_SYSTEM_PROMPTS["impact"]},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        raw = self._responses_completion(payload)
+        message = _first_choice_message(raw)
+        if not message and isinstance(raw.get("output_text"), str):
+            message = {"content": raw.get("output_text")}
+        plan_content, meta = _native_tool_calls_to_plan_content(message)
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=plan_content,
+            raw={
+                "model": self.model,
+                "base_url": self.base_url,
+                "api": "responses",
+                "native_tool_calls": meta["native_tool_calls"],
+                "native_tool_call_count": meta["native_tool_call_count"],
+                "rejected_native_tool_call_count": meta["rejected_native_tool_call_count"],
+            },
+        )
+
+    def _responses_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        api_key = os.environ.get(self.key_env, "")
+        if not api_key and not _is_local_base_url(self.base_url):
+            raise RuntimeError(f"Missing API key environment variable {self.key_env}")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(self.base_url + "/responses", data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Responses endpoint HTTP {exc.code}: {body[:500]}") from exc
+
+
 class HermesCLIAdapter(BaseModelAdapter):
     provider = "hermes-cli"
 
@@ -298,6 +398,8 @@ def build_adapter(provider: str, model: str = "gpt-4o-mini", base_url: str | Non
         return HeuristicAdapter()
     if provider in {"openai", "openai-compatible"}:
         return OpenAICompatibleAdapter(model=model, base_url=base_url or "https://api.openai.com/v1", key_env=key_env)
+    if provider in {"openai-responses", "responses"}:
+        return OpenAIResponsesAdapter(model=model, base_url=base_url or "https://api.openai.com/v1", key_env=key_env)
     if provider in {"local", "ollama"}:
         return OpenAICompatibleAdapter(model=model, base_url=base_url or "http://127.0.0.1:11434/v1", key_env=key_env)
     if provider in {"hermes", "hermes-cli"}:
@@ -1906,6 +2008,29 @@ def _openai_tool_from_spec(spec: dict[str, Any]) -> dict[str, Any] | None:
             "description": _truncate(description, 1024),
             "parameters": parameters,
         },
+    }
+
+
+def _responses_tool_from_spec(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a Responses API function-tool schema from a registry spec."""
+
+    base = _openai_tool_from_spec(spec)
+    if not isinstance(base, dict):
+        return None
+    raw_function = base.get("function")
+    if not isinstance(raw_function, dict):
+        return None
+    name = str(raw_function.get("name") or "").strip()
+    if not name:
+        return None
+    parameters = raw_function.get("parameters")
+    if not isinstance(parameters, dict):
+        parameters = {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "name": name,
+        "description": str(raw_function.get("description") or name),
+        "parameters": parameters,
     }
 
 

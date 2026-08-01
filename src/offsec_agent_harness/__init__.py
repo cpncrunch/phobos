@@ -6,7 +6,7 @@ from .harness import OffSecHarness
 from .bloodhound import analyze_bloodhound
 from .burp_mcp import BurpMCPClient, HTTPRequestArtifact
 from .cve_advisor import CveAdvisor
-from .model_adapters import FallbackModelAdapter, build_adapter, build_fallback_adapter
+from .model_adapters import FallbackModelAdapter, OpenAIResponsesAdapter, build_adapter, build_fallback_adapter
 from .reporting import FindingInput, FindingMarkdownExporter
 from .agent_runtime import AgentRuntimeConfig, OffSecAgentRuntime
 from .agent_store import AgentStore
@@ -32,6 +32,7 @@ __all__ = [
     "build_adapter",
     "build_fallback_adapter",
     "FallbackModelAdapter",
+    "OpenAIResponsesAdapter",
     "FindingInput",
     "FindingMarkdownExporter",
     "AgentRuntimeConfig",

@@ -23,7 +23,7 @@ if str(SRC) not in sys.path:
 from phobos_agent import AgentAppConfig, AgentGateway, AgentRuntimeConfig, BridgeConfig, BridgeMessage, EngagementROE, PhobosAgentRuntime, handle_bridge_message
 from offsec_agent_harness.agent_tools import ToolResult
 import offsec_agent_harness.agent_tools as agent_tools_module
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 import offsec_agent_harness.model_adapters as model_adapters
 from offsec_agent_harness.models import redact_secrets
 
@@ -1978,6 +1978,7 @@ def main(argv: list[str] | None = None) -> int:
             and all(native_status_milestone_contract.values())
             and native_status_milestone_contract.get("schema_validation_before_dispatch") is True
             and native_status_milestone_contract.get("wrapped_json_plan_extraction") is True
+            and native_status_milestone_contract.get("responses_api_endpoint_planning") is True
             and native_status_milestone_contract.get("guardrail_preview_before_target_activity") is True
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
@@ -2108,6 +2109,7 @@ def main(argv: list[str] | None = None) -> int:
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "toolCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -4861,6 +4863,112 @@ def main(argv: list[str] | None = None) -> int:
             and "native-single-result-secret" not in native_single_content_plan + native_single_content_apply + native_single_content_result_plan + native_single_content_recall + json.dumps(native_single_content_plan_payload) + json.dumps(native_single_content_apply_payload) + json.dumps(native_single_content_result_payload)
         )
 
+        native_responses_endpoint_marker = root / "native-responses-endpoint-should-not-run.txt"
+        native_responses_endpoint_captured: list[dict] = []
+        native_responses_endpoint_result_marker = "NATIVE_RESPONSES_ENDPOINT_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesEndpointSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native Responses endpoint smoke token=native-responses-endpoint-secret",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "responses_endpoint_memory",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-responses-endpoint-smoke", "value": "Responses endpoint native tool call translated"}),
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "responses_endpoint_dry",
+                            "name": "run_command",
+                            "arguments": json.dumps({
+                                "target": "app.example.test",
+                                "purpose": "native Responses endpoint dry-run smoke",
+                                "command": f"printf native-responses-endpoint > {native_responses_endpoint_marker}",
+                                "execute": True,
+                            }),
+                        },
+                        {"type": "function_call_output", "call_id": "responses_endpoint_result", "output": native_responses_endpoint_result_marker + " token=native-responses-endpoint-secret"},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_endpoint_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_endpoint_captured.append({
+                "url": request.full_url,
+                "payload": payload,
+                "headers": dict(request.header_items()),
+            })
+            return NativeOpenAIResponsesEndpointSmokeResponse()
+
+        native_responses_endpoint_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-openai-responses-endpoint.db"),
+                session_name="native-openai-responses-endpoint-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAIResponsesAdapter(model="fake-native-responses-endpoint-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_endpoint_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_endpoint_urlopen
+            native_responses_endpoint_plan = native_responses_endpoint_runtime.handle_message('/auto model=true prompt="native Responses endpoint smoke token=native-responses-endpoint-secret"')
+            native_responses_endpoint_plan_payload = json.loads(native_responses_endpoint_plan.split("\n", 1)[1])
+            native_responses_endpoint_apply = native_responses_endpoint_runtime.handle_message('/auto apply=true model=true prompt="native Responses endpoint smoke token=native-responses-endpoint-secret"')
+            native_responses_endpoint_apply_payload = json.loads(native_responses_endpoint_apply.split("\n", 1)[1])
+            native_responses_endpoint_recall = native_responses_endpoint_runtime.handle_message('/recall query=native-responses-endpoint-smoke')
+            write("native-openai-responses-endpoint-tool-calls.json", json.dumps({
+                "plan": native_responses_endpoint_plan_payload,
+                "apply": native_responses_endpoint_apply_payload,
+                "captured": native_responses_endpoint_captured,
+                "recall": native_responses_endpoint_recall,
+                "marker_exists": native_responses_endpoint_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_endpoint_original_urlopen
+            native_responses_endpoint_runtime.close()
+        native_responses_endpoint_calls = native_responses_endpoint_plan_payload.get("tool_calls", []) if isinstance(native_responses_endpoint_plan_payload.get("tool_calls"), list) else []
+        native_responses_endpoint_metadata = native_responses_endpoint_plan_payload.get("metadata", {}) if isinstance(native_responses_endpoint_plan_payload.get("metadata"), dict) else {}
+        native_responses_endpoint_ledger = native_responses_endpoint_apply_payload.get("execution_ledger", []) if isinstance(native_responses_endpoint_apply_payload.get("execution_ledger"), list) else []
+        native_responses_endpoint_first = native_responses_endpoint_captured[0] if native_responses_endpoint_captured else {"url": "", "payload": {}, "headers": {}}
+        native_responses_endpoint_payload = native_responses_endpoint_first.get("payload", {}) if isinstance(native_responses_endpoint_first.get("payload"), dict) else {}
+        native_responses_endpoint_outputs = native_responses_endpoint_plan + native_responses_endpoint_apply + native_responses_endpoint_recall + json.dumps(native_responses_endpoint_plan_payload) + json.dumps(native_responses_endpoint_apply_payload)
+        checks["native_openai_responses_adapter_ok"] = (
+            native_responses_endpoint_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_endpoint_calls] == ["remember", "run_command"]
+            and native_responses_endpoint_calls[1].get("args", {}).get("execute") is False
+            and native_responses_endpoint_metadata.get("provider") == "openai-responses"
+            and native_responses_endpoint_metadata.get("native_tool_calls") is True
+            and native_responses_endpoint_metadata.get("native_tool_call_count") == 2
+            and native_responses_endpoint_first.get("url", "").endswith("/responses")
+            and "/chat/completions" not in native_responses_endpoint_first.get("url", "")
+            and "input" in native_responses_endpoint_payload
+            and "messages" not in native_responses_endpoint_payload
+            and native_responses_endpoint_payload.get("tool_choice") == "auto"
+            and all("function" not in item for item in native_responses_endpoint_payload.get("tools", []) if isinstance(item, dict))
+            and "remember" in [item.get("name") for item in native_responses_endpoint_payload.get("tools", []) if isinstance(item, dict)]
+            and "approve" not in [item.get("name") for item in native_responses_endpoint_payload.get("tools", []) if isinstance(item, dict)]
+            and "deny" not in [item.get("name") for item in native_responses_endpoint_payload.get("tools", []) if isinstance(item, dict)]
+            and [item.get("provider_tool_call_id") for item in native_responses_endpoint_ledger] == ["responses_endpoint_memory", "responses_endpoint_dry"]
+            and native_responses_endpoint_ledger[1].get("execution_state") == "dry_run_not_executed"
+            and native_responses_endpoint_ledger[1].get("actual_command_or_process_activity") is False
+            and [item.get("result", {}).get("status") for item in native_responses_endpoint_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("responses_api_endpoint_planning") is True
+            and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses endpoint native tool call translated" in native_responses_endpoint_recall
+            and not native_responses_endpoint_marker.exists()
+            and native_responses_endpoint_result_marker not in native_responses_endpoint_outputs
+            and "native-responses-endpoint-secret" not in native_responses_endpoint_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -7173,6 +7281,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_slash_flag_safety_ok",
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
+            "native_openai_responses_adapter_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",

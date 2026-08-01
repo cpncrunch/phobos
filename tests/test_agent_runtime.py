@@ -18,7 +18,7 @@ from offsec_agent_harness import AgentAppConfig, AgentGateway, AgentRuntimeConfi
 from offsec_agent_harness.agent_bridges import DiscordGatewayBridge
 from offsec_agent_harness.agent_crypto import seal_bytes, unseal_bytes
 from offsec_agent_harness.agent_tools import ToolResult
-from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter
+from offsec_agent_harness.model_adapters import BaseModelAdapter, FallbackModelAdapter, ModelResponse, OpenAICompatibleAdapter, OpenAIResponsesAdapter
 
 
 class FakePlannerAdapter(BaseModelAdapter):
@@ -2861,6 +2861,111 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn("approve", tool_names)
                 self.assertNotIn("deny", tool_names)
                 self.assertFalse(dry_run_marker.exists())
+            finally:
+                runtime.close()
+
+    def test_openai_responses_adapter_native_tool_plan_uses_responses_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Responses Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-openai-responses-should-not-execute.txt"
+            result_marker = "RESPONSES_ENDPOINT_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "native Responses endpoint plan token=responses-endpoint-secret",
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "responses_endpoint_memory",
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-openai-responses", "value": "Responses endpoint native tool call translated"}),
+                            },
+                            {
+                                "type": "function_call",
+                                "call_id": "responses_endpoint_dry",
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "Responses endpoint dry-run validation",
+                                    "command": f"printf native-openai-responses > {dry_run_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                            {"type": "function_call_output", "call_id": "responses_endpoint_result", "output": result_marker + " token=responses-endpoint-secret"},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append({
+                    "url": request.full_url,
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "headers": dict(request.header_items()),
+                })
+                return FakeResponsesHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-responses-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAIResponsesAdapter(model="fake-native-responses-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Responses endpoint token=responses-endpoint-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    metadata = plan_payload.get("metadata", {})
+                    self.assertEqual(metadata.get("provider"), "openai-responses")
+                    self.assertTrue(metadata.get("native_tool_calls"), metadata)
+                    self.assertEqual(metadata.get("native_tool_call_count"), 2)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Responses endpoint token=responses-endpoint-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-openai-responses')
+                self.assertIn("Responses endpoint native tool call translated", recall)
+                self.assertTrue(captured_requests)
+                first = captured_requests[0]
+                self.assertTrue(first["url"].endswith("/responses"), first["url"])
+                self.assertNotIn("/chat/completions", first["url"])
+                self.assertIn("input", first["payload"])
+                self.assertNotIn("messages", first["payload"])
+                self.assertEqual(first["payload"].get("tool_choice"), "auto")
+                self.assertNotIn("Authorization", first["headers"])
+                tool_names = [item.get("name") for item in first["payload"].get("tools", [])]
+                self.assertIn("remember", tool_names)
+                self.assertNotIn("approve", tool_names)
+                self.assertNotIn("deny", tool_names)
+                self.assertTrue(all("function" not in item for item in first["payload"].get("tools", [])))
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["responses_endpoint_memory", "responses_endpoint_dry"])
+                self.assertEqual(apply_ledger[1].get("native_tool_call_source"), "native provider responses output function_call")
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_api_endpoint_planning"), status)
+                self.assertIn("openai_responses_api", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("responses-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
             finally:
                 runtime.close()
 
