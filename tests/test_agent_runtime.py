@@ -4442,6 +4442,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("flat_tool_calls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
+                self.assertIn("custom_tool_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("run_command", native_status.get("execution_capable_tools", []))

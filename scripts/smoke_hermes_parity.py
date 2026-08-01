@@ -3405,6 +3405,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
+            "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",
             "native_tool_call_guardrail_approval_ok",
             "native_tool_call_loop_approval_stop_ok",
