@@ -4434,6 +4434,191 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_output_nested_message_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Output Nested Message Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "RESPONSES_OUTPUT_MESSAGE_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesOutputNestedMessageHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "responses output nested message token=responses-output-message-secret",
+                        "output": [
+                            {
+                                "type": "message",
+                                "message": {
+                                    "content": {
+                                        "parts": [
+                                            {"text": "responses output nested message text token=responses-output-message-secret"},
+                                            {
+                                                "functionCall": {
+                                                    "callId": "resp_output_message_parts_memory",
+                                                    "name": "remember",
+                                                    "args": {"key": "native-responses-output-message-parts", "value": "Responses output nested message content parts accepted"},
+                                                }
+                                            },
+                                            {
+                                                "functionResponse": {
+                                                    "name": "remember",
+                                                    "response": {"content": provider_result_marker + " token=responses-output-message-secret"},
+                                                }
+                                            },
+                                        ]
+                                    },
+                                    "tool_calls": [
+                                        {
+                                            "id": "resp_output_message_tool_calls_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-responses-output-message-tool-calls", "value": "Responses output nested message tool_calls accepted"}),
+                                            },
+                                        }
+                                    ],
+                                    "toolCalls": {
+                                        "toolUseId": "resp_output_message_toolcalls_tasks",
+                                        "function": {
+                                            "name": "list_tasks",
+                                            "argumentsJson": {"status": "all", "limit": 1},
+                                        },
+                                    },
+                                    "tool_call": {
+                                        "tool_call_id": "resp_output_message_tool_call_memory",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-responses-output-message-tool-call", "value": "Responses output nested message tool_call accepted"}),
+                                        },
+                                    },
+                                    "toolCall": {
+                                        "toolCallId": "resp_output_message_tool_camel_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-responses-output-message-tool-camel", "value": "Responses output nested message toolCall accepted"},
+                                    },
+                                    "functionCall": {
+                                        "callId": "resp_output_message_function_alias_memory",
+                                        "name": "remember",
+                                        "parameters": {"key": "native-responses-output-message-functioncall", "value": "Responses output nested message functionCall accepted"},
+                                    },
+                                    "functionCalls": [
+                                        {
+                                            "callId": "resp_output_message_function_calls_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-responses-output-message-functioncalls", "value": "Responses output nested message functionCalls accepted"},
+                                        }
+                                    ],
+                                    "function_calls": {
+                                        "call_id": "resp_output_message_function_calls_snake_memory",
+                                        "function_call": {
+                                            "name": "remember",
+                                            "args": {"key": "native-responses-output-message-function-calls-snake", "value": "Responses output nested message function_calls accepted"},
+                                        },
+                                    },
+                                },
+                            }
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesOutputNestedMessageHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-output-nested-message",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses-output-nested-message", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses output nested message token=responses-output-message-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember", "remember", "remember", "remember", "remember", "remember"])
+                    self.assertIn("native provider responses output message tool_calls", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses output message toolCalls", payload["tool_calls"][1]["reason"])
+                    self.assertIn("native provider responses output message tool_call", payload["tool_calls"][2]["reason"])
+                    self.assertIn("native provider responses output message toolCall", payload["tool_calls"][3]["reason"])
+                    self.assertIn("native provider responses output message functionCall", payload["tool_calls"][4]["reason"])
+                    self.assertIn("native provider responses output message functionCalls", payload["tool_calls"][5]["reason"])
+                    self.assertIn("native provider responses output message function_calls", payload["tool_calls"][6]["reason"])
+                    self.assertIn("native provider responses output message content parts functionCall", payload["tool_calls"][7]["reason"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual(
+                        [item.get("provider_tool_call_id") for item in call_metadata],
+                        [
+                            "resp_output_message_tool_calls_memory",
+                            "resp_output_message_toolcalls_tasks",
+                            "resp_output_message_tool_call_memory",
+                            "resp_output_message_tool_camel_memory",
+                            "resp_output_message_function_alias_memory",
+                            "resp_output_message_function_calls_memory",
+                            "resp_output_message_function_calls_snake_memory",
+                            "resp_output_message_parts_memory",
+                        ],
+                    )
+                    self.assertEqual(
+                        [item.get("native_tool_call_source") for item in call_metadata],
+                        [
+                            "native provider responses output message tool_calls",
+                            "native provider responses output message toolCalls",
+                            "native provider responses output message tool_call",
+                            "native provider responses output message toolCall",
+                            "native provider responses output message functionCall",
+                            "native provider responses output message functionCalls",
+                            "native provider responses output message function_calls",
+                            "native provider responses output message content parts functionCall",
+                        ],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 8)
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertNotIn("responses-output-message-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses output nested message token=responses-output-message-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], [item.get("provider_tool_call_id") for item in call_metadata])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], [item.get("native_tool_call_source") for item in call_metadata])
+                recall = runtime.handle_message('/recall query=native-responses-output-message')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses output nested message tool_calls accepted", recall)
+                self.assertIn("Responses output nested message toolCall accepted", recall)
+                self.assertIn("Responses output nested message function_calls accepted", recall)
+                self.assertIn("Responses output nested message content parts accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_output_message_alias_translation"), status)
+                self.assertIn("responses_output_message_tool_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_toolCalls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_tool_call", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_toolCall", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_functionCalls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_function_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_output_message_content_parts_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("responses-output-message-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_responses_message_content_parts_function_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

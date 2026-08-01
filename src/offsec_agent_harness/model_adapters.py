@@ -529,6 +529,23 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
         if block_type == "message":
             _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape="responses.message.content")
             _extend_responses_message_tool_calls(tool_calls, item)
+            nested_message = item.get("message")
+            if isinstance(nested_message, dict):
+                # A few Responses-compatible shims wrap the assistant message
+                # under output[].message rather than putting content/tool-call
+                # aliases directly on the output[] item. Keep this in the same
+                # native planning boundary with distinct provenance labels so
+                # transcripts show exactly which provider shape was accepted.
+                _extend_responses_content_blocks(
+                    content_blocks,
+                    nested_message.get("content"),
+                    provider_shape="responses.output.message.content",
+                )
+                _extend_responses_message_tool_calls(
+                    tool_calls,
+                    nested_message,
+                    provider_shape_prefix="responses.output.message",
+                )
             continue
         if block_type in {"output_text", "text"}:
             text = item.get("text") or item.get("content")
@@ -658,7 +675,7 @@ def _responses_content_block(block: dict[str, Any], *, provider_shape: str) -> d
     return out
 
 
-def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item: dict[str, Any]) -> None:
+def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item: dict[str, Any], *, provider_shape_prefix: str = "responses.message") -> None:
     """Normalize tool calls carried on a Responses ``output[].message`` item.
 
     Some OpenAI-compatible shims preserve Chat-Completions-style ``tool_calls``
@@ -680,10 +697,10 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
             shape = str(raw.get("_provider_shape") or provider_shape)
             tool_calls.append(dict(raw, _provider_shape=shape))
 
-    append_raw(item.get("tool_calls"), provider_shape="responses.message.tool_calls")
-    append_raw(item.get("toolCalls"), provider_shape="responses.message.toolCalls")
-    append_raw(item.get("tool_call"), provider_shape="responses.message.tool_call")
-    append_raw(item.get("toolCall"), provider_shape="responses.message.toolCall")
+    append_raw(item.get("tool_calls"), provider_shape=f"{provider_shape_prefix}.tool_calls")
+    append_raw(item.get("toolCalls"), provider_shape=f"{provider_shape_prefix}.toolCalls")
+    append_raw(item.get("tool_call"), provider_shape=f"{provider_shape_prefix}.tool_call")
+    append_raw(item.get("toolCall"), provider_shape=f"{provider_shape_prefix}.toolCall")
 
     function_call = item.get("functionCall")
     if isinstance(function_call, dict):
@@ -692,7 +709,7 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
             "name": function_call.get("name") or function_call.get("tool"),
             "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
             "call_id": str(_native_call_id(item, function_call)),
-            "_provider_shape": "responses.message.functionCall",
+            "_provider_shape": f"{provider_shape_prefix}.functionCall",
         })
     legacy_function_call = item.get("function_call")
     if isinstance(legacy_function_call, dict):
@@ -700,12 +717,12 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
             "type": "tool_call",
             "function": legacy_function_call,
             "call_id": str(_native_call_id(item, legacy_function_call)),
-            "_provider_shape": "responses.message.function_call",
+            "_provider_shape": f"{provider_shape_prefix}.function_call",
         })
     if isinstance(item.get("functionCalls"), (list, dict)):
-        tool_calls.extend(_native_function_call_batch_items("responses.message.functionCalls", item.get("functionCalls")))
+        tool_calls.extend(_native_function_call_batch_items(f"{provider_shape_prefix}.functionCalls", item.get("functionCalls")))
     if isinstance(item.get("function_calls"), (list, dict)):
-        tool_calls.extend(_native_function_call_batch_items("responses.message.function_calls", item.get("function_calls")))
+        tool_calls.extend(_native_function_call_batch_items(f"{provider_shape_prefix}.function_calls", item.get("function_calls")))
 
 
 def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1037,6 +1054,10 @@ def _parse_native_content_tool_block(
         label = f"native provider responses message content {block_type}"
     elif provider_shape == "responses.message.content.parts":
         label = f"native provider responses message content parts {block_type}"
+    elif provider_shape == "responses.output.message.content":
+        label = f"native provider responses output message content {block_type}"
+    elif provider_shape == "responses.output.message.content.parts":
+        label = f"native provider responses output message content parts {block_type}"
     elif provider_shape == "content.parts":
         label = f"native provider content parts {block_type}"
     else:
@@ -1079,6 +1100,10 @@ def _parse_native_content_function_call_block(
         label = "native provider responses message content functionCall"
     elif provider_shape == "responses.message.content.parts":
         label = "native provider responses message content parts functionCall"
+    elif provider_shape == "responses.output.message.content":
+        label = "native provider responses output message content functionCall"
+    elif provider_shape == "responses.output.message.content.parts":
+        label = "native provider responses output message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
     else:
@@ -1132,6 +1157,22 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message functionCalls"
         elif provider_shape == "responses.message.function_calls":
             label = "native provider responses message function_calls"
+        elif provider_shape == "responses.output.message.tool_calls":
+            label = "native provider responses output message tool_calls"
+        elif provider_shape == "responses.output.message.tool_call":
+            label = "native provider responses output message tool_call"
+        elif provider_shape == "responses.output.message.toolCalls":
+            label = "native provider responses output message toolCalls"
+        elif provider_shape == "responses.output.message.toolCall":
+            label = "native provider responses output message toolCall"
+        elif provider_shape == "responses.output.message.function_call":
+            label = "native provider responses output message function_call"
+        elif provider_shape == "responses.output.message.functionCall":
+            label = "native provider responses output message functionCall"
+        elif provider_shape == "responses.output.message.functionCalls":
+            label = "native provider responses output message functionCalls"
+        elif provider_shape == "responses.output.message.function_calls":
+            label = "native provider responses output message function_calls"
         elif provider_shape == "root.functionCalls":
             label = "native provider root functionCalls"
         elif provider_shape == "root.function_calls":
@@ -1187,6 +1228,22 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message functionCalls"
         elif item.get("_provider_shape") == "responses.message.function_calls":
             label = "native provider responses message function_calls"
+        elif item.get("_provider_shape") == "responses.output.message.tool_calls":
+            label = "native provider responses output message tool_calls"
+        elif item.get("_provider_shape") == "responses.output.message.tool_call":
+            label = "native provider responses output message tool_call"
+        elif item.get("_provider_shape") == "responses.output.message.toolCalls":
+            label = "native provider responses output message toolCalls"
+        elif item.get("_provider_shape") == "responses.output.message.toolCall":
+            label = "native provider responses output message toolCall"
+        elif item.get("_provider_shape") == "responses.output.message.function_call":
+            label = "native provider responses output message function_call"
+        elif item.get("_provider_shape") == "responses.output.message.functionCall":
+            label = "native provider responses output message functionCall"
+        elif item.get("_provider_shape") == "responses.output.message.functionCalls":
+            label = "native provider responses output message functionCalls"
+        elif item.get("_provider_shape") == "responses.output.message.function_calls":
+            label = "native provider responses output message function_calls"
         elif item.get("_provider_shape") == "root.functionCalls":
             label = "native provider root functionCalls"
         elif item.get("_provider_shape") == "root.function_calls":

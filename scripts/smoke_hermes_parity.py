@@ -1992,6 +1992,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_tool_calls_camel_alias_translation") is True
@@ -2046,6 +2047,14 @@ def main(argv: list[str] | None = None) -> int:
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_toolCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3897,6 +3906,160 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_nested_captured.get("tool_count", 0) > 0
             and native_responses_nested_result_marker not in native_responses_nested_outputs
             and "native-responses-nested-secret" not in native_responses_nested_outputs + json.dumps(native_responses_nested_call_metadata) + json.dumps(native_responses_nested_ledger)
+        )
+
+        native_responses_output_message_captured = {}
+        native_responses_output_message_result_marker = "NATIVE_RESPONSES_OUTPUT_MESSAGE_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesOutputNestedMessageSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native responses output nested message smoke token=native-responses-output-message-secret",
+                    "output": [
+                        {
+                            "type": "message",
+                            "message": {
+                                "content": {
+                                    "parts": [
+                                        {"text": "native responses output nested message text token=native-responses-output-message-secret"},
+                                        {
+                                            "functionCall": {
+                                                "callId": "responses_output_message_parts_memory",
+                                                "name": "remember",
+                                                "args": {"key": "native-responses-output-message-parts-smoke", "value": "Responses output nested message content parts native tool call translated"},
+                                            }
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": native_responses_output_message_result_marker + " token=native-responses-output-message-secret"},
+                                            }
+                                        },
+                                    ]
+                                },
+                                "tool_calls": [
+                                    {
+                                        "id": "responses_output_message_tool_calls_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-responses-output-message-tool-calls-smoke", "value": "Responses output nested message tool_calls native tool call translated"}),
+                                        },
+                                    }
+                                ],
+                                "toolCalls": {
+                                    "toolUseId": "responses_output_message_toolcalls_tasks",
+                                    "function": {"name": "list_tasks", "argumentsJson": {"status": "all", "limit": 1}},
+                                },
+                                "tool_call": {
+                                    "tool_call_id": "responses_output_message_tool_call_memory",
+                                    "function": {"name": "remember", "arguments": json.dumps({"key": "native-responses-output-message-tool-call-smoke", "value": "Responses output nested message tool_call native tool call translated"})},
+                                },
+                                "toolCall": {
+                                    "toolCallId": "responses_output_message_tool_camel_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-responses-output-message-tool-camel-smoke", "value": "Responses output nested message toolCall native tool call translated"},
+                                },
+                                "functionCall": {
+                                    "callId": "responses_output_message_function_memory",
+                                    "name": "remember",
+                                    "parameters": {"key": "native-responses-output-message-functioncall-smoke", "value": "Responses output nested message functionCall native tool call translated"},
+                                },
+                                "functionCalls": [
+                                    {"callId": "responses_output_message_functions_memory", "name": "remember", "args": {"key": "native-responses-output-message-functioncalls-smoke", "value": "Responses output nested message functionCalls native tool call translated"}}
+                                ],
+                                "function_calls": {
+                                    "call_id": "responses_output_message_functions_snake_memory",
+                                    "function_call": {"name": "remember", "args": {"key": "native-responses-output-message-function-calls-smoke", "value": "Responses output nested message function_calls native tool call translated"}},
+                                },
+                            },
+                        }
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_output_message_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_output_message_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_output_message_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesOutputNestedMessageSmokeResponse()
+
+        native_responses_output_message_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-output-nested-message.db"),
+                session_name="native-provider-responses-output-nested-message-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-output-nested-message-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_output_message_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_output_message_urlopen
+            native_responses_output_message_plan = native_responses_output_message_runtime.handle_message('/auto model=true prompt="native responses output nested message smoke token=native-responses-output-message-secret"')
+            native_responses_output_message_plan_payload = json.loads(native_responses_output_message_plan.split("\n", 1)[1])
+            native_responses_output_message_apply = native_responses_output_message_runtime.handle_message('/auto apply=true model=true prompt="native responses output nested message smoke token=native-responses-output-message-secret"')
+            native_responses_output_message_apply_payload = json.loads(native_responses_output_message_apply.split("\n", 1)[1])
+            native_responses_output_message_recall = native_responses_output_message_runtime.handle_message('/recall query=native-responses-output-message')
+            write("native-provider-responses-output-nested-message-aliases.json", json.dumps({
+                "plan": native_responses_output_message_plan_payload,
+                "apply": native_responses_output_message_apply_payload,
+                "captured": native_responses_output_message_captured,
+                "recall": native_responses_output_message_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_output_message_original_urlopen
+            native_responses_output_message_runtime.close()
+        native_responses_output_message_calls = native_responses_output_message_plan_payload.get("tool_calls", []) if isinstance(native_responses_output_message_plan_payload.get("tool_calls"), list) else []
+        native_responses_output_message_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_output_message_calls]
+        native_responses_output_message_ledger = native_responses_output_message_apply_payload.get("execution_ledger", []) if isinstance(native_responses_output_message_apply_payload.get("execution_ledger"), list) else []
+        native_responses_output_message_outputs = native_responses_output_message_plan + native_responses_output_message_apply + native_responses_output_message_recall + json.dumps(native_responses_output_message_plan_payload) + json.dumps(native_responses_output_message_apply_payload)
+        checks["native_provider_responses_output_message_aliases_ok"] = (
+            native_responses_output_message_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_output_message_calls] == ["remember", "list_tasks", "remember", "remember", "remember", "remember", "remember", "remember"]
+            and [item.get("provider_tool_call_id") for item in native_responses_output_message_call_metadata] == [
+                "responses_output_message_tool_calls_memory",
+                "responses_output_message_toolcalls_tasks",
+                "responses_output_message_tool_call_memory",
+                "responses_output_message_tool_camel_memory",
+                "responses_output_message_function_memory",
+                "responses_output_message_functions_memory",
+                "responses_output_message_functions_snake_memory",
+                "responses_output_message_parts_memory",
+            ]
+            and [item.get("native_tool_call_source") for item in native_responses_output_message_call_metadata] == [
+                "native provider responses output message tool_calls",
+                "native provider responses output message toolCalls",
+                "native provider responses output message tool_call",
+                "native provider responses output message toolCall",
+                "native provider responses output message functionCall",
+                "native provider responses output message functionCalls",
+                "native provider responses output message function_calls",
+                "native provider responses output message content parts functionCall",
+            ]
+            and [item.get("provider_tool_call_id") for item in native_responses_output_message_ledger] == [item.get("provider_tool_call_id") for item in native_responses_output_message_call_metadata]
+            and [item.get("result", {}).get("status") for item in native_responses_output_message_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok"]
+            and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
+            and "responses_output_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_toolCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses output nested message tool_calls native tool call translated" in native_responses_output_message_recall
+            and "Responses output nested message content parts native tool call translated" in native_responses_output_message_recall
+            and "functionResponse" in json.dumps(native_responses_output_message_plan_payload.get("warnings", []))
+            and native_responses_output_message_captured.get("tool_choice") == "auto"
+            and native_responses_output_message_captured.get("tool_count", 0) > 0
+            and native_responses_output_message_result_marker not in native_responses_output_message_outputs
+            and "native-responses-output-message-secret" not in native_responses_output_message_outputs + json.dumps(native_responses_output_message_call_metadata) + json.dumps(native_responses_output_message_ledger)
         )
 
         native_responses_message_tool_captured = {}
