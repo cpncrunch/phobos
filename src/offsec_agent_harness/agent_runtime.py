@@ -1342,6 +1342,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
                 "candidate_function_call",
                 "legacy_function_call",
             ],
+            "provider_tool_call_id_aliases": ["id", "call_id", "tool_call_id", "tool_use_id"],
             "provider_tool_result_echo_ignored": True,
             "provider_tool_result_block_types_ignored": [
                 "tool_result",

@@ -418,7 +418,7 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             content_blocks.append({"type": "text", "text": text})
         function_call = part.get("functionCall") or part.get("function_call")
         if isinstance(function_call, dict):
-            call_id = function_call.get("id") or function_call.get("call_id") or function_call.get("tool_call_id") or ""
+            call_id = _native_call_id(function_call)
             tool_calls.append({
                 "type": "tool_call",
                 "name": function_call.get("name") or function_call.get("tool"),
@@ -465,7 +465,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 content_blocks.append({"type": "text", "text": text})
             continue
         if block_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
-            call_id = item.get("call_id") or item.get("id") or item.get("tool_call_id") or ""
+            call_id = _native_call_id(item)
             tool_calls.append({
                 "type": block_type,
                 "name": item.get("name") or item.get("tool"),
@@ -476,7 +476,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
         if block_type in {"function_call", "tool_call", "tool_use"}:
             name = item.get("name") or item.get("tool")
             arguments = _native_argument_value(item, preferred=("arguments", "input", "args", "parameters", "params"))
-            call_id = item.get("call_id") or item.get("id") or item.get("tool_call_id") or ""
+            call_id = _native_call_id(item)
             tool_calls.append({
                 "type": "tool_call",
                 "name": name,
@@ -642,7 +642,7 @@ def _parse_native_content_tool_block(
     block_type: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
     function = item.get("function")
-    call_id = str(item.get("id") or "")
+    call_id = _native_call_id(item, function if isinstance(function, dict) else None)
     if isinstance(function, dict):
         return _parse_native_function_call(
             function,
@@ -679,7 +679,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             function,
             index=index,
             legacy=False,
-            call_id=str(item.get("id") or item.get("call_id") or item.get("tool_call_id") or ""),
+            call_id=_native_call_id(item, function),
             label=label,
         )
     # Several OpenAI-compatible shims flatten top-level tool calls instead of
@@ -702,10 +702,30 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             {"name": name, "arguments": arguments},
             index=index,
             legacy=False,
-            call_id=str(item.get("id") or item.get("call_id") or ""),
+            call_id=_native_call_id(item),
             label=label,
         )
     return None, {"tool": None, "reason": "Native tool call missing function payload.", "args": {}}, "Native tool call missing function payload; skipped."
+
+
+def _native_call_id(*items: Any) -> str:
+    """Return a provider call identifier from common native-tool-call aliases.
+
+    Provider bridges disagree on where they place the opaque correlation id:
+    OpenAI-style content blocks usually use ``id``, Responses-style blocks often
+    use ``call_id``, some shims use ``tool_call_id``, and Anthropic-compatible
+    bridges may use ``tool_use_id``.  Preserve the bounded id as provenance only;
+    runtime schema/ROE checks still decide whether any call can be applied.
+    """
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in ("id", "call_id", "tool_call_id", "tool_use_id"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return ""
 
 
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
@@ -735,7 +755,7 @@ def _reject_unsupported_native_tool_call(
 
     raw_tool_name = str(item.get("name") or item.get("tool") or "").strip()
     tool_name = redact_secrets(raw_tool_name[:200]) or None
-    call_id = str(item.get("id") or item.get("call_id") or item.get("tool_call_id") or "").strip()
+    call_id = _native_call_id(item).strip()
     args: dict[str, Any] = {"native_type": str(native_type or "custom_tool_call"), "native_tool_call_index": index}
     if call_id:
         args["provider_tool_call_id"] = redact_secrets(call_id[:200]) or ""

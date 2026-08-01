@@ -2018,6 +2018,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
@@ -2506,12 +2507,13 @@ def main(argv: list[str] | None = None) -> int:
                                     {"type": "text", "text": "native content-block smoke token=native-content-block-secret"},
                                     {
                                         "type": "tool_use",
-                                        "id": "content_memory",
+                                        "tool_call_id": "content_memory_alias",
                                         "name": "remember",
                                         "input": {"key": "native-content-block-smoke", "value": "content-block native tool call translated"},
                                     },
                                     {
                                         "type": "function_call",
+                                        "call_id": "content_tasks_alias",
                                         "name": "list_tasks",
                                         "arguments": json.dumps({"status": "all", "limit": "1"}),
                                     },
@@ -2560,6 +2562,8 @@ def main(argv: list[str] | None = None) -> int:
         native_content_rejected = json.dumps(native_content_plan_payload.get("rejected_tool_calls", []))
         native_content_warnings = json.dumps(native_content_plan_payload.get("warnings", []))
         native_content_metadata = native_content_plan_payload.get("metadata", {}) if isinstance(native_content_plan_payload.get("metadata"), dict) else {}
+        native_content_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_content_calls]
+        native_content_ledger = native_content_apply_payload.get("execution_ledger", []) if isinstance(native_content_apply_payload.get("execution_ledger"), list) else []
         checks["native_provider_content_block_tool_call_ok"] = (
             native_content_plan_payload.get("mode") == "plan_only"
             and [call.get("tool") for call in native_content_calls] == ["remember", "list_tasks"]
@@ -2574,6 +2578,13 @@ def main(argv: list[str] | None = None) -> int:
             and native_content_block_captured.get("tool_choice") == "auto"
             and native_content_block_captured.get("tool_count", 0) > 0
             and "native-content-block-secret" not in native_content_plan + native_content_apply + native_content_recall + json.dumps(native_content_plan_payload) + json.dumps(native_content_apply_payload)
+        )
+        checks["native_provider_content_block_call_id_alias_ok"] = (
+            [item.get("provider_tool_call_id") for item in native_content_call_metadata] == ["content_memory_alias", "content_tasks_alias"]
+            and [item.get("native_tool_call_source") for item in native_content_call_metadata] == ["native content-block tool_use", "native content-block function_call"]
+            and [item.get("provider_tool_call_id") for item in native_content_ledger] == ["content_memory_alias", "content_tasks_alias"]
+            and [item.get("native_tool_call_source") for item in native_content_ledger] == ["native content-block tool_use", "native content-block function_call"]
+            and "native-content-block-secret" not in json.dumps(native_content_call_metadata) + json.dumps(native_content_ledger)
         )
 
         native_single_content_captured = {}
@@ -3842,6 +3853,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
+            "native_provider_content_block_call_id_alias_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",

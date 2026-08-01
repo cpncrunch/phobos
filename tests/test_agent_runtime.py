@@ -3055,16 +3055,19 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"type": "text", "text": "native content-block plan token=content-secret"},
                                         {
                                             "type": "tool_use",
-                                            "id": "toolu_memory",
+                                            "tool_call_id": "content_tool_alias",
                                             "name": "remember",
                                             "input": {"key": "native-content-block", "value": "content block native tool call accepted"},
                                         },
                                         {
                                             "type": "function_call",
-                                            "name": "list_tasks",
-                                            "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                            "function": {
+                                                "name": "list_tasks",
+                                                "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                                "tool_call_id": "content_function_inner_alias",
+                                            },
                                         },
-                                        {"type": "tool_use", "id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
+                                        {"type": "tool_use", "tool_use_id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
                                         {"type": "custom_tool_call", "id": "toolu_custom", "name": "run_command", "input": custom_input_marker + " token=content-secret"},
                                         {"type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
                                         {"type": "functionResponse", "content": function_response_marker + " token=content-secret"},
@@ -3096,7 +3099,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("native content-block tool_use", payload["tool_calls"][0]["reason"])
                     self.assertIn("native content-block function_call", payload["tool_calls"][1]["reason"])
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual(call_metadata[0].get("provider_tool_call_id"), "toolu_memory")
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["content_tool_alias", "content_function_inner_alias"])
                     self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native content-block tool_use", "native content-block function_call"])
                     self.assertEqual([item.get("native_tool_call_index") for item in call_metadata], [1, 2])
                     rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
@@ -3118,7 +3121,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     applied_payload = json.loads(applied.split("\n", 1)[1])
                     self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual(ledger[0].get("provider_tool_call_id"), "toolu_memory")
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["content_tool_alias", "content_function_inner_alias"])
                     self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native content-block tool_use", "native content-block function_call"])
                 recall = runtime.handle_message('/recall query=native-content-block')
                 self.assertIn("content block native tool call accepted", recall)
@@ -4855,6 +4858,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("flat_tool_calls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
                 self.assertIn("custom_tool_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
