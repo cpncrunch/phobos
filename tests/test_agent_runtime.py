@@ -4195,6 +4195,95 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_root_function_calls_array_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root FunctionCalls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "ROOT_FUNCTION_CALLS_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeRootFunctionCallsHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "content": "root functionCalls token=root-functions-secret",
+                        "functionCalls": [
+                            {
+                                "callId": "root_functions_memory",
+                                "name": "remember",
+                                "args": {"key": "native-root-function-calls", "value": "root functionCalls array accepted"},
+                            },
+                            {
+                                "toolCallId": "root_functions_tasks",
+                                "function": {
+                                    "name": "list_tasks",
+                                    "arguments": json.dumps({"status": "all", "limit": 1}),
+                                },
+                            },
+                        ],
+                        "functionResponse": {
+                            "name": "remember",
+                            "response": {"content": provider_result_marker + " token=root-functions-secret"},
+                        },
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeRootFunctionCallsHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-function-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-function-calls", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root functionCalls token=root-functions-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertTrue(all("native provider root functionCalls" in call.get("reason", "") for call in payload["tool_calls"]))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_functions_memory", "root_functions_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root functionCalls", "native provider root functionCalls"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn("root-functions-secret", planned)
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root functionCalls token=root-functions-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_functions_memory", "root_functions_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root functionCalls", "native provider root functionCalls"])
+                recall = runtime.handle_message('/recall query=native-root-function-calls')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("root functionCalls array accepted", recall)
+                self.assertIn("root_functionCalls", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("root_function_calls_alias_translation"), status)
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("root-functions-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5496,6 +5585,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("single_top_level_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("single_responses_output_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("root_function_calls_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("legacy_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("custom_freeform_tool_calls_rejected"), native_status)
                 self.assertTrue(milestone_contract.get("followup_prompt_secret_redaction"), native_status)
@@ -5519,6 +5609,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCall", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("root_functionCalls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
