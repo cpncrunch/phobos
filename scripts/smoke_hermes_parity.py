@@ -2874,6 +2874,199 @@ def main(argv: list[str] | None = None) -> int:
             and "native-root-message-secret" not in native_root_message_plan + native_root_message_apply + native_root_message_recall + json.dumps(native_root_message_plan_payload) + json.dumps(native_root_message_apply_payload)
         )
 
+        native_root_message_alias_captured = {}
+        native_root_message_alias_result_marker = "ROOT_MESSAGE_ALIAS_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootMessageAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "native root message alias matrix smoke token=native-root-message-alias-secret"},
+                            {
+                                "functionCall": {
+                                    "toolUseId": "root_message_alias_content_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-root-message-alias-content-smoke", "value": "root message content functionCall native tool call translated"},
+                                }
+                            },
+                            {
+                                "type": "functionCall",
+                                "callId": "root_message_alias_content_tasks",
+                                "functionCall": {"name": "list_tasks", "argumentsJson": {"status": "all", "limit": "1"}},
+                            },
+                            {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "toolUseId": "root_message_alias_parts_memory",
+                                            "name": "remember",
+                                            "parameters": {"key": "native-root-message-alias-parts-smoke", "value": "root message content parts functionCall native tool call translated"},
+                                        }
+                                    },
+                                    {
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": native_root_message_alias_result_marker + " token=native-root-message-alias-secret"},
+                                        }
+                                    },
+                                ]
+                            },
+                        ],
+                        "toolCalls": [
+                            {
+                                "id": "root_message_alias_toolcalls_memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-root-message-alias-toolcalls-smoke", "value": "root message toolCalls native tool call translated"}),
+                                },
+                            }
+                        ],
+                        "tool_call": {
+                            "id": "root_message_alias_tool_call_tasks",
+                            "type": "function",
+                            "function": {"name": "list_tasks", "arguments": json.dumps({"status": "all", "limit": 1})},
+                        },
+                        "toolCall": {
+                            "toolUseId": "root_message_alias_toolcall_memory",
+                            "name": "remember",
+                            "args": {"key": "native-root-message-alias-toolcall-smoke", "value": "root message toolCall native tool call translated"},
+                        },
+                        "functionCall": {
+                            "callId": "root_message_alias_functioncall_tasks",
+                            "name": "list_tasks",
+                            "args": {"status": "all", "limit": 1},
+                        },
+                        "functionCalls": [
+                            {
+                                "call_id": "root_message_alias_functioncalls_memory",
+                                "name": "remember",
+                                "args": {"key": "native-root-message-alias-functioncalls-smoke", "value": "root message functionCalls native tool call translated"},
+                            },
+                            {
+                                "toolUseId": "root_message_alias_functioncalls_nested_tasks",
+                                "functionCall": {"name": "list_tasks", "parameters": {"status": "all", "limit": 1}},
+                            },
+                        ],
+                        "function_calls": [
+                            {
+                                "tool_call_id": "root_message_alias_function_calls_memory",
+                                "function": {
+                                    "name": "remember",
+                                    "arguments": json.dumps({"key": "native-root-message-alias-function-calls-smoke", "value": "root message function_calls native tool call translated"}),
+                                },
+                            }
+                        ],
+                        "functionResponse": {
+                            "name": "remember",
+                            "response": {"content": native_root_message_alias_result_marker + " token=native-root-message-alias-secret"},
+                        },
+                    }
+                }).encode("utf-8")
+
+        def fake_native_root_message_alias_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_message_alias_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_message_alias_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootMessageAliasSmokeResponse()
+
+        native_root_message_alias_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-message-alias-matrix.db"),
+                session_name="native-provider-root-message-alias-matrix-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-message-alias-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_message_alias_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_message_alias_urlopen
+            native_root_message_alias_plan = native_root_message_alias_runtime.handle_message('/auto model=true prompt="native root message alias matrix smoke token=native-root-message-alias-secret"')
+            native_root_message_alias_plan_payload = json.loads(native_root_message_alias_plan.split("\n", 1)[1])
+            native_root_message_alias_apply = native_root_message_alias_runtime.handle_message('/auto apply=true model=true prompt="native root message alias matrix smoke token=native-root-message-alias-secret"')
+            native_root_message_alias_apply_payload = json.loads(native_root_message_alias_apply.split("\n", 1)[1])
+            native_root_message_alias_recall_toolcalls = native_root_message_alias_runtime.handle_message('/recall query=native-root-message-alias-toolcalls-smoke')
+            native_root_message_alias_recall_parts = native_root_message_alias_runtime.handle_message('/recall query=native-root-message-alias-parts-smoke')
+            native_root_message_alias_recall = native_root_message_alias_recall_toolcalls + "\n" + native_root_message_alias_recall_parts
+            write("native-provider-root-message-alias-matrix.json", json.dumps({
+                "plan": native_root_message_alias_plan_payload,
+                "apply": native_root_message_alias_apply_payload,
+                "captured": native_root_message_alias_captured,
+                "recall": native_root_message_alias_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_message_alias_original_urlopen
+            native_root_message_alias_runtime.close()
+        native_root_message_alias_calls = native_root_message_alias_plan_payload.get("tool_calls", []) if isinstance(native_root_message_alias_plan_payload.get("tool_calls"), list) else []
+        native_root_message_alias_metadata = native_root_message_alias_plan_payload.get("metadata", {}) if isinstance(native_root_message_alias_plan_payload.get("metadata"), dict) else {}
+        native_root_message_alias_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_message_alias_calls]
+        native_root_message_alias_sources = [item.get("native_tool_call_source") for item in native_root_message_alias_call_metadata]
+        native_root_message_alias_ids = [item.get("provider_tool_call_id") for item in native_root_message_alias_call_metadata]
+        native_root_message_alias_ledger = native_root_message_alias_apply_payload.get("execution_ledger", []) if isinstance(native_root_message_alias_apply_payload.get("execution_ledger"), list) else []
+        native_root_message_alias_expected_sources = [
+            "native provider root message toolCalls",
+            "native provider root message tool_call",
+            "native provider root message toolCall",
+            "native provider root message functionCall",
+            "native provider root message functionCalls",
+            "native provider root message functionCalls",
+            "native provider root message function_calls",
+            "native provider root message content functionCall",
+            "native provider root message content functionCall",
+            "native provider root message content parts functionCall",
+        ]
+        native_root_message_alias_expected_ids = [
+            "root_message_alias_toolcalls_memory",
+            "root_message_alias_tool_call_tasks",
+            "root_message_alias_toolcall_memory",
+            "root_message_alias_functioncall_tasks",
+            "root_message_alias_functioncalls_memory",
+            "root_message_alias_functioncalls_nested_tasks",
+            "root_message_alias_function_calls_memory",
+            "root_message_alias_content_memory",
+            "root_message_alias_content_tasks",
+            "root_message_alias_parts_memory",
+        ]
+        native_root_message_alias_variants = native_status_data.get("provider_native_tool_call_variants", [])
+        checks["native_provider_root_message_alias_matrix_ok"] = (
+            native_root_message_alias_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_message_alias_calls] == ["remember", "list_tasks", "remember", "list_tasks", "remember", "list_tasks", "remember", "remember", "list_tasks", "remember"]
+            and native_root_message_alias_metadata.get("native_tool_calls") is True
+            and native_root_message_alias_metadata.get("native_tool_call_count") == 10
+            and native_root_message_alias_sources == native_root_message_alias_expected_sources
+            and native_root_message_alias_ids == native_root_message_alias_expected_ids
+            and [item.get("result", {}).get("status") for item in native_root_message_alias_apply_payload.get("results", [])] == ["ok"] * 10
+            and [item.get("native_tool_call_source") for item in native_root_message_alias_ledger] == native_root_message_alias_expected_sources
+            and native_status_milestone_contract.get("root_message_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_message_content_function_call_alias_translation") is True
+            and all(variant in native_root_message_alias_variants for variant in [
+                "root_message_toolCalls",
+                "root_message_tool_call",
+                "root_message_toolCall",
+                "root_message_functionCall",
+                "root_message_functionCalls",
+                "root_message_function_calls",
+                "root_message_content_functionCall",
+                "root_message_content_parts_functionCall",
+            ])
+            and "functionResponse" in json.dumps(native_root_message_alias_plan_payload.get("warnings", []))
+            and "root message toolCalls native tool call translated" in native_root_message_alias_recall
+            and "root message content parts functionCall native tool call translated" in native_root_message_alias_recall
+            and native_root_message_alias_captured.get("tool_choice") == "auto"
+            and native_root_message_alias_captured.get("tool_count", 0) > 0
+            and native_root_message_alias_result_marker not in native_root_message_alias_plan + native_root_message_alias_apply + native_root_message_alias_recall + json.dumps(native_root_message_alias_plan_payload) + json.dumps(native_root_message_alias_apply_payload)
+            and "native-root-message-alias-secret" not in native_root_message_alias_plan + native_root_message_alias_apply + native_root_message_alias_recall + json.dumps(native_root_message_alias_plan_payload) + json.dumps(native_root_message_alias_apply_payload)
+        )
+
         native_root_function_snake_captured = {}
         native_root_snake_result_marker = "ROOT_FUNCTION_CALLS_SNAKE_RESPONSE_SHOULD_NOT_SURFACE_SMOKE"
 
@@ -6143,6 +6336,8 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
             "native_provider_camel_case_tool_call_alias_ok",
+            "native_provider_root_message_wrapper_ok",
+            "native_provider_root_message_alias_matrix_ok",
             "native_provider_root_function_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_tool_call_transcript_provenance_ok",

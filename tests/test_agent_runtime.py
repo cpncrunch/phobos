@@ -5524,6 +5524,204 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_root_message_wrapper_alias_matrix_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root Message Alias Matrix",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "ROOT_MESSAGE_ALIAS_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeRootMessageAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "root message alias matrix token=root-message-alias-secret"},
+                                {
+                                    "functionCall": {
+                                        "toolUseId": "root_message_content_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-root-message-content", "value": "root message content functionCall accepted"},
+                                    }
+                                },
+                                {
+                                    "type": "functionCall",
+                                    "callId": "root_message_content_tasks",
+                                    "functionCall": {"name": "list_tasks", "argumentsJson": {"status": "all", "limit": "1"}},
+                                },
+                                {
+                                    "parts": [
+                                        {
+                                            "functionCall": {
+                                                "toolUseId": "root_message_parts_memory",
+                                                "name": "remember",
+                                                "parameters": {"key": "native-root-message-parts", "value": "root message content parts functionCall accepted"},
+                                            }
+                                        },
+                                        {
+                                            "functionResponse": {
+                                                "name": "remember",
+                                                "response": {"content": provider_result_marker + " token=root-message-alias-secret"},
+                                            }
+                                        },
+                                    ]
+                                },
+                            ],
+                            "toolCalls": [
+                                {
+                                    "id": "root_message_toolcalls_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-message-toolcalls", "value": "root message toolCalls alias accepted"}),
+                                    },
+                                }
+                            ],
+                            "tool_call": {
+                                "id": "root_message_tool_call_tasks",
+                                "type": "function",
+                                "function": {"name": "list_tasks", "arguments": json.dumps({"status": "all", "limit": 1})},
+                            },
+                            "toolCall": {
+                                "toolUseId": "root_message_toolcall_memory",
+                                "name": "remember",
+                                "args": {"key": "native-root-message-toolcall", "value": "root message toolCall alias accepted"},
+                            },
+                            "functionCall": {
+                                "callId": "root_message_function_call_tasks",
+                                "name": "list_tasks",
+                                "args": {"status": "all", "limit": 1},
+                            },
+                            "functionCalls": [
+                                {
+                                    "call_id": "root_message_functioncalls_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-root-message-functioncalls", "value": "root message functionCalls alias accepted"},
+                                },
+                                {
+                                    "toolUseId": "root_message_functioncalls_nested_tasks",
+                                    "functionCall": {"name": "list_tasks", "parameters": {"status": "all", "limit": 1}},
+                                },
+                            ],
+                            "function_calls": [
+                                {
+                                    "tool_call_id": "root_message_function_calls_memory",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-message-function-calls", "value": "root message function_calls alias accepted"}),
+                                    },
+                                }
+                            ],
+                            "functionResponse": {
+                                "name": "remember",
+                                "response": {"content": provider_result_marker + " token=root-message-alias-secret"},
+                            },
+                        }
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeRootMessageAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-message-alias-matrix",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-message-alias", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root message alias matrix token=root-message-alias-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    calls = payload.get("tool_calls", [])
+                    self.assertEqual(
+                        [call["tool"] for call in calls],
+                        ["remember", "list_tasks", "remember", "list_tasks", "remember", "list_tasks", "remember", "remember", "list_tasks", "remember"],
+                    )
+                    sources = [call.get("metadata", {}).get("native_tool_call_source") for call in calls]
+                    self.assertEqual(
+                        sources,
+                        [
+                            "native provider root message toolCalls",
+                            "native provider root message tool_call",
+                            "native provider root message toolCall",
+                            "native provider root message functionCall",
+                            "native provider root message functionCalls",
+                            "native provider root message functionCalls",
+                            "native provider root message function_calls",
+                            "native provider root message content functionCall",
+                            "native provider root message content functionCall",
+                            "native provider root message content parts functionCall",
+                        ],
+                    )
+                    self.assertEqual(
+                        [call.get("metadata", {}).get("provider_tool_call_id") for call in calls],
+                        [
+                            "root_message_toolcalls_memory",
+                            "root_message_tool_call_tasks",
+                            "root_message_toolcall_memory",
+                            "root_message_function_call_tasks",
+                            "root_message_functioncalls_memory",
+                            "root_message_functioncalls_nested_tasks",
+                            "root_message_function_calls_memory",
+                            "root_message_content_memory",
+                            "root_message_content_tasks",
+                            "root_message_parts_memory",
+                        ],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 10)
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+                    self.assertNotIn("root-message-alias-secret", planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root message alias matrix token=root-message-alias-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertTrue(all(item.get("result", {}).get("status") == "ok" for item in applied_payload.get("results", [])))
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], sources)
+                recall = runtime.handle_message('/recall query=native-root-message')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                variants = status.get("provider_native_tool_call_variants", [])
+                for variant in [
+                    "root_message_toolCalls",
+                    "root_message_tool_call",
+                    "root_message_toolCall",
+                    "root_message_functionCall",
+                    "root_message_functionCalls",
+                    "root_message_function_calls",
+                    "root_message_content_functionCall",
+                    "root_message_content_parts_functionCall",
+                ]:
+                    self.assertIn(variant, variants)
+                milestone_contract = status.get("milestone_contract", {})
+                self.assertTrue(milestone_contract.get("root_message_wrapper_translation"), status)
+                self.assertTrue(milestone_contract.get("root_message_content_function_call_alias_translation"), status)
+                self.assertIn("root message toolCalls alias accepted", recall)
+                self.assertIn("root message content parts functionCall accepted", recall)
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn(provider_result_marker, applied + recall + json.dumps(status))
+                self.assertNotIn("root-message-alias-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_root_function_call_is_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
