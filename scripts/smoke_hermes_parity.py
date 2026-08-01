@@ -1988,6 +1988,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
+            and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
@@ -2020,6 +2021,7 @@ def main(argv: list[str] | None = None) -> int:
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2975,6 +2977,77 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_custom_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and "native-responses-secret" not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+        )
+
+        native_single_responses_captured = {}
+
+        class NativeOpenAISingleResponsesOutputSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native single responses output smoke token=native-single-responses-secret",
+                    "output": {
+                        "type": "function_call",
+                        "call_id": "single_responses_memory",
+                        "name": "remember",
+                        "arguments": json.dumps({"key": "native-single-responses-smoke", "value": "single Responses output native tool call translated"}),
+                    },
+                }).encode("utf-8")
+
+        def fake_native_single_responses_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_single_responses_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_single_responses_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAISingleResponsesOutputSmokeResponse()
+
+        native_single_responses_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-single-responses-output.db"),
+                session_name="native-provider-single-responses-output-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-single-responses-output-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_single_responses_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_single_responses_urlopen
+            native_single_responses_plan = native_single_responses_runtime.handle_message('/auto model=true prompt="native single responses output smoke token=native-single-responses-secret"')
+            native_single_responses_plan_payload = json.loads(native_single_responses_plan.split("\n", 1)[1])
+            native_single_responses_apply = native_single_responses_runtime.handle_message('/auto apply=true model=true prompt="native single responses output smoke token=native-single-responses-secret"')
+            native_single_responses_apply_payload = json.loads(native_single_responses_apply.split("\n", 1)[1])
+            native_single_responses_recall = native_single_responses_runtime.handle_message('/recall query=native-single-responses-smoke')
+            write("native-provider-single-responses-output-tool-call.json", json.dumps({
+                "plan": native_single_responses_plan_payload,
+                "apply": native_single_responses_apply_payload,
+                "captured": native_single_responses_captured,
+                "recall": native_single_responses_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_single_responses_original_urlopen
+            native_single_responses_runtime.close()
+        native_single_responses_calls = native_single_responses_plan_payload.get("tool_calls", []) if isinstance(native_single_responses_plan_payload.get("tool_calls"), list) else []
+        native_single_responses_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_single_responses_calls]
+        native_single_responses_ledger = native_single_responses_apply_payload.get("execution_ledger", []) if isinstance(native_single_responses_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_single_responses_output_tool_call_ok"] = (
+            native_single_responses_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_single_responses_calls] == ["remember"]
+            and "native provider single responses output function_call" in native_single_responses_calls[0].get("reason", "")
+            and [item.get("provider_tool_call_id") for item in native_single_responses_call_metadata] == ["single_responses_memory"]
+            and [item.get("provider_tool_call_id") for item in native_single_responses_ledger] == ["single_responses_memory"]
+            and native_single_responses_ledger[0].get("native_tool_call_source") == "native provider single responses output function_call"
+            and [item.get("result", {}).get("status") for item in native_single_responses_apply_payload.get("results", [])] == ["ok"]
+            and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
+            and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single Responses output native tool call translated" in native_single_responses_recall
+            and native_single_responses_captured.get("tool_choice") == "auto"
+            and native_single_responses_captured.get("tool_count", 0) > 0
+            and "native-single-responses-secret" not in native_single_responses_plan + native_single_responses_apply + native_single_responses_recall + json.dumps(native_single_responses_plan_payload) + json.dumps(native_single_responses_apply_payload)
         )
 
         native_candidate_marker = root / "native-candidate-should-not-run.txt"
@@ -4118,6 +4191,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_argument_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
+            "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
             "native_provider_custom_tool_call_reject_ok",

@@ -3606,6 +3606,80 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_single_responses_output_tool_call_object_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Single Responses Output Tool Call",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeSingleResponsesOutputHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "single responses output token=single-responses-secret",
+                        "output": {
+                            "type": "function_call",
+                            "call_id": "single_resp_memory",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-single-responses", "value": "single Responses output tool call accepted"}),
+                        },
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeSingleResponsesOutputHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-single-responses-output",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-single-responses", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native single responses output token=single-responses-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertIn("native provider single responses output function_call", payload["tool_calls"][0]["reason"])
+                    call_metadata = payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(call_metadata.get("provider_tool_call_id"), "single_resp_memory")
+                    self.assertEqual(call_metadata.get("native_tool_call_source"), "native provider single responses output function_call")
+                    self.assertEqual(call_metadata.get("native_tool_call_index"), 1)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertNotIn("single-responses-secret", planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native single responses output token=single-responses-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual(ledger[0].get("provider_tool_call_id"), "single_resp_memory")
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native provider single responses output function_call")
+                recall = runtime.handle_message('/recall query=native-single-responses')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("single Responses output tool call accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("single_responses_output_tool_call_translation"), status)
+                self.assertIn("single_responses_output_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("single-responses-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_candidate_function_call_parts_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5093,6 +5167,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("provider_tool_call_id_provenance"), native_status)
                 self.assertTrue(milestone_contract.get("transcript_provider_call_provenance"), native_status)
                 self.assertTrue(milestone_contract.get("single_top_level_tool_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("single_responses_output_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("legacy_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("custom_freeform_tool_calls_rejected"), native_status)
                 self.assertTrue(milestone_contract.get("followup_prompt_secret_redaction"), native_status)
@@ -5114,6 +5189,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("single_top_level_tool_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("flat_tool_calls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))

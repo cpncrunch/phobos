@@ -487,6 +487,12 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     output = raw.get("output")
+    if isinstance(output, dict):
+        # Some OpenAI-compatible Responses shims collapse a one-item output
+        # array into a single object.  Normalize it here so provider-native
+        # function-call proposals still enter the normal schema/runtime-policy/
+        # ROE validation boundary instead of becoming a no-tool terminal plan.
+        output = [dict(output, _provider_shape="single_responses.output")]
     if not isinstance(output, list):
         return {}
     content_blocks: list[dict[str, Any]] = []
@@ -503,13 +509,14 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             if isinstance(text, str):
                 content_blocks.append({"type": "text", "text": text})
             continue
+        provider_shape = str(item.get("_provider_shape") or "responses.output")
         if block_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
             call_id = _native_call_id(item)
             tool_calls.append({
                 "type": block_type,
                 "name": item.get("name") or item.get("tool"),
                 "call_id": str(call_id),
-                "_provider_shape": "responses.output",
+                "_provider_shape": provider_shape,
             })
             continue
         if block_type in {"function_call", "tool_call", "tool_use"}:
@@ -521,7 +528,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 "name": name,
                 "arguments": arguments,
                 "call_id": str(call_id),
-                "_provider_shape": "responses.output",
+                "_provider_shape": provider_shape,
             })
             continue
         if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
@@ -757,6 +764,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         arguments = _native_argument_value(item, preferred=("arguments", "args", "input", "parameters", "params"))
         if item.get("_provider_shape") == "responses.output":
             label = "native provider responses output function_call"
+        elif item.get("_provider_shape") == "single_responses.output":
+            label = "native provider single responses output function_call"
         elif item.get("_provider_shape") == "gemini.candidate":
             label = "native provider candidate functionCall"
         elif provider_shape == "single_top_level.tool_calls":

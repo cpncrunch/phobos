@@ -12,7 +12,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Structured scanner wrappers:** ROE-gated `nmap_scan`, `httpx_probe`, `nuclei_scan`, and `ffuf_scan` wrappers can parse captured output without scanner binaries for demos/tests, or execute only with explicit `execute=true`; native model-planned scanner-wrapper calls are forced back to `execute=false` unless the operator supplied `/auto execute=true`; every run creates durable, session-bound `tool_runs` records and redacted evidence artifacts. Tool-run targets, commands, decisions, parsed data, and metadata are redacted before SQLite storage. `nuclei_scan` requires an explicit operator-selected template path for execution so it never runs the broad default template set accidentally.
 - **Finding lifecycle records:** `/finding-create`, `/finding-update`, `/finding-get`, `/findings`, `/finding-export`, `/finding-review`, and `/finding-bundle` persist, review, export, and package candidate/reportable findings. Scanner-imported evidence stays candidate/non-reportable until the operator moves a finding to `confirmed`, `resolved`, or `accepted-risk`. Finding fields and evidence refs are redacted before SQLite storage; finding bundles include only redacted generated files plus safely linked text evidence.
 - **Local skills:** Hermes-style `SKILL.md` files can be discovered with `/skills`, loaded with `/skill`, preloaded from config, or grouped into bundles without loading every skill body into context.
-- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; `phobos-agent auto` and `phobos-agent auto-loop` expose the same dry-run-first native tool-call boundaries from the public CLI; optional model-assisted planning accepts JSON-content plans even when providers wrap them in fenced/prose output, and OpenAI-compatible provider-native `tool_calls` (including nested function calls, single-object top-level `tool_calls`, flattened top-level `name`/`arguments` variants, and argument aliases such as `arguments_json`/`inputJson`), top-level or list/single-object content-block `tool_use`/`function_call`, Responses-style top-level `output`/`function_call`, candidate list-or-single `parts` `functionCall`, or legacy `function_call` payloads through the configured provider fallback chain, preserves provider tool-call IDs (`id`, `call_id`, `tool_call_id`, or `tool_use_id`) in plan/result ledgers, ignores provider-side `tool_result`/`functionResponse` echoes instead of summarizing or dispatching them, rejects custom/freeform native calls such as `custom_tool_call` without surfacing their input, receives bounded redacted runtime context, and keeps `/auto-loop` bounded, registry-filtered, schema-validated, ROE-guarded, and runtime-policy-aware. Native slash flags are parsed explicitly, target-affecting plans get read-only guardrail previews, explicit natural-message auto-execution is tagged as `trigger=natural_auto` in audit/transcript metadata and still keeps command/process execution dry-run unless an explicit slash `execute=true` path is used, `confirm_tools`/`blocked_tools` annotations appear in redacted execution ledgers, approval-control tools are hidden from model specs and rejected if returned, confirm-gated plans execute only after direct `/approve`, one-shot `/auto` plan/apply transcripts include a bounded redacted planner/provider trace, each applied loop step records an execution-ledger delta plus a redacted planner/provider trace beside the global ledger, machine-readable execution summaries separate claimable command/process activity from dry-runs, approvals, blocks, handler errors, and local-only completions, repeated or same-step duplicate model plans stop before dispatch/re-dispatch of the same call, post-feedback terminal no-tool model responses stop the loop without deterministic re-planning from the original prompt, post-feedback provider failures stop with an explicit `model_error` state, post-feedback all-invalid model plans stop with `invalid_plan` before dispatch, explicit max-step budget exhaustion is surfaced in payloads/chat/transcripts, and transcripts/chat/gateway summaries never claim tool or command execution unless the registry result proves it.
+- **Guarded auto-planner:** `/auto` converts common natural-language operator requests into explicit tool calls; `phobos-agent auto` and `phobos-agent auto-loop` expose the same dry-run-first native tool-call boundaries from the public CLI; optional model-assisted planning accepts JSON-content plans even when providers wrap them in fenced/prose output, and OpenAI-compatible provider-native `tool_calls` (including nested function calls, single-object top-level `tool_calls`, flattened top-level `name`/`arguments` variants, and argument aliases such as `arguments_json`/`inputJson`), top-level or list/single-object content-block `tool_use`/`function_call`, Responses-style top-level `output`/`function_call` including single-object `output` shims, candidate list-or-single `parts` `functionCall`, or legacy `function_call` payloads through the configured provider fallback chain, preserves provider tool-call IDs (`id`, `call_id`, `tool_call_id`, or `tool_use_id`) in plan/result ledgers, ignores provider-side `tool_result`/`functionResponse` echoes instead of summarizing or dispatching them, rejects custom/freeform native calls such as `custom_tool_call` without surfacing their input, receives bounded redacted runtime context, and keeps `/auto-loop` bounded, registry-filtered, schema-validated, ROE-guarded, and runtime-policy-aware. Native slash flags are parsed explicitly, target-affecting plans get read-only guardrail previews, explicit natural-message auto-execution is tagged as `trigger=natural_auto` in audit/transcript metadata and still keeps command/process execution dry-run unless an explicit slash `execute=true` path is used, `confirm_tools`/`blocked_tools` annotations appear in redacted execution ledgers, approval-control tools are hidden from model specs and rejected if returned, confirm-gated plans execute only after direct `/approve`, one-shot `/auto` plan/apply transcripts include a bounded redacted planner/provider trace, each applied loop step records an execution-ledger delta plus a redacted planner/provider trace beside the global ledger, machine-readable execution summaries separate claimable command/process activity from dry-runs, approvals, blocks, handler errors, and local-only completions, repeated or same-step duplicate model plans stop before dispatch/re-dispatch of the same call, post-feedback terminal no-tool model responses stop the loop without deterministic re-planning from the original prompt, post-feedback provider failures stop with an explicit `model_error` state, post-feedback all-invalid model plans stop with `invalid_plan` before dispatch, explicit max-step budget exhaustion is surfaced in payloads/chat/transcripts, and transcripts/chat/gateway summaries never claim tool or command execution unless the registry result proves it.
 - **Plugin architecture:** load explicit Python plugin directories with `--plugin-dir` or `agent.config.json`; plugins expose `register(registry)` and can add tools.
 - **Profiles, auth status, preflight, and guardrail self-tests:** `profile-init`, `profiles`, and `--profile <name>` provide local config/DB roots; `/auth-status` checks model/bridge token env vars without revealing values; `/preflight` performs a read-only ROE/runtime readiness check and writes a redacted Markdown report; `/guardrail-test` writes a redacted Markdown simulation report under `agent/guardrails/`.
 - **Approvals:** confirm-level commands are queued in SQLite, `/approval id=<n>` returns redacted current-session detail for review, and `/approve id=<n>` is required before execution/start. Approval args/results are redacted before SQLite storage; if redaction changed the queued arguments, replay is blocked so the operator can re-submit fresh execution input instead of running an altered command. Approval lookup and resolution helpers accept the active `session_id`, so future gateway/CLI replay surfaces inherit the same ownership boundary instead of relying on caller-side filtering.
@@ -798,6 +798,7 @@ default_non_destructive=True
 config_written=True
 config_scalar_validation_ok=True
 agent_init_ok=True
+native_tool_call_cli_entrypoints_ok=True
 tools_include_core_plugin_and_new_parity=True
 schema_version_ok=True
 db_schema_counts_ok=True
@@ -827,6 +828,7 @@ auto_loop_ok=True
 native_tool_call_plan_validation_ok=True
 native_tool_call_plan_transcript_ok=True
 native_tool_call_one_shot_planner_trace_ok=True
+native_tool_call_wrapped_json_plan_ok=True
 native_tool_call_context_handoff_ok=True
 native_tool_call_fallback_chain_ok=True
 native_tool_call_allowed_execution_ok=True
@@ -837,9 +839,9 @@ native_tool_call_status_contract_ok=True
 native_tool_call_natural_auto_provenance_ok=True
 native_openai_tool_call_adapter_ok=True
 native_provider_flat_tool_call_ok=True
-native_provider_single_top_level_tool_call_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
 native_tool_call_transcript_provenance_ok=True
+native_provider_single_top_level_tool_call_ok=True
 native_provider_tool_call_edge_cases_ok=True
 native_provider_legacy_function_call_ok=True
 native_provider_content_block_tool_call_ok=True
@@ -848,6 +850,7 @@ native_provider_top_level_content_block_tool_call_ok=True
 native_provider_argument_aliases_ok=True
 native_provider_single_content_block_tool_call_ok=True
 native_provider_responses_output_tool_call_ok=True
+native_provider_single_responses_output_tool_call_ok=True
 native_provider_candidate_function_call_ok=True
 native_provider_single_candidate_part_function_call_ok=True
 native_provider_custom_tool_call_reject_ok=True
@@ -874,7 +877,6 @@ native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
 native_tool_call_execution_summary_ok=True
 native_tool_call_gateway_chat_ok=True
-native_tool_call_cli_entrypoints_ok=True
 native_tool_call_milestone_contract_ok=True
 memory_hygiene_forget_ok=True
 message_memory_context_media_storage_redaction_ok=True
@@ -944,7 +946,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=533
+artifact_count=563
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
