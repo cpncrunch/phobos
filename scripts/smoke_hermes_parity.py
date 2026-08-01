@@ -1986,6 +1986,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("singular_tool_call_alias_translation") is True
             and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
+            and native_status_milestone_contract.get("choice_delta_tool_call_translation") is True
             and native_status_milestone_contract.get("tool_calls_nested_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
@@ -2046,6 +2047,7 @@ def main(argv: list[str] | None = None) -> int:
             and "single_top_level_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "singular_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice_delta_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2384,6 +2386,110 @@ def main(argv: list[str] | None = None) -> int:
             and "provider_call_id=`flat_dry`" in native_flat_transcript_markdown
             and "source=`native provider flat tool_call`" in native_flat_transcript_markdown
             and "native-flat-secret" not in json.dumps(native_flat_transcript_detail) + native_flat_transcript_markdown
+        )
+
+        native_choice_delta_marker = root / "native-choice-delta-should-not-run.txt"
+        native_choice_delta_captured: dict[str, object] = {}
+
+        class NativeOpenAIChoiceDeltaToolCallSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "native choice delta smoke token=native-choice-delta-secret",
+                                "tool_calls": [
+                                    {
+                                        "id": "choice_delta_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-choice-delta-smoke", "value": "choice delta native tool calls translated"}),
+                                        },
+                                    },
+                                    {
+                                        "callId": "choice_delta_dry",
+                                        "type": "function",
+                                        "function": {
+                                            "toolName": "run_command",
+                                            "argumentsJson": {
+                                                "target": "app.example.test",
+                                                "purpose": "choice delta native dry-run smoke",
+                                                "command": f"printf native-choice-delta > {native_choice_delta_marker}",
+                                                "execute": True,
+                                            },
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_choice_delta_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_choice_delta_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_choice_delta_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIChoiceDeltaToolCallSmokeResponse()
+
+        native_choice_delta_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-choice-delta.db"),
+                session_name="native-provider-choice-delta-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-choice-delta-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_choice_delta_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_choice_delta_urlopen
+            native_choice_delta_plan = native_choice_delta_runtime.handle_message('/auto model=true prompt="native choice delta smoke token=native-choice-delta-secret"')
+            native_choice_delta_plan_payload = json.loads(native_choice_delta_plan.split("\n", 1)[1])
+            native_choice_delta_apply = native_choice_delta_runtime.handle_message('/auto apply=true model=true prompt="native choice delta smoke token=native-choice-delta-secret"')
+            native_choice_delta_apply_payload = json.loads(native_choice_delta_apply.split("\n", 1)[1])
+            native_choice_delta_recall = native_choice_delta_runtime.handle_message('/recall query=native-choice-delta-smoke')
+            write("native-provider-choice-delta-tool-calls.json", json.dumps({
+                "plan": native_choice_delta_plan_payload,
+                "apply": native_choice_delta_apply_payload,
+                "captured": native_choice_delta_captured,
+                "recall": native_choice_delta_recall,
+                "marker_exists": native_choice_delta_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_choice_delta_original_urlopen
+            native_choice_delta_runtime.close()
+        native_choice_delta_calls = native_choice_delta_plan_payload.get("tool_calls", []) if isinstance(native_choice_delta_plan_payload.get("tool_calls"), list) else []
+        native_choice_delta_metadata = native_choice_delta_plan_payload.get("metadata", {}) if isinstance(native_choice_delta_plan_payload.get("metadata"), dict) else {}
+        native_choice_delta_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_choice_delta_calls]
+        native_choice_delta_ledger = native_choice_delta_apply_payload.get("execution_ledger", []) if isinstance(native_choice_delta_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_choice_delta_tool_call_ok"] = (
+            native_choice_delta_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_choice_delta_calls] == ["remember", "run_command"]
+            and len(native_choice_delta_calls) == 2
+            and all("native provider choice delta tool_calls" in call.get("reason", "") for call in native_choice_delta_calls)
+            and native_choice_delta_calls[1].get("args", {}).get("execute") is False
+            and native_choice_delta_metadata.get("native_tool_calls") is True
+            and native_choice_delta_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_choice_delta_call_metadata] == ["choice_delta_memory", "choice_delta_dry"]
+            and [item.get("native_tool_call_source") for item in native_choice_delta_call_metadata] == ["native provider choice delta tool_calls", "native provider choice delta tool_calls"]
+            and [item.get("result", {}).get("status") for item in native_choice_delta_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and len(native_choice_delta_ledger) == 2
+            and [item.get("provider_tool_call_id") for item in native_choice_delta_ledger] == ["choice_delta_memory", "choice_delta_dry"]
+            and native_choice_delta_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("choice_delta_tool_call_translation") is True
+            and "choice_delta_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice delta native tool calls translated" in native_choice_delta_recall
+            and native_choice_delta_captured.get("tool_choice") == "auto"
+            and int(native_choice_delta_captured.get("tool_count", 0) or 0) > 0
+            and not native_choice_delta_marker.exists()
+            and "native-choice-delta-secret" not in native_choice_delta_plan + native_choice_delta_apply + native_choice_delta_recall + json.dumps(native_choice_delta_plan_payload) + json.dumps(native_choice_delta_apply_payload)
         )
 
         native_nested_marker = root / "native-nested-tool-calls-should-not-run.txt"
@@ -6828,15 +6934,16 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_provider_flat_tool_call_ok",
+            "native_provider_choice_delta_tool_call_ok",
             "native_provider_tool_calls_nested_aliases_ok",
+            "native_tool_call_provider_call_id_provenance_ok",
+            "native_tool_call_transcript_provenance_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
             "native_provider_camel_case_tool_call_alias_ok",
             "native_provider_root_message_wrapper_ok",
             "native_provider_root_message_alias_matrix_ok",
             "native_provider_root_function_call_ok",
-            "native_tool_call_provider_call_id_provenance_ok",
-            "native_tool_call_transcript_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",

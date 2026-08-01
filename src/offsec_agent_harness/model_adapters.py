@@ -334,8 +334,12 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     choices = raw.get("choices") if isinstance(raw, dict) else []
     if isinstance(choices, list) and choices:
         first = choices[0]
-        if isinstance(first, dict) and isinstance(first.get("message"), dict):
-            return first["message"]
+        if isinstance(first, dict):
+            if isinstance(first.get("message"), dict):
+                return first["message"]
+            choice_message = _choice_wrapper_to_message(first)
+            if choice_message:
+                return choice_message
     root_message = _root_message_to_message(raw)
     if root_message:
         return root_message
@@ -349,6 +353,59 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     if top_level_message:
         return top_level_message
     return {}
+
+
+def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
+    """Normalize choice-level/delta native tool-call wrappers into message shape.
+
+    Some OpenAI-compatible endpoints expose a final streaming-style snapshot as
+    ``choices[0].delta`` instead of ``choices[0].message``; a few lightweight
+    shims put ``tool_calls``/``toolCalls`` directly on the choice object.  Treat
+    those as provider-native planning proposals only.  Phobos still validates
+    tool names, JSON schemas, runtime policy, ROE previews, approvals, execution
+    intent, and transcript redaction before anything can dispatch.
+    """
+
+    if not isinstance(choice, dict):
+        return {}
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        message = _provider_message_wrapper_to_message(delta, provider_shape_prefix="choice.delta")
+        if message:
+            return message
+    if _responses_output_item_looks_like_message(choice):
+        return _provider_message_wrapper_to_message(choice, provider_shape_prefix="choice")
+    return {}
+
+
+def _provider_message_wrapper_to_message(raw: dict[str, Any], *, provider_shape_prefix: str) -> dict[str, Any]:
+    """Build a chat message from a provider wrapper carrying message fields."""
+
+    message: dict[str, Any] = {}
+    if "content" in raw:
+        content_blocks: list[dict[str, Any]] = []
+        _extend_responses_content_blocks(
+            content_blocks,
+            raw.get("content"),
+            provider_shape=f"{provider_shape_prefix}.content",
+        )
+        if content_blocks:
+            message["content"] = content_blocks
+        else:
+            content_value = raw.get("content")
+            if isinstance(content_value, (str, list, dict)) or content_value is None:
+                message["content"] = content_value
+    tool_calls: list[dict[str, Any]] = []
+    _extend_responses_message_tool_calls(tool_calls, raw, provider_shape_prefix=provider_shape_prefix)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    function_response = raw.get("functionResponse") or raw.get("function_response")
+    if isinstance(function_response, dict):
+        _append_message_content_block(
+            message,
+            {"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""},
+        )
+    return message if message else {}
 
 
 def _message_content_text(content: Any) -> str:
@@ -1244,6 +1301,8 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root message content parts {native_kind}"
     if provider_shape == "content.parts":
         return f"native provider content parts {native_kind}"
+    if provider_shape.startswith("choice."):
+        return f"native provider {provider_shape.replace('.', ' ')} {native_kind}"
     return f"native content-block {native_kind}"
 
 
@@ -1328,6 +1387,8 @@ def _parse_native_content_function_call_block(
         label = "native provider root message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
+    elif provider_shape.startswith("choice."):
+        label = f"native provider {provider_shape.replace('.', ' ')} functionCall"
     else:
         label = "native content-block functionCall"
     arguments = _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params"))
@@ -1463,6 +1524,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("choice."):
+            label = "native provider " + provider_shape.replace(".", " ")
         else:
             label = None
         return _parse_native_function_call(
@@ -1566,6 +1629,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider singular tool_call"
         elif provider_shape in {"camelCase.toolCalls", "singular.toolCall"}:
             label = "native provider camelCase toolCall"
+        elif provider_shape.startswith("choice."):
+            label = "native provider " + provider_shape.replace(".", " ")
         else:
             label = "native provider flat tool_call"
         return _parse_native_function_call(
