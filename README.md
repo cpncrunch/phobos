@@ -599,7 +599,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 96 tests
+Ran 97 tests
 OK
 ```
 
@@ -774,6 +774,8 @@ db_exists=True
 artifact_count=605
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
+
+`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including single/top-level content-block calls, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider call-ID provenance, result-echo suppression, runtime policy, ROE preview, approval stops, and ledger claim semantics.
 
 Live local integration smoke is available as `scripts/smoke_live_integrations.py`. It verifies scanner binary resolution and real wrapper execution against only a temporary `127.0.0.1` HTTP server; it uses a generated one-request Nuclei template and never sends chat messages. Current local run with scanner execution required produced:
 
