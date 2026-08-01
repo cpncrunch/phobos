@@ -336,6 +336,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
         first = choices[0]
         if isinstance(first, dict) and isinstance(first.get("message"), dict):
             return first["message"]
+    root_message = _root_message_to_message(raw)
+    if root_message:
+        return root_message
     candidate_message = _candidate_content_to_message(raw)
     if candidate_message:
         return candidate_message
@@ -437,6 +440,49 @@ def _native_content_parts(content: Any) -> list[Any] | None:
     if isinstance(parts, list):
         return parts
     return None
+
+
+def _root_message_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize root-level provider ``message`` wrappers into chat shape.
+
+    Some local or OpenAI-compatible shims return ``{"message": {...}}`` at the
+    response root instead of Chat-Completions ``choices[0].message`` or Responses
+    ``output[]`` wrappers.  Treat only the recognizable assistant message fields
+    as native planner proposals; Phobos still validates tool names/schemas,
+    runtime policy, ROE, approvals, execution intent, and transcript redaction
+    before any registry handler can dispatch.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    root_message = raw.get("message")
+    if not isinstance(root_message, dict):
+        return {}
+    message: dict[str, Any] = {}
+    if "content" in root_message:
+        content_blocks: list[dict[str, Any]] = []
+        _extend_responses_content_blocks(
+            content_blocks,
+            root_message.get("content"),
+            provider_shape="root.message.content",
+        )
+        if content_blocks:
+            message["content"] = content_blocks
+        else:
+            content_value = root_message.get("content")
+            if isinstance(content_value, (str, list, dict)) or content_value is None:
+                message["content"] = content_value
+    tool_calls: list[dict[str, Any]] = []
+    _extend_responses_message_tool_calls(tool_calls, root_message, provider_shape_prefix="root.message")
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    function_response = root_message.get("functionResponse") or root_message.get("function_response")
+    if isinstance(function_response, dict):
+        _append_message_content_block(
+            message,
+            {"type": "tool_result", "content": function_response.get("response") or function_response.get("content") or ""},
+        )
+    return message if message else {}
 
 
 def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1094,6 +1140,10 @@ def _parse_native_content_tool_block(
         label = f"native provider responses output message content {block_type}"
     elif provider_shape == "responses.output.message.content.parts":
         label = f"native provider responses output message content parts {block_type}"
+    elif provider_shape == "root.message.content":
+        label = f"native provider root message content {block_type}"
+    elif provider_shape == "root.message.content.parts":
+        label = f"native provider root message content parts {block_type}"
     elif provider_shape == "content.parts":
         label = f"native provider content parts {block_type}"
     else:
@@ -1144,6 +1194,10 @@ def _parse_native_content_function_call_block(
         label = "native provider responses output message content functionCall"
     elif provider_shape == "responses.output.message.content.parts":
         label = "native provider responses output message content parts functionCall"
+    elif provider_shape == "root.message.content":
+        label = "native provider root message content functionCall"
+    elif provider_shape == "root.message.content.parts":
+        label = "native provider root message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
     else:
@@ -1239,6 +1293,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider message functionCall"
         elif provider_shape == "message.function_calls":
             label = "native provider message function_calls"
+        elif provider_shape.startswith("root.message."):
+            label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         else:
             label = None
         return _parse_native_function_call(
@@ -1326,6 +1382,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider message functionCall"
         elif item.get("_provider_shape") == "message.function_calls":
             label = "native provider message function_calls"
+        elif provider_shape.startswith("root.message."):
+            label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":
             label = "native provider single top-level tool_call"
         elif provider_shape == "singular.tool_call":
