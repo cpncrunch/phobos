@@ -75,6 +75,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "content_block_function_call_alias_translation": True,
     "content_parts_function_call_translation": True,
     "provider_argument_alias_translation": True,
+    "provider_tool_name_alias_translation": True,
     "schema_validation_before_dispatch": True,
     "runtime_policy_boundary": True,
     "guardrail_preview_before_target_activity": True,
@@ -1440,6 +1441,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
                 "legacy_function_call",
             ],
             "provider_tool_call_id_aliases": ["id", "call_id", "tool_call_id", "tool_use_id", "callId", "toolCallId", "toolUseId"],
+            "provider_tool_name_aliases": ["name", "tool", "tool_name", "toolName", "function_name", "functionName"],
             "provider_argument_aliases": [
                 "arguments_json",
                 "argumentsJson",

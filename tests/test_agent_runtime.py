@@ -3192,7 +3192,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {
                                             "type": "tool_use",
                                             "tool_use_id": "alias_content_tasks",
-                                            "name": "list_tasks",
+                                            "toolName": "list_tasks",
                                             "inputJson": {"status": "all", "limit": "1"},
                                         },
                                     ],
@@ -3201,7 +3201,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                             "id": "alias_memory",
                                             "type": "function",
                                             "function": {
-                                                "name": "remember",
+                                                "functionName": "remember",
                                                 "arguments_json": {"key": "native-argument-alias", "value": "argument alias native tool call accepted"},
                                             },
                                         }
@@ -3249,6 +3249,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(status.get("milestone_contract", {}).get("provider_argument_alias_translation"), status)
                 self.assertIn("arguments_json", status.get("provider_argument_aliases", []))
                 self.assertIn("inputJson", status.get("provider_argument_aliases", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_tool_name_alias_translation"), status)
+                self.assertIn("toolName", status.get("provider_tool_name_aliases", []))
+                self.assertIn("functionName", status.get("provider_tool_name_aliases", []))
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 self.assertNotIn("alias-secret", applied + recall + json.dumps(status))

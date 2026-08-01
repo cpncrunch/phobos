@@ -2017,6 +2017,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("content_block_function_call_alias_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
+            and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
@@ -2089,6 +2090,8 @@ def main(argv: list[str] | None = None) -> int:
             and "toolUseId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
             and "inputJson" in native_status_data.get("provider_argument_aliases", [])
+            and "toolName" in native_status_data.get("provider_tool_name_aliases", [])
+            and "functionName" in native_status_data.get("provider_tool_name_aliases", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
@@ -3838,7 +3841,7 @@ def main(argv: list[str] | None = None) -> int:
                                     {
                                         "type": "tool_use",
                                         "tool_use_id": "alias_content_tasks",
-                                        "name": "list_tasks",
+                                        "toolName": "list_tasks",
                                         "inputJson": {"status": "all", "limit": "1"},
                                     },
                                 ],
@@ -3847,7 +3850,7 @@ def main(argv: list[str] | None = None) -> int:
                                         "id": "alias_memory",
                                         "type": "function",
                                         "function": {
-                                            "name": "remember",
+                                            "functionName": "remember",
                                             "arguments_json": {"key": "native-argument-alias-smoke", "value": "argument alias native tool call translated"},
                                         },
                                     }
@@ -3908,6 +3911,15 @@ def main(argv: list[str] | None = None) -> int:
             and native_argument_alias_captured.get("tool_choice") == "auto"
             and native_argument_alias_captured.get("tool_count", 0) > 0
             and "native-argument-alias-secret" not in native_argument_alias_plan + native_argument_alias_apply + native_argument_alias_recall + json.dumps(native_argument_alias_plan_payload) + json.dumps(native_argument_alias_apply_payload)
+        )
+        checks["native_provider_tool_name_aliases_ok"] = (
+            checks["native_provider_argument_aliases_ok"]
+            and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
+            and "toolName" in native_status_data.get("provider_tool_name_aliases", [])
+            and "functionName" in native_status_data.get("provider_tool_name_aliases", [])
+            and "function_name" in native_status_data.get("provider_tool_name_aliases", [])
+            and [call.get("tool") for call in native_argument_alias_calls] == ["remember", "list_tasks"]
+            and [item.get("result", {}).get("status") for item in native_argument_alias_apply_payload.get("results", [])] == ["ok", "ok"]
         )
 
         native_single_content_captured = {}
@@ -6348,6 +6360,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_content_block_function_call_alias_ok",
             "native_provider_content_parts_function_call_ok",
             "native_provider_argument_aliases_ok",
+            "native_provider_tool_name_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",

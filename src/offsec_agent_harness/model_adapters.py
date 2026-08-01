@@ -421,6 +421,25 @@ def _native_argument_value(
     return first_present if has_present else {}
 
 
+def _native_tool_name(mapping: dict[str, Any]) -> str:
+    """Return a provider-native tool/function name from common aliases.
+
+    Most providers use ``name`` for function calls, but some local shims and
+    Gemini/OpenAI bridges preserve JS-ish aliases such as ``toolName`` or
+    ``functionName``.  Normalize the label at the adapter boundary only; the
+    runtime still validates that the resulting name is a registered tool before
+    any dispatch, approval queueing, or ROE side effects can occur.
+    """
+
+    if not isinstance(mapping, dict):
+        return ""
+    for key in ("name", "tool", "tool_name", "toolName", "function_name", "functionName"):
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def _native_content_parts(content: Any) -> list[Any] | None:
     """Return Gemini-style content parts from a message/content object.
 
@@ -530,7 +549,7 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             call_id = _native_call_id(function_call)
             tool_calls.append({
                 "type": "tool_call",
-                "name": function_call.get("name") or function_call.get("tool"),
+                "name": _native_tool_name(function_call),
                 "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
                 "call_id": str(call_id),
                 "_provider_shape": "gemini.candidate",
@@ -609,7 +628,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             call_id = _native_call_id(item)
             tool_calls.append({
                 "type": block_type,
-                "name": item.get("name") or item.get("tool"),
+                "name": _native_tool_name(item),
                 "call_id": str(call_id),
                 "_provider_shape": provider_shape,
             })
@@ -636,13 +655,13 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 # provider result/input blobs outside the validated plan path.
                 tool_calls.append({
                     "type": "tool_call",
-                    "name": function_call.get("name") or function_call.get("tool"),
+                    "name": _native_tool_name(function_call),
                     "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
                     "call_id": str(_native_call_id(item, function_call)),
                     "_provider_shape": f"{provider_shape}.functionCall",
                 })
                 continue
-            name = item.get("name") or item.get("tool")
+            name = _native_tool_name(item)
             arguments = _native_argument_value(item, preferred=("arguments", "input", "args", "parameters", "params"))
             call_id = _native_call_id(item)
             tool_calls.append({
@@ -784,7 +803,7 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
     if isinstance(function_call, dict):
         tool_calls.append({
             "type": "tool_call",
-            "name": function_call.get("name") or function_call.get("tool"),
+            "name": _native_tool_name(function_call),
             "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
             "call_id": str(_native_call_id(item, function_call)),
             "_provider_shape": f"{provider_shape_prefix}.functionCall",
@@ -848,7 +867,7 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
             message,
             {
                 "type": "tool_call",
-                "name": root_function_call.get("name") or root_function_call.get("tool"),
+                "name": _native_tool_name(root_function_call),
                 "arguments": _native_argument_value(root_function_call, preferred=("args", "arguments", "parameters", "input", "params")),
                 "call_id": str(_native_call_id(root_function_call)),
                 "_provider_shape": "root.functionCall",
@@ -935,7 +954,7 @@ def _native_function_call_batch_items(provider_shape: str, raw_function_calls: A
         if isinstance(function_call, dict):
             calls.append({
                 "type": "tool_call",
-                "name": function_call.get("name") or function_call.get("tool"),
+                "name": _native_tool_name(function_call),
                 "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
                 "call_id": str(_native_call_id(item, function_call)),
                 "_provider_shape": provider_shape,
@@ -943,7 +962,7 @@ def _native_function_call_batch_items(provider_shape: str, raw_function_calls: A
             continue
         calls.append({
             "type": "tool_call",
-            "name": item.get("name") or item.get("tool"),
+            "name": _native_tool_name(item),
             "arguments": _native_argument_value(item, preferred=("args", "arguments", "parameters", "input", "params")),
             "call_id": str(_native_call_id(item)),
             "_provider_shape": provider_shape,
@@ -987,7 +1006,7 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
     if isinstance(message_function_call, dict):
         raw_call_items.append({
             "type": "tool_call",
-            "name": message_function_call.get("name") or message_function_call.get("tool"),
+            "name": _native_tool_name(message_function_call),
             "arguments": _native_argument_value(message_function_call, preferred=("args", "arguments", "parameters", "input", "params")),
             "call_id": str(_native_call_id(message_function_call)),
             "_provider_shape": "message.functionCall",
@@ -1158,7 +1177,7 @@ def _parse_native_content_tool_block(
         )
     arguments = _native_argument_value(item, preferred=("input", "arguments", "args", "parameters", "params"))
     return _parse_native_function_call(
-        {"name": item.get("name"), "arguments": arguments},
+        {"name": _native_tool_name(item), "arguments": arguments},
         index=index,
         legacy=False,
         call_id=call_id,
@@ -1204,7 +1223,7 @@ def _parse_native_content_function_call_block(
         label = "native content-block functionCall"
     arguments = _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params"))
     return _parse_native_function_call(
-        {"name": function_call.get("name") or function_call.get("tool"), "arguments": arguments},
+        {"name": _native_tool_name(function_call), "arguments": arguments},
         index=index,
         legacy=False,
         call_id=_native_call_id(item, function_call),
@@ -1307,7 +1326,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     # Several OpenAI-compatible shims flatten top-level tool calls instead of
     # nesting them under {"function": {"name", "arguments"}}.  Treat these as
     # planner proposals only; runtime schema/ROE validation remains authoritative.
-    name = item.get("name") or item.get("tool")
+    name = _native_tool_name(item)
     if isinstance(function, str) and not name:
         name = function
     if name:
@@ -1454,7 +1473,7 @@ def _reject_unsupported_native_tool_call(
     the model/provider to use a registered function call instead.
     """
 
-    raw_tool_name = str(item.get("name") or item.get("tool") or "").strip()
+    raw_tool_name = str(_native_tool_name(item) or "").strip()
     tool_name = redact_secrets(raw_tool_name[:200]) or None
     call_id = _native_call_id(item).strip()
     args: dict[str, Any] = {"native_type": str(native_type or "custom_tool_call"), "native_tool_call_index": index}
@@ -1473,7 +1492,7 @@ def _parse_native_function_call(
     call_id: str = "",
     label: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
-    name = str(function.get("name") or "").strip()
+    name = str(_native_tool_name(function) or "").strip()
     if not name:
         return None, {"tool": None, "reason": "Native function call missing tool name.", "args": {}}, "Native function call missing a name; skipped."
     args, error = _parse_native_arguments(_native_argument_value(function))
