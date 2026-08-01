@@ -5382,6 +5382,37 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("schema_version", status.stdout)
 
+            auto_plan = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "auto", "--engagement", str(engagement), "--prompt", "remember cli-native-plan: CLI native plan token=cli-auto-secret",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(auto_plan.returncode, 0, auto_plan.stderr)
+            self.assertIn("Auto plan (no tools executed)", auto_plan.stdout)
+            auto_plan_payload = json.loads(auto_plan.stdout.split("\n", 1)[1])
+            self.assertEqual(auto_plan_payload["mode"], "plan_only")
+            self.assertTrue(auto_plan_payload["no_tools_executed"])
+            self.assertEqual(auto_plan_payload["execution_ledger"], [])
+            self.assertNotIn("cli-auto-secret", auto_plan.stdout)
+
+            auto_apply = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "auto", "--engagement", str(engagement), "--apply", "--prompt", "remember cli-native-apply: CLI native apply token=cli-apply-secret",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(auto_apply.returncode, 0, auto_apply.stderr)
+            auto_apply_payload = json.loads(auto_apply.stdout.split("\n", 1)[1])
+            self.assertEqual(auto_apply_payload["mode"], "applied")
+            self.assertEqual(auto_apply_payload["results"][0]["result"]["status"], "ok")
+            self.assertEqual(auto_apply_payload["execution_ledger"][0]["execution_state"], "completed_without_command_execution")
+            self.assertNotIn("cli-apply-secret", auto_apply.stdout)
+
+            auto_loop = subprocess.run([
+                sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "auto-loop", "--engagement", str(engagement), "--steps", "2", "--prompt", "remember cli-native-loop: CLI native loop token=cli-loop-secret",
+            ], cwd=project, env=env, text=True, capture_output=True)
+            self.assertEqual(auto_loop.returncode, 0, auto_loop.stderr)
+            auto_loop_payload = json.loads(auto_loop.stdout.split("\n", 1)[1])
+            self.assertEqual(auto_loop_payload["stop_reason"], "deterministic_plan_applied")
+            self.assertEqual(auto_loop_payload["steps_executed"], 1)
+            self.assertFalse(any(item.get("actual_command_or_process_activity") for item in auto_loop_payload.get("execution_ledger", [])))
+            self.assertNotIn("cli-loop-secret", auto_loop.stdout)
+
             evidence_manifest = subprocess.run([
                 sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(tmp_path / "agent.db"), "evidence-manifest", "--engagement", str(engagement), "--out", "cli-manifest.json",
             ], cwd=project, env=env, text=True, capture_output=True)

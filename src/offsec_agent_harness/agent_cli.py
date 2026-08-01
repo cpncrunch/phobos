@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
@@ -148,6 +149,22 @@ def build_parser() -> argparse.ArgumentParser:
     once = sub.add_parser("once", help="Handle a single message")
     once.add_argument("--engagement", required=True)
     once.add_argument("--message", required=True)
+
+    auto = sub.add_parser("auto", help="Plan/apply one guarded native tool-call request from a natural-language prompt")
+    auto.add_argument("--engagement", required=True)
+    auto.add_argument("--prompt", required=True, help="Natural-language operator request to plan through /auto")
+    auto.add_argument("--apply", action="store_true", help="Apply the validated plan through the guarded registry boundary; default is plan-only")
+    auto.add_argument("--execute", action="store_true", help="Allow ROE-approved command/process execution for execution-capable planned tools")
+    auto.add_argument("--model", dest="model", action="store_true", default=None, help="Ask the configured model adapter for structured tool calls")
+    auto.add_argument("--no-model", dest="model", action="store_false", help="Force deterministic local planning even if config enables model planning")
+
+    auto_loop = sub.add_parser("auto-loop", help="Run a bounded guarded native tool-call feedback loop")
+    auto_loop.add_argument("--engagement", required=True)
+    auto_loop.add_argument("--prompt", required=True, help="Natural-language operator goal to plan through /auto-loop")
+    auto_loop.add_argument("--steps", type=int, help="Maximum loop steps; bounded by runtime safety limits")
+    auto_loop.add_argument("--execute", action="store_true", help="Allow ROE-approved command/process execution for execution-capable planned tools")
+    auto_loop.add_argument("--model", dest="model", action="store_true", default=None, help="Ask the configured model adapter for structured tool calls")
+    auto_loop.add_argument("--no-model", dest="model", action="store_false", help="Force deterministic local planning even if config enables model planning")
 
     chat = sub.add_parser("chat", help="Interactive local chat loop")
     chat.add_argument("--engagement", required=True)
@@ -368,6 +385,26 @@ def _config(args: argparse.Namespace) -> AgentRuntimeConfig:
     return cfg
 
 
+def _auto_cli_message(args: argparse.Namespace) -> str:
+    parts = ["/auto", f"prompt={shlex.quote(str(args.prompt))}", f"apply={_bool_word(bool(args.apply))}", f"execute={_bool_word(bool(args.execute))}"]
+    if args.model is not None:
+        parts.append(f"model={_bool_word(bool(args.model))}")
+    return " ".join(parts)
+
+
+def _auto_loop_cli_message(args: argparse.Namespace) -> str:
+    parts = ["/auto-loop", f"prompt={shlex.quote(str(args.prompt))}", f"execute={_bool_word(bool(args.execute))}"]
+    if args.steps is not None:
+        parts.append(f"steps={int(args.steps)}")
+    if args.model is not None:
+        parts.append(f"model={_bool_word(bool(args.model))}")
+    return " ".join(parts)
+
+
+def _bool_word(value: bool) -> str:
+    return "true" if value else "false"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.subcommand == "config-init":
@@ -424,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.subcommand == "once":
             print(runtime.handle_message(args.message))
+            return 0
+        if args.subcommand == "auto":
+            print(runtime.handle_message(_auto_cli_message(args)))
+            return 0
+        if args.subcommand == "auto-loop":
+            print(runtime.handle_message(_auto_loop_cli_message(args)))
             return 0
         if args.subcommand == "chat":
             runtime.chat_loop()

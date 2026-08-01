@@ -723,6 +723,42 @@ def main(argv: list[str] | None = None) -> int:
     init_json = json.loads(init_stdout)
     checks["agent_init_ok"] = bool(init_json.get("session_id")) and init_json["runtime"]["skill_dirs"] == [str(skill_root)]
 
+    native_cli_db = data / "native-tool-cli-entrypoints.db"
+    run_cmd(
+        "native-tool-cli-init",
+        [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(native_cli_db), "--config", str(config_path), "init", "--engagement", str(engagement_path)],
+    )
+    native_cli_plan = run_cmd(
+        "native-tool-cli-auto-plan",
+        [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(native_cli_db), "--config", str(config_path), "auto", "--engagement", str(engagement_path), "--prompt", "remember native-cli-plan: CLI native plan token=native-cli-plan-secret"],
+    )
+    native_cli_apply = run_cmd(
+        "native-tool-cli-auto-apply",
+        [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(native_cli_db), "--config", str(config_path), "auto", "--engagement", str(engagement_path), "--apply", "--prompt", "remember native-cli-apply: CLI native apply token=native-cli-apply-secret"],
+    )
+    native_cli_loop = run_cmd(
+        "native-tool-cli-auto-loop",
+        [sys.executable, "-m", "phobos_agent.agent_cli", "--db", str(native_cli_db), "--config", str(config_path), "auto-loop", "--engagement", str(engagement_path), "--steps", "2", "--prompt", "remember native-cli-loop: CLI native loop token=native-cli-loop-secret"],
+    )
+    native_cli_plan_payload = json.loads(native_cli_plan.split("\n", 1)[1])
+    native_cli_apply_payload = json.loads(native_cli_apply.split("\n", 1)[1])
+    native_cli_loop_payload = json.loads(native_cli_loop.split("\n", 1)[1])
+    native_cli_loop_ledger = native_cli_loop_payload.get("execution_ledger", []) if isinstance(native_cli_loop_payload.get("execution_ledger"), list) else []
+    checks["native_tool_call_cli_entrypoints_ok"] = (
+        native_cli_plan_payload.get("mode") == "plan_only"
+        and native_cli_plan_payload.get("no_tools_executed") is True
+        and native_cli_plan_payload.get("execution_ledger") == []
+        and native_cli_apply_payload.get("mode") == "applied"
+        and native_cli_apply_payload.get("results", [{}])[0].get("result", {}).get("status") == "ok"
+        and native_cli_apply_payload.get("execution_ledger", [{}])[0].get("execution_state") == "completed_without_command_execution"
+        and native_cli_loop_payload.get("stop_reason") == "deterministic_plan_applied"
+        and native_cli_loop_payload.get("steps_executed") == 1
+        and all(item.get("actual_command_or_process_activity") is False for item in native_cli_loop_ledger)
+        and "native-cli-plan-secret" not in native_cli_plan
+        and "native-cli-apply-secret" not in native_cli_apply
+        and "native-cli-loop-secret" not in native_cli_loop
+    )
+
     runtime = PhobosAgentRuntime(AgentAppConfig.load(config_path).to_runtime_config(str(engagement_path), str(db_path), "smoke", config_path=str(config_path)))
     gateway = None
     try:
@@ -3256,6 +3292,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_execution_ledger_ok",
             "native_tool_call_execution_summary_ok",
             "native_tool_call_gateway_chat_ok",
+            "native_tool_call_cli_entrypoints_ok",
         ]
         checks["native_tool_call_milestone_contract_ok"] = (
             all(checks.get(name) is True for name in native_milestone_required_checks)
