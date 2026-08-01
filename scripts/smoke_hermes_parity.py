@@ -1992,6 +1992,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
+            and native_status_milestone_contract.get("root_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
@@ -2026,6 +2027,7 @@ def main(argv: list[str] | None = None) -> int:
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
@@ -2469,6 +2471,86 @@ def main(argv: list[str] | None = None) -> int:
             and native_singular_captured.get("tool_choice") == "auto"
             and native_singular_captured.get("tool_count", 0) > 0
             and "native-singular-secret" not in native_singular_plan + native_singular_apply + native_singular_recall + json.dumps(native_singular_plan_payload) + json.dumps(native_singular_apply_payload)
+        )
+
+        native_root_function_captured = {}
+        native_root_result_marker = "ROOT_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootFunctionCallSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "content": "native root functionCall smoke token=native-root-function-secret",
+                    "functionCall": {
+                        "tool_use_id": "root_function_memory",
+                        "name": "remember",
+                        "args": {"key": "native-root-function-call-smoke", "value": "root functionCall native tool call translated"},
+                    },
+                    "functionResponse": {
+                        "name": "remember",
+                        "response": {"content": native_root_result_marker + " token=native-root-function-secret"},
+                    },
+                }).encode("utf-8")
+
+        def fake_native_root_function_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_function_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_function_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootFunctionCallSmokeResponse()
+
+        native_root_function_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-function-call.db"),
+                session_name="native-provider-root-function-call-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-function-call-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_function_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_function_urlopen
+            native_root_function_plan = native_root_function_runtime.handle_message('/auto model=true prompt="native root functionCall smoke token=native-root-function-secret"')
+            native_root_function_plan_payload = json.loads(native_root_function_plan.split("\n", 1)[1])
+            native_root_function_apply = native_root_function_runtime.handle_message('/auto apply=true model=true prompt="native root functionCall smoke token=native-root-function-secret"')
+            native_root_function_apply_payload = json.loads(native_root_function_apply.split("\n", 1)[1])
+            native_root_function_recall = native_root_function_runtime.handle_message('/recall query=native-root-function-call-smoke')
+            write("native-provider-root-function-call.json", json.dumps({
+                "plan": native_root_function_plan_payload,
+                "apply": native_root_function_apply_payload,
+                "captured": native_root_function_captured,
+                "recall": native_root_function_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_function_original_urlopen
+            native_root_function_runtime.close()
+        native_root_function_calls = native_root_function_plan_payload.get("tool_calls", []) if isinstance(native_root_function_plan_payload.get("tool_calls"), list) else []
+        native_root_function_metadata = native_root_function_plan_payload.get("metadata", {}) if isinstance(native_root_function_plan_payload.get("metadata"), dict) else {}
+        native_root_function_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_function_calls]
+        native_root_function_ledger = native_root_function_apply_payload.get("execution_ledger", []) if isinstance(native_root_function_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_root_function_call_ok"] = (
+            native_root_function_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_function_calls] == ["remember"]
+            and "native provider root functionCall" in native_root_function_calls[0].get("reason", "")
+            and native_root_function_metadata.get("native_tool_calls") is True
+            and native_root_function_metadata.get("native_tool_call_count") == 1
+            and [item.get("provider_tool_call_id") for item in native_root_function_call_metadata] == ["root_function_memory"]
+            and native_root_function_call_metadata[0].get("native_tool_call_source") == "native provider root functionCall"
+            and [item.get("result", {}).get("status") for item in native_root_function_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("provider_tool_call_id") for item in native_root_function_ledger] == ["root_function_memory"]
+            and native_root_function_ledger[0].get("native_tool_call_source") == "native provider root functionCall"
+            and native_status_milestone_contract.get("root_function_call_translation") is True
+            and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root functionCall native tool call translated" in native_root_function_recall
+            and native_root_function_captured.get("tool_choice") == "auto"
+            and native_root_function_captured.get("tool_count", 0) > 0
+            and native_root_result_marker not in native_root_function_plan + native_root_function_apply + native_root_function_recall + json.dumps(native_root_function_plan_payload) + json.dumps(native_root_function_apply_payload)
+            and "native-root-function-secret" not in native_root_function_plan + native_root_function_apply + native_root_function_recall + json.dumps(native_root_function_plan_payload) + json.dumps(native_root_function_apply_payload)
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
@@ -4268,6 +4350,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_flat_tool_call_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
+            "native_provider_root_function_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_tool_call_transcript_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
