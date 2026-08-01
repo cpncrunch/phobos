@@ -2258,6 +2258,10 @@ def main(argv: list[str] | None = None) -> int:
             and "server_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "mcp_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "computer_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "file_search_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "image_generation_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "local_shell_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "mcp_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -6772,6 +6776,30 @@ def main(argv: list[str] | None = None) -> int:
                                         "input": {"query": native_hosted_marker + " nested token=native-hosted-secret"},
                                     },
                                     {
+                                        "type": "file_search_call",
+                                        "id": "hosted_file_search_tool",
+                                        "name": "file_search",
+                                        "queries": [native_hosted_marker + " file token=native-hosted-secret"],
+                                    },
+                                    {
+                                        "type": "image_generation_call",
+                                        "id": "hosted_image_generation_tool",
+                                        "name": "image_generation",
+                                        "prompt": native_hosted_marker + " image token=native-hosted-secret",
+                                    },
+                                    {
+                                        "type": "local_shell_call",
+                                        "id": "hosted_local_shell_tool",
+                                        "name": "local_shell",
+                                        "input": {"command": "printf " + native_hosted_marker + " token=native-hosted-secret"},
+                                    },
+                                    {
+                                        "type": "mcp_call",
+                                        "id": "hosted_mcp_call_tool",
+                                        "name": "remote_mcp_tool",
+                                        "arguments": {"query": native_hosted_marker + " mcp token=native-hosted-secret"},
+                                    },
+                                    {
                                         "type": "tool_use",
                                         "tool_call_id": "hosted_valid_memory",
                                         "name": "remember",
@@ -6826,8 +6854,12 @@ def main(argv: list[str] | None = None) -> int:
             and "provider-hosted tools must be exposed" in native_hosted_rejected
             and "server_tool_use" in native_hosted_rejected
             and "mcp_tool_use" in native_hosted_rejected
+            and "file_search_call" in native_hosted_rejected
+            and "image_generation_call" in native_hosted_rejected
+            and "local_shell_call" in native_hosted_rejected
+            and "mcp_call" in native_hosted_rejected
             and "custom/freeform/hosted" in native_hosted_warnings.lower()
-            and int(native_hosted_metadata.get("rejected_native_tool_call_count", 0) or 0) == 2
+            and int(native_hosted_metadata.get("rejected_native_tool_call_count", 0) or 0) == 6
             and [item.get("result", {}).get("status") for item in native_hosted_apply_payload.get("results", [])] == ["ok"]
             and "hosted provider tools rejected while registered calls still apply" in native_hosted_recall
             and native_hosted_captured.get("tool_choice") == "auto"
@@ -6835,6 +6867,10 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("provider_hosted_tool_calls_rejected") is True
             and "server_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "mcp_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "file_search_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "image_generation_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "local_shell_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "mcp_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and native_hosted_marker not in native_hosted_plan + native_hosted_apply + native_hosted_recall + json.dumps(native_hosted_plan_payload) + json.dumps(native_hosted_apply_payload)
             and "native-hosted-secret" not in native_hosted_plan + native_hosted_apply + native_hosted_recall + json.dumps(native_hosted_plan_payload) + json.dumps(native_hosted_apply_payload)
         )

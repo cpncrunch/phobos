@@ -2149,9 +2149,15 @@ _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {
     "custom_tool_call",
     "computer_call",
     "web_search_call",
+    "file_search_call",
     "code_interpreter_call",
+    "image_generation_call",
+    "local_shell_call",
     "server_tool_use",
     "mcp_tool_use",
+    "mcp_call",
+    "mcp_list_tools",
+    "mcp_approval_request",
 }
 
 

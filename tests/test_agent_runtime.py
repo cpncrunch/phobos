@@ -3132,6 +3132,7 @@ class AgentRuntimeTests(unittest.TestCase):
             captured_requests = []
             dry_run_marker = tmp_path / "native-openai-responses-should-not-execute.txt"
             result_marker = "RESPONSES_ENDPOINT_RESULT_SHOULD_NOT_SURFACE"
+            hosted_marker = "RESPONSES_HOSTED_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
             class FakeResponsesHTTPResponse:
                 def __enter__(self):
@@ -3160,6 +3161,18 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "command": f"printf native-openai-responses > {dry_run_marker}",
                                     "execute": True,
                                 }),
+                            },
+                            {
+                                "type": "file_search_call",
+                                "id": "responses_endpoint_file_search",
+                                "name": "file_search",
+                                "queries": [hosted_marker + " token=responses-hosted-secret"],
+                            },
+                            {
+                                "type": "mcp_call",
+                                "id": "responses_endpoint_mcp",
+                                "name": "remote_mcp_tool",
+                                "arguments": {"query": hosted_marker + " nested token=responses-hosted-secret"},
                             },
                             {"type": "function_call_output", "call_id": "responses_endpoint_result", "output": result_marker + " token=responses-endpoint-secret"},
                         ],
@@ -3193,6 +3206,12 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual(metadata.get("provider"), "openai-responses")
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertEqual(metadata.get("rejected_native_tool_call_count"), 2)
+                    rejected_blob = json.dumps(plan_payload.get("rejected_tool_calls", []))
+                    self.assertIn("file_search_call", rejected_blob)
+                    self.assertIn("mcp_call", rejected_blob)
+                    self.assertIn("provider-hosted tools must be exposed", rejected_blob)
+                    self.assertNotIn(hosted_marker, planned + rejected_blob + json.dumps(plan_payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native Responses endpoint token=responses-endpoint-secret"')
                     apply_payload = json.loads(applied.split("\n", 1)[1])
@@ -3218,9 +3237,13 @@ class AgentRuntimeTests(unittest.TestCase):
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertTrue(status.get("milestone_contract", {}).get("responses_api_endpoint_planning"), status)
                 self.assertIn("openai_responses_api", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("file_search_call", status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("mcp_call", status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertFalse(dry_run_marker.exists())
                 self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn(hosted_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("responses-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("responses-hosted-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
             finally:
                 runtime.close()
 
@@ -3597,6 +3620,30 @@ class AgentRuntimeTests(unittest.TestCase):
                                             "input": {"query": hosted_input_marker + " nested token=hosted-secret"},
                                         },
                                         {
+                                            "type": "file_search_call",
+                                            "id": "hosted_file_search",
+                                            "name": "file_search",
+                                            "queries": [hosted_input_marker + " file token=hosted-secret"],
+                                        },
+                                        {
+                                            "type": "image_generation_call",
+                                            "id": "hosted_image_generation",
+                                            "name": "image_generation",
+                                            "prompt": hosted_input_marker + " image token=hosted-secret",
+                                        },
+                                        {
+                                            "type": "local_shell_call",
+                                            "id": "hosted_local_shell",
+                                            "name": "local_shell",
+                                            "input": {"command": "printf " + hosted_input_marker + " token=hosted-secret"},
+                                        },
+                                        {
+                                            "type": "mcp_call",
+                                            "id": "hosted_mcp_call",
+                                            "name": "remote_mcp_tool",
+                                            "arguments": {"query": hosted_input_marker + " mcp token=hosted-secret"},
+                                        },
+                                        {
                                             "type": "tool_use",
                                             "tool_call_id": "hosted_valid_memory",
                                             "name": "remember",
@@ -3631,12 +3678,12 @@ class AgentRuntimeTests(unittest.TestCase):
                     rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
                     warning_blob = json.dumps(payload.get("warnings", []))
                     self.assertIn("provider-hosted tools must be exposed", rejected_blob)
-                    self.assertIn("server_tool_use", rejected_blob)
-                    self.assertIn("mcp_tool_use", rejected_blob)
+                    for native_type in ("server_tool_use", "mcp_tool_use", "file_search_call", "image_generation_call", "local_shell_call", "mcp_call"):
+                        self.assertIn(native_type, rejected_blob)
                     self.assertIn("custom/freeform/hosted", warning_blob)
                     self.assertNotIn(hosted_input_marker, planned + rejected_blob + json.dumps(payload))
                     self.assertNotIn("hosted-secret", planned)
-                    self.assertEqual(payload.get("metadata", {}).get("rejected_native_tool_call_count"), 2)
+                    self.assertEqual(payload.get("metadata", {}).get("rejected_native_tool_call_count"), 6)
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native hosted tool calls token=hosted-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
@@ -3645,8 +3692,8 @@ class AgentRuntimeTests(unittest.TestCase):
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("hosted rejection boundary kept valid registered calls", recall)
                 self.assertTrue(status.get("milestone_contract", {}).get("provider_hosted_tool_calls_rejected"), status)
-                self.assertIn("server_tool_use", status.get("provider_unsupported_tool_call_types_rejected", []))
-                self.assertIn("mcp_tool_use", status.get("provider_unsupported_tool_call_types_rejected", []))
+                for native_type in ("server_tool_use", "mcp_tool_use", "file_search_call", "image_generation_call", "local_shell_call", "mcp_call"):
+                    self.assertIn(native_type, status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 self.assertNotIn("hosted-secret", applied + recall + json.dumps(status))
@@ -9073,6 +9120,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("server_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("mcp_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("computer_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("file_search_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("image_generation_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("local_shell_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("mcp_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("run_command", native_status.get("execution_capable_tools", []))
