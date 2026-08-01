@@ -32,6 +32,7 @@ _ACTUAL_EXECUTION_STATUSES = {"executed", "started", "failed", "timeout"}
 _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "natural_language_model_planning": True,
     "provider_native_tool_call_translation": True,
+    "legacy_function_call_translation": True,
     "responses_output_tool_call_translation": True,
     "schema_validation_before_dispatch": True,
     "runtime_policy_boundary": True,

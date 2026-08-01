@@ -1911,6 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
+            and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
@@ -1936,6 +1937,7 @@ def main(argv: list[str] | None = None) -> int:
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "custom_tool_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
@@ -2257,6 +2259,8 @@ def main(argv: list[str] | None = None) -> int:
             model_adapters.urllib.request.urlopen = native_edge_original_urlopen
             native_edge_runtime.close()
         native_edge_calls = native_edge_plan_payload.get("tool_calls", []) if isinstance(native_edge_plan_payload.get("tool_calls"), list) else []
+        native_edge_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_edge_calls]
+        native_edge_ledger = native_edge_apply_payload.get("execution_ledger", []) if isinstance(native_edge_apply_payload.get("execution_ledger"), list) else []
         native_edge_rejected = json.dumps(native_edge_plan_payload.get("rejected_tool_calls", []))
         native_edge_warnings = json.dumps(native_edge_plan_payload.get("warnings", []))
         native_edge_metadata = native_edge_plan_payload.get("metadata", {}) if isinstance(native_edge_plan_payload.get("metadata"), dict) else {}
@@ -2280,6 +2284,19 @@ def main(argv: list[str] | None = None) -> int:
             and native_edge_captured.get("tool_count", 0) > 0
             and native_provider_custom_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and "native-edge-secret" not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
+        )
+        checks["native_provider_legacy_function_call_ok"] = (
+            native_edge_plan_payload.get("mode") == "plan_only"
+            and len(native_edge_calls) >= 2
+            and native_edge_calls[1].get("tool") == "list_tasks"
+            and "legacy native function_call" in native_edge_calls[1].get("reason", "")
+            and native_edge_call_metadata[1].get("native_tool_call_source") == "legacy native function_call"
+            and native_edge_call_metadata[1].get("native_tool_call_index") == 7
+            and len(native_edge_ledger) >= 2
+            and native_edge_ledger[1].get("native_tool_call_source") == "legacy native function_call"
+            and native_status_milestone_contract.get("legacy_function_call_translation") is True
+            and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "native-edge-secret" not in json.dumps(native_edge_call_metadata) + json.dumps(native_edge_ledger)
         )
 
         native_content_block_captured = {}
@@ -3403,6 +3420,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_flat_tool_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
+            "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_custom_tool_call_reject_ok",
