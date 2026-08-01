@@ -337,6 +337,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
         if isinstance(first, dict):
             if isinstance(first.get("message"), dict):
                 return first["message"]
+            choice_delta_message = _choice_delta_sequence_to_message(choices)
+            if choice_delta_message:
+                return choice_delta_message
             choice_message = _choice_wrapper_to_message(first)
             if choice_message:
                 return choice_message
@@ -376,6 +379,106 @@ def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
     if _responses_output_item_looks_like_message(choice):
         return _provider_message_wrapper_to_message(choice, provider_shape_prefix="choice")
     return {}
+
+
+def _choice_delta_sequence_to_message(choices: list[Any]) -> dict[str, Any]:
+    """Assemble streaming-style ``choices[].delta`` tool-call fragments.
+
+    Some OpenAI-compatible shims return a captured stream as multiple choice
+    delta chunks instead of a single final ``message``.  Tool-call arguments may
+    be split across those chunks, so validate only after assembling same-index or
+    same-id fragments into one provider-native proposal.  This remains a planner
+    translation boundary: no handler dispatch, approval queueing, evidence write,
+    or target activity happens here.
+    """
+
+    content_blocks: list[dict[str, Any]] = []
+    tool_call_chunks: list[Any] = []
+    saw_delta = False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        saw_delta = True
+        chunk_message = _provider_message_wrapper_to_message(delta, provider_shape_prefix="choice.delta")
+        content = chunk_message.get("content")
+        if isinstance(content, list):
+            content_blocks.extend([item for item in content if isinstance(item, dict)])
+        elif isinstance(content, dict):
+            content_blocks.append(content)
+        elif isinstance(content, str) and content:
+            content_blocks.append({"type": "text", "text": content})
+        raw_calls = chunk_message.get("tool_calls")
+        if isinstance(raw_calls, list):
+            tool_call_chunks.extend(raw_calls)
+        elif isinstance(raw_calls, dict):
+            tool_call_chunks.append(raw_calls)
+    if not saw_delta:
+        return {}
+    message: dict[str, Any] = {}
+    if content_blocks:
+        message["content"] = content_blocks
+    merged_tool_calls = _merge_choice_delta_tool_call_chunks(tool_call_chunks)
+    if merged_tool_calls:
+        message["tool_calls"] = merged_tool_calls
+    return message
+
+
+def _merge_choice_delta_tool_call_chunks(chunks: list[Any]) -> list[Any]:
+    merged: list[Any] = []
+    buckets: dict[str, dict[str, Any]] = {}
+    for position, item in enumerate(chunks):
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        key = _choice_delta_tool_call_merge_key(item, fallback_position=position)
+        if not key:
+            merged.append(item)
+            continue
+        if key not in buckets:
+            buckets[key] = {}
+            merged.append(buckets[key])
+        _merge_native_tool_call_fragment(buckets[key], item)
+    return merged
+
+
+def _choice_delta_tool_call_merge_key(item: dict[str, Any], *, fallback_position: int) -> str:
+    for key in ("index", "tool_call_index", "toolCallIndex"):
+        value = item.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        return f"index:{value}"
+    call_id = _native_call_id(
+        item,
+        item.get("function") if isinstance(item.get("function"), dict) else None,
+        item.get("functionCall") if isinstance(item.get("functionCall"), dict) else None,
+        item.get("function_call") if isinstance(item.get("function_call"), dict) else None,
+        item.get("toolUse") if isinstance(item.get("toolUse"), dict) else None,
+        item.get("tool_use") if isinstance(item.get("tool_use"), dict) else None,
+    )
+    if call_id:
+        return f"id:{call_id}"
+    return f"position:{fallback_position}"
+
+
+def _merge_native_tool_call_fragment(destination: dict[str, Any], source: dict[str, Any]) -> None:
+    argument_keys = set(_native_argument_keys(("arguments", "args", "input", "parameters", "params")))
+    nested_keys = {"function", "functionCall", "function_call", "toolUse", "tool_use"}
+    for key, value in source.items():
+        if key in nested_keys and isinstance(value, dict):
+            existing = destination.get(key)
+            if not isinstance(existing, dict):
+                existing = {}
+                destination[key] = existing
+            _merge_native_tool_call_fragment(existing, value)
+            continue
+        if key in argument_keys and isinstance(value, str) and isinstance(destination.get(key), str):
+            destination[key] = str(destination.get(key) or "") + value
+            continue
+        if key not in destination or destination.get(key) in (None, ""):
+            destination[key] = value
 
 
 def _provider_message_wrapper_to_message(raw: dict[str, Any], *, provider_shape_prefix: str) -> dict[str, Any]:
