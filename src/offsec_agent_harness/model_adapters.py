@@ -623,56 +623,8 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw.get("function_calls"), (list, dict)):
         root_function_call_batches.append(("root.function_calls", raw.get("function_calls")))
     for provider_shape, root_function_calls in root_function_call_batches:
-        if isinstance(root_function_calls, dict):
-            root_function_call_items: list[Any] = [root_function_calls]
-        elif isinstance(root_function_calls, list):
-            root_function_call_items = root_function_calls
-        else:
-            root_function_call_items = []
-        for root_item in root_function_call_items:
-            if not isinstance(root_item, dict):
-                continue
-            function = root_item.get("function")
-            if isinstance(function, dict):
-                _append_message_tool_call(
-                    message,
-                    {
-                        "type": "tool_call",
-                        "function": function,
-                        "call_id": str(_native_call_id(root_item, function)),
-                        "_provider_shape": provider_shape,
-                    },
-                )
-                continue
-            function_call = root_item.get("functionCall") or root_item.get("function_call")
-            if isinstance(function_call, dict):
-                # Some Gemini/OpenAI-compatible shims expose root
-                # ``functionCalls``/``function_calls`` arrays whose individual
-                # entries contain Gemini-style ``functionCall`` objects instead
-                # of flat name/args fields or OpenAI-style ``function`` blocks.
-                # Normalize that shape at the adapter boundary; execution still
-                # waits for runtime schema, policy, ROE, and approval checks.
-                _append_message_tool_call(
-                    message,
-                    {
-                        "type": "tool_call",
-                        "name": function_call.get("name") or function_call.get("tool"),
-                        "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
-                        "call_id": str(_native_call_id(root_item, function_call)),
-                        "_provider_shape": provider_shape,
-                    },
-                )
-                continue
-            _append_message_tool_call(
-                message,
-                {
-                    "type": "tool_call",
-                    "name": root_item.get("name") or root_item.get("tool"),
-                    "arguments": _native_argument_value(root_item, preferred=("args", "arguments", "parameters", "input", "params")),
-                    "call_id": str(_native_call_id(root_item)),
-                    "_provider_shape": provider_shape,
-                },
-            )
+        for call in _native_function_call_batch_items(provider_shape, root_function_calls):
+            _append_message_tool_call(message, call)
     root_function_response = raw.get("functionResponse") or raw.get("function_response")
     if isinstance(root_function_response, dict):
         _append_message_content_block(
@@ -711,6 +663,55 @@ def _append_message_content_block(message: dict[str, Any], block: dict[str, Any]
         message["content"] = [{"type": "text", "text": existing}, block]
     else:
         message["content"] = [block]
+
+
+def _native_function_call_batch_items(provider_shape: str, raw_function_calls: Any) -> list[dict[str, Any]]:
+    """Return tool-call objects for provider ``functionCalls`` aliases.
+
+    Gemini/OpenAI-compatible shims can surface plural function calls either at
+    the raw response root or inside ``choices[].message``.  Normalize both
+    placements into the same provider-native tool-call boundary; the runtime
+    still performs schema validation, runtime policy, ROE preview, approval
+    checks, and execution gating before anything can dispatch.
+    """
+
+    if isinstance(raw_function_calls, dict):
+        items: list[Any] = [raw_function_calls]
+    elif isinstance(raw_function_calls, list):
+        items = raw_function_calls
+    else:
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if isinstance(function, dict):
+            calls.append({
+                "type": "tool_call",
+                "function": function,
+                "call_id": str(_native_call_id(item, function)),
+                "_provider_shape": provider_shape,
+            })
+            continue
+        function_call = item.get("functionCall") or item.get("function_call")
+        if isinstance(function_call, dict):
+            calls.append({
+                "type": "tool_call",
+                "name": function_call.get("name") or function_call.get("tool"),
+                "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
+                "call_id": str(_native_call_id(item, function_call)),
+                "_provider_shape": provider_shape,
+            })
+            continue
+        calls.append({
+            "type": "tool_call",
+            "name": item.get("name") or item.get("tool"),
+            "arguments": _native_argument_value(item, preferred=("args", "arguments", "parameters", "input", "params")),
+            "call_id": str(_native_call_id(item)),
+            "_provider_shape": provider_shape,
+        })
+    return calls
 
 
 def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -754,6 +755,10 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
             "call_id": str(_native_call_id(message_function_call)),
             "_provider_shape": "root.functionCall",
         })
+    if isinstance(message.get("functionCalls"), (list, dict)):
+        raw_call_items.extend(_native_function_call_batch_items("message.functionCalls", message.get("functionCalls")))
+    if isinstance(message.get("function_calls"), (list, dict)):
+        raw_call_items.extend(_native_function_call_batch_items("message.function_calls", message.get("function_calls")))
     for index, item in enumerate(raw_call_items, start=1):
         parsed, rejected_item, warning = _parse_native_tool_call(item, index=index)
         if warning:
@@ -902,6 +907,10 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root functionCalls"
         elif provider_shape == "root.function_calls":
             label = "native provider root function_calls"
+        elif provider_shape == "message.functionCalls":
+            label = "native provider message functionCalls"
+        elif provider_shape == "message.function_calls":
+            label = "native provider message function_calls"
         else:
             label = None
         return _parse_native_function_call(
@@ -931,6 +940,10 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root functionCalls"
         elif item.get("_provider_shape") == "root.function_calls":
             label = "native provider root function_calls"
+        elif item.get("_provider_shape") == "message.functionCalls":
+            label = "native provider message functionCalls"
+        elif item.get("_provider_shape") == "message.function_calls":
+            label = "native provider message function_calls"
         elif provider_shape == "single_top_level.tool_calls":
             label = "native provider single top-level tool_call"
         elif provider_shape == "singular.tool_call":

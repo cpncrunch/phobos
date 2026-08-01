@@ -4383,6 +4383,111 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_message_function_calls_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Message Function Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "MESSAGE_FUNCTION_CALLS_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeMessageFunctionCallsHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "message functionCalls token=message-functions-secret",
+                                    "functionCalls": [
+                                        {
+                                            "callId": "message_functions_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-message-function-calls", "value": "message functionCalls accepted"},
+                                        },
+                                        {
+                                            "toolUseId": "message_functions_tasks",
+                                            "function": {
+                                                "name": "list_tasks",
+                                                "arguments": json.dumps({"status": "all", "limit": 1}),
+                                            },
+                                        },
+                                    ],
+                                    "function_calls": {
+                                        "call_id": "message_functions_snake_memory",
+                                        "function_call": {
+                                            "name": "remember",
+                                            "args": {"key": "native-message-function-calls-snake", "value": "message function_calls accepted"},
+                                        },
+                                    },
+                                    "functionResponse": {
+                                        "name": "remember",
+                                        "response": {"content": provider_result_marker + " token=message-functions-secret"},
+                                    },
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeMessageFunctionCallsHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-message-function-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-message-function-calls", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native message functionCalls token=message-functions-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember"])
+                    self.assertIn("native provider message functionCalls", payload["tool_calls"][0].get("reason", ""))
+                    self.assertIn("native provider message functionCalls", payload["tool_calls"][1].get("reason", ""))
+                    self.assertIn("native provider message function_calls", payload["tool_calls"][2].get("reason", ""))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
+                    self.assertNotIn("message-functions-secret", planned)
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native message functionCalls token=message-functions-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
+                recall = runtime.handle_message('/recall query=native-message-function-calls')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("message functionCalls accepted", recall)
+                self.assertIn("message function_calls accepted", recall)
+                self.assertIn("message_functionCalls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("message_function_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("message_function_calls_alias_translation"), status)
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("message-functions-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
