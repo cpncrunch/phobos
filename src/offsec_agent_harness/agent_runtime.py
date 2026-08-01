@@ -51,6 +51,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "redacted_transcripts_and_audit": True,
     "execution_ledger_claim_contract": True,
     "provider_tool_call_id_provenance": True,
+    "transcript_provider_call_provenance": True,
     "custom_freeform_tool_calls_rejected": True,
     "gateway_and_bridge_surfaces": True,
 }
@@ -1319,6 +1320,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "followup_feedback_prompt_redacted": True,
             "execution_summary_contract": True,
             "provider_tool_call_id_provenance": True,
+            "transcript_provider_call_provenance": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,
             "partial_duplicate_plan_stop_enforced": True,
@@ -2001,6 +2003,29 @@ def _write_auto_plan_artifacts(evidence_root: Path, payload: dict[str, Any]) -> 
     return artifacts
 
 
+def _native_call_provenance_markdown(metadata: Any) -> str:
+    """Return bounded provider/native call provenance safe for Markdown summaries."""
+
+    if not isinstance(metadata, dict):
+        return ""
+    parts: list[str] = []
+    source = metadata.get("native_tool_call_source") or metadata.get("source")
+    if source not in (None, ""):
+        parts.append(f"source=`{_markdown_metadata_value(source, 120)}`")
+    provider_id = metadata.get("provider_tool_call_id") or metadata.get("tool_call_id") or metadata.get("call_id")
+    if provider_id not in (None, ""):
+        parts.append(f"provider_call_id=`{_markdown_metadata_value(provider_id, 200)}`")
+    if "native_tool_call_index" in metadata:
+        index = _safe_int(metadata.get("native_tool_call_index"))
+        if index is not None:
+            parts.append(f"native_index=`{index}`")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
+def _markdown_metadata_value(value: Any, limit: int) -> str:
+    return _bounded_metadata_string(value, limit).replace("`", "'").replace("\n", " ").replace("\r", " ")
+
+
 def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Phobos Native Tool-Calling Auto Plan",
@@ -2058,12 +2083,13 @@ def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
     for item in ledger:
         if not isinstance(item, dict):
             continue
+        provenance = _native_call_provenance_markdown(item)
         lines.append(
             f"- `{item.get('tool')}`: state=`{item.get('execution_state')}`, "
             f"result=`{item.get('result_status')}`, "
             f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`, "
             f"approval_queued=`{item.get('approval_queued', False)}`, "
-            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`"
+            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`{provenance}"
         )
     lines.extend(["", "## Planned calls", ""])
     raw_calls = payload.get("tool_calls")
@@ -2075,9 +2101,12 @@ def _auto_plan_apply_markdown(payload: dict[str, Any]) -> str:
             continue
         raw_validation = call.get("validation")
         validation = raw_validation if isinstance(raw_validation, dict) else {}
+        raw_metadata = call.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        provenance = _native_call_provenance_markdown(metadata)
         lines.append(
             f"- `{call.get('tool')}` — {call.get('reason', 'planned step')} "
-            f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')})"
+            f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')}{provenance})"
         )
     raw_rejected = payload.get("rejected_tool_calls")
     rejected: list[Any] = raw_rejected if isinstance(raw_rejected, list) else []
@@ -2189,12 +2218,13 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         step = f" step={item.get('step')}" if item.get("step") is not None else ""
+        provenance = _native_call_provenance_markdown(item)
         lines.append(
             f"- `{item.get('tool')}`{step}: state=`{item.get('execution_state')}`, "
             f"result=`{item.get('result_status')}`, "
             f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`, "
             f"approval_queued=`{item.get('approval_queued', False)}`, "
-            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`"
+            f"blocked=`{item.get('blocked', False)}`, dry_run=`{item.get('dry_run', False)}`{provenance}"
         )
     lines.extend([
         "",
@@ -2239,9 +2269,12 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
                 if isinstance(call, dict):
                     raw_validation = call.get("validation")
                     validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
+                    raw_metadata = call.get("metadata")
+                    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+                    provenance = _native_call_provenance_markdown(metadata)
                     lines.append(
                         f"- `{call.get('tool')}` — {call.get('reason', 'planned step')} "
-                        f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')})"
+                        f"(schema_validated={validation.get('schema_validated', False)}, runtime_policy={validation.get('runtime_policy', 'unknown')}{provenance})"
                     )
             lines.append("")
         raw_rejected = plan.get("rejected_tool_calls")
@@ -2264,7 +2297,7 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
                 lines.append(
                     f"- `{item.get('tool')}`: state=`{item.get('execution_state')}`, "
                     f"result=`{item.get('result_status')}`, "
-                    f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`"
+                    f"actual_command_or_process_activity=`{item.get('actual_command_or_process_activity', False)}`{_native_call_provenance_markdown(item)}"
                 )
             lines.append("")
         if results:

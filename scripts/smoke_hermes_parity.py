@@ -1911,6 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
+            and native_status_milestone_contract.get("transcript_provider_call_provenance") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
@@ -1929,6 +1930,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("followup_prompt_secret_redaction") is True
             and native_status_data.get("execution_summary_contract") is True
             and native_status_data.get("provider_tool_call_id_provenance") is True
+            and native_status_data.get("transcript_provider_call_provenance") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
             and native_status_data.get("partial_duplicate_plan_stop_enforced") is True
@@ -2145,17 +2147,29 @@ def main(argv: list[str] | None = None) -> int:
             adapter=OpenAICompatibleAdapter(model="fake-native-flat-smoke", base_url="http://127.0.0.1:9/v1"),
         )
         native_flat_original_urlopen = model_adapters.urllib.request.urlopen
+        native_flat_transcript_detail = {"status": "missing"}
+        native_flat_transcript_markdown = ""
         try:
             model_adapters.urllib.request.urlopen = fake_native_flat_urlopen
             native_flat_plan = native_flat_runtime.handle_message('/auto model=true prompt="native flat provider smoke token=native-flat-secret"')
             native_flat_plan_payload = json.loads(native_flat_plan.split("\n", 1)[1])
             native_flat_apply = native_flat_runtime.handle_message('/auto apply=true model=true prompt="native flat provider smoke token=native-flat-secret"')
             native_flat_apply_payload = json.loads(native_flat_apply.split("\n", 1)[1])
+            native_flat_artifacts = native_flat_apply_payload.get("artifacts", {}) if isinstance(native_flat_apply_payload.get("artifacts"), dict) else {}
+            native_flat_json_path = Path(native_flat_artifacts.get("json", ""))
+            native_flat_md_path = Path(native_flat_artifacts.get("markdown", ""))
+            if native_flat_json_path.is_file():
+                native_flat_rel_json = native_flat_json_path.relative_to(native_flat_runtime.registry.harness.store.root).as_posix()
+                native_flat_transcript_detail = native_flat_runtime.registry.run("get_auto_transcript", {"path": native_flat_rel_json, "max_ledger": 5}).to_dict()
+            if native_flat_md_path.is_file():
+                native_flat_transcript_markdown = native_flat_md_path.read_text(encoding="utf-8")
             native_flat_recall = native_flat_runtime.handle_message('/recall query=native-provider-flat')
             write("native-provider-flat-tool-calls.json", json.dumps({
                 "plan": native_flat_plan_payload,
                 "apply": native_flat_apply_payload,
                 "captured": native_flat_captured,
+                "transcript_detail": native_flat_transcript_detail,
+                "transcript_markdown_excerpt": native_flat_transcript_markdown[:2000],
                 "recall": native_flat_recall,
                 "marker_exists": native_flat_marker.exists(),
             }, indent=2, sort_keys=True))
@@ -2166,6 +2180,9 @@ def main(argv: list[str] | None = None) -> int:
         native_flat_metadata = native_flat_plan_payload.get("metadata", {}) if isinstance(native_flat_plan_payload.get("metadata"), dict) else {}
         native_flat_ledger = native_flat_apply_payload.get("execution_ledger", []) if isinstance(native_flat_apply_payload.get("execution_ledger"), list) else []
         native_flat_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_flat_calls]
+        native_flat_transcript_summary = native_flat_transcript_detail.get("data", {}).get("summary", {}) if isinstance(native_flat_transcript_detail.get("data"), dict) else {}
+        native_flat_transcript_calls = native_flat_transcript_summary.get("tool_calls", []) if isinstance(native_flat_transcript_summary.get("tool_calls"), list) else []
+        native_flat_transcript_results = native_flat_transcript_summary.get("result_summaries", []) if isinstance(native_flat_transcript_summary.get("result_summaries"), list) else []
         checks["native_provider_flat_tool_call_ok"] = (
             native_flat_plan_payload.get("mode") == "plan_only"
             and [call.get("tool") for call in native_flat_calls] == ["remember", "run_command"]
@@ -2190,6 +2207,16 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_flat_ledger] == ["flat_memory", "flat_dry"]
             and native_flat_ledger[1].get("native_tool_call_source") == "native provider flat tool_call"
             and "native-flat-secret" not in json.dumps(native_flat_call_metadata) + json.dumps(native_flat_ledger)
+        )
+        checks["native_tool_call_transcript_provenance_ok"] = (
+            native_flat_transcript_detail.get("status") == "ok"
+            and [item.get("provider_tool_call_id") for item in native_flat_transcript_calls] == ["flat_memory", "flat_dry"]
+            and [item.get("native_tool_call_source") for item in native_flat_transcript_calls] == ["native provider flat tool_call", "native provider flat tool_call"]
+            and [item.get("provider_tool_call_id") for item in native_flat_transcript_results] == ["flat_memory", "flat_dry"]
+            and "provider_call_id=`flat_memory`" in native_flat_transcript_markdown
+            and "provider_call_id=`flat_dry`" in native_flat_transcript_markdown
+            and "source=`native provider flat tool_call`" in native_flat_transcript_markdown
+            and "native-flat-secret" not in json.dumps(native_flat_transcript_detail) + native_flat_transcript_markdown
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
@@ -3652,6 +3679,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_openai_tool_call_adapter_ok",
             "native_provider_flat_tool_call_ok",
             "native_tool_call_provider_call_id_provenance_ok",
+            "native_tool_call_transcript_provenance_ok",
             "native_provider_tool_call_edge_cases_ok",
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",

@@ -23,7 +23,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; redacted session-bound detail/update/enable/disable controls; run via `phobos-agent run-due` or external cron.
 - **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail/completion paths, per-task artifacts, and child session records by default. Delegation prompts, task specs, results, and artifact metadata are redacted before SQLite storage.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order for both natural responses and native/JSON tool-call planning, preserving fallback attempt metadata in redacted auto transcripts.
-- **Native tool-calling status contract:** `/status` now exposes read-only native autonomy safety metadata plus a milestone acceptance matrix: model-planning enablement, the bounded step budget, follow-up prompt redaction, terminal no-tool/no-dispatch markers, execution-summary claim-count support, and max-step/model-error/invalid-plan/duplicate/same-step-duplicate stop enforcement, plan-only and explicit-`execute=true` defaults, one-shot and per-step planner traces, per-step execution-ledger delta support, supported provider-native tool-call variants, provider tool-call ID provenance in plan/result ledgers, provider `tool_result`/`function_result`/`function_call_output`/`functionResponse`/`function_response` echo suppression, custom/freeform provider tool-call rejection, model-hidden approval controls, execution-capable and target-affecting tool classes, local native-loop contract completion flags, and local transcript counts without reading target systems or raw transcript contents.
+- **Native tool-calling status contract:** `/status` now exposes read-only native autonomy safety metadata plus a milestone acceptance matrix: model-planning enablement, the bounded step budget, follow-up prompt redaction, terminal no-tool/no-dispatch markers, execution-summary claim-count support, and max-step/model-error/invalid-plan/duplicate/same-step-duplicate stop enforcement, plan-only and explicit-`execute=true` defaults, one-shot and per-step planner traces, per-step execution-ledger delta support, supported provider-native tool-call variants, provider tool-call ID provenance in plan/result ledgers and transcript review summaries, provider `tool_result`/`function_result`/`function_call_output`/`functionResponse`/`function_response` echo suppression, custom/freeform provider tool-call rejection, model-hidden approval controls, execution-capable and target-affecting tool classes, local native-loop contract completion flags, and local transcript counts without reading target systems or raw transcript contents.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
 - **Media/artifact registry:** `/media-import` copies local evidence/media into the engagement evidence tree with SHA-256, size, MIME, and kind metadata; stored/displayed paths and original names are redacted, `/media-list` lists metadata, and `/media-get` returns session-bound metadata without reading file contents.
 - **Operator briefing, handoff, sealed snapshots, and sealed DB backups:** `/guardrail-test` writes redacted synthetic guardrail simulation reports under `agent/guardrails/`; `/timeline` creates a redacted Markdown evidence/action chronology; `/manifest` creates JSON/Markdown SHA-256 artifact inventories for chain-of-custody review; `/manifest-verify` writes JSON/Markdown verification reports comparing a prior manifest to current local artifacts; `/secret-scan` writes redacted JSON/Markdown evidence hygiene reports under `agent/secret-scans/`; `/closeout` reviews local ROE/preflight, approvals, tasks, findings, process state, tool runs, and artifact presence into a ready/review/blocked Markdown checklist with redacted local refs such as `approval:<id>`, `task:<id>`, `process:<id>`, `finding:<id>`, `tool-run:<id>`, and `artifact:<relative-agent-path>`; `/ref` resolves those refs using existing current-session detail handlers or evidence-root artifact metadata, never file contents; `/briefing` creates a redacted Markdown operator summary; `/handoff`/`/export-session` and `/import-session` move redacted context/tasks/memory between local DBs; `/sealed-export` and `/sealed-import` wrap handoffs in passphrase-env sealed snapshots; CLI `seal-db`/`unseal-db` creates authenticated encrypted backups of a closed SQLite DB and can remove plaintext DB/WAL/SHM files after a successful seal.
@@ -779,7 +779,7 @@ Final verification for the standalone runtime was run from `/root/Documents/Tool
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 82 tests
+Ran 85 tests
 OK
 ```
 
@@ -838,9 +838,11 @@ native_tool_call_natural_auto_provenance_ok=True
 native_openai_tool_call_adapter_ok=True
 native_provider_flat_tool_call_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
+native_tool_call_transcript_provenance_ok=True
 native_provider_tool_call_edge_cases_ok=True
 native_provider_legacy_function_call_ok=True
 native_provider_content_block_tool_call_ok=True
+native_provider_single_content_block_tool_call_ok=True
 native_provider_responses_output_tool_call_ok=True
 native_provider_candidate_function_call_ok=True
 native_provider_custom_tool_call_reject_ok=True
@@ -937,7 +939,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=513
+artifact_count=527
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 

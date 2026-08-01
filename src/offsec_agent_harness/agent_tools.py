@@ -3681,6 +3681,33 @@ def _auto_transcript_execution_summary(payload: dict[str, Any], ledger: Any) -> 
     })
 
 
+def _auto_transcript_call_provenance(value: Any) -> dict[str, Any]:
+    """Extract bounded native/provider call provenance for metadata-only transcript review."""
+
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    provider_id = value.get("provider_tool_call_id") or value.get("tool_call_id") or value.get("call_id")
+    if provider_id not in (None, ""):
+        out["provider_tool_call_id"] = (redact_secrets(str(provider_id)) or "")[:200]
+    source = value.get("native_tool_call_source") or value.get("source")
+    if source not in (None, ""):
+        out["native_tool_call_source"] = (redact_secrets(str(source)) or "")[:120]
+    if "native_tool_call_index" in value:
+        index = value.get("native_tool_call_index")
+        if isinstance(index, bool):
+            index = None
+        elif isinstance(index, int):
+            pass
+        elif isinstance(index, str) and re.fullmatch(r"[+-]?\d+", index.strip()):
+            index = int(index.strip())
+        else:
+            index = None
+        if index is not None:
+            out["native_tool_call_index"] = index
+    return out
+
+
 def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int = 20) -> dict[str, Any]:
     data = payload if isinstance(payload, dict) else {}
     raw_ledger = data.get("execution_ledger")
@@ -3718,14 +3745,17 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         if not isinstance(call, dict):
             continue
         validation = call.get("validation") if isinstance(call.get("validation"), dict) else {}
-        call_summaries.append({
+        metadata = call.get("metadata") if isinstance(call.get("metadata"), dict) else {}
+        call_summary = {
             "tool": call.get("tool"),
             "reason": call.get("reason"),
             "schema_validated": validation.get("schema_validated"),
             "runtime_policy": validation.get("runtime_policy"),
             "guardrail_status": validation.get("guardrail_status"),
             "arg_keys": sorted(str(key) for key in (call.get("args") or {}).keys()) if isinstance(call.get("args"), dict) else [],
-        })
+        }
+        call_summary.update(_auto_transcript_call_provenance(metadata))
+        call_summaries.append(call_summary)
     result_summaries = []
     planner_trace_summaries = []
     for item in planner_trace[:max_ledger]:
@@ -3747,13 +3777,15 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
     for item in results[:max_ledger]:
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
-        result_summaries.append({
+        result_summary = {
             "tool": item.get("tool"),
             "result_status": result.get("status"),
             "message": str(result.get("message") or "")[:500],
             "execution_state": execution.get("execution_state"),
             "actual_command_or_process_activity": execution.get("actual_command_or_process_activity", False),
-        })
+        }
+        result_summary.update(_auto_transcript_call_provenance(execution))
+        result_summaries.append(result_summary)
     return _redacted_mapping({
         "mode": data.get("mode") or ("loop" if data.get("steps") else "unknown"),
         "trigger": data.get("trigger", ""),
