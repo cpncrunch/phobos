@@ -527,10 +527,14 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         block_type = str(item.get("type") or "").strip()
         nested_message = item.get("message")
-        is_message_item = block_type == "message" or (not block_type and isinstance(nested_message, dict))
+        is_typeless_nested_message = not block_type and isinstance(nested_message, dict)
+        is_typeless_direct_message = not block_type and not isinstance(nested_message, dict) and _responses_output_item_looks_like_message(item)
+        is_message_item = block_type == "message" or is_typeless_nested_message or is_typeless_direct_message
         if is_message_item:
-            _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape="responses.message.content")
-            _extend_responses_message_tool_calls(tool_calls, item)
+            direct_prefix = "responses.output.message_typeless" if is_typeless_direct_message else "responses.message"
+            direct_content_shape = f"{direct_prefix}.content"
+            _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape=direct_content_shape)
+            _extend_responses_message_tool_calls(tool_calls, item, provider_shape_prefix=direct_prefix)
             if isinstance(nested_message, dict):
                 # A few Responses-compatible shims wrap the assistant message
                 # under output[].message rather than putting content/tool-call
@@ -620,6 +624,32 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     if not tool_calls and not content_value:
         return {}
     return {"content": content_value, "tool_calls": tool_calls}
+
+
+def _responses_output_item_looks_like_message(item: dict[str, Any]) -> bool:
+    """Return True for typeless Responses output items carrying message fields.
+
+    Some OpenAI-compatible shims omit ``output[].type = "message"`` but put
+    ``content`` and/or tool-call aliases directly on the output item instead of
+    nesting them under ``output[].message``.  Treat only recognizable message
+    fields as a message wrapper so unrelated typeless objects remain inert at the
+    adapter boundary until Phobos can validate a registered tool call explicitly.
+    """
+
+    return any(
+        key in item
+        for key in (
+            "content",
+            "tool_calls",
+            "toolCalls",
+            "tool_call",
+            "toolCall",
+            "function_call",
+            "functionCall",
+            "function_calls",
+            "functionCalls",
+        )
+    )
 
 
 def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any, *, provider_shape: str = "") -> None:
@@ -1056,6 +1086,10 @@ def _parse_native_content_tool_block(
         label = f"native provider responses message content {block_type}"
     elif provider_shape == "responses.message.content.parts":
         label = f"native provider responses message content parts {block_type}"
+    elif provider_shape == "responses.output.message_typeless.content":
+        label = f"native provider typeless responses output message content {block_type}"
+    elif provider_shape == "responses.output.message_typeless.content.parts":
+        label = f"native provider typeless responses output message content parts {block_type}"
     elif provider_shape == "responses.output.message.content":
         label = f"native provider responses output message content {block_type}"
     elif provider_shape == "responses.output.message.content.parts":
@@ -1102,6 +1136,10 @@ def _parse_native_content_function_call_block(
         label = "native provider responses message content functionCall"
     elif provider_shape == "responses.message.content.parts":
         label = "native provider responses message content parts functionCall"
+    elif provider_shape == "responses.output.message_typeless.content":
+        label = "native provider typeless responses output message content functionCall"
+    elif provider_shape == "responses.output.message_typeless.content.parts":
+        label = "native provider typeless responses output message content parts functionCall"
     elif provider_shape == "responses.output.message.content":
         label = "native provider responses output message content functionCall"
     elif provider_shape == "responses.output.message.content.parts":
@@ -1159,6 +1197,22 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message functionCalls"
         elif provider_shape == "responses.message.function_calls":
             label = "native provider responses message function_calls"
+        elif provider_shape == "responses.output.message_typeless.tool_calls":
+            label = "native provider typeless responses output message tool_calls"
+        elif provider_shape == "responses.output.message_typeless.tool_call":
+            label = "native provider typeless responses output message tool_call"
+        elif provider_shape == "responses.output.message_typeless.toolCalls":
+            label = "native provider typeless responses output message toolCalls"
+        elif provider_shape == "responses.output.message_typeless.toolCall":
+            label = "native provider typeless responses output message toolCall"
+        elif provider_shape == "responses.output.message_typeless.function_call":
+            label = "native provider typeless responses output message function_call"
+        elif provider_shape == "responses.output.message_typeless.functionCall":
+            label = "native provider typeless responses output message functionCall"
+        elif provider_shape == "responses.output.message_typeless.functionCalls":
+            label = "native provider typeless responses output message functionCalls"
+        elif provider_shape == "responses.output.message_typeless.function_calls":
+            label = "native provider typeless responses output message function_calls"
         elif provider_shape == "responses.output.message.tool_calls":
             label = "native provider responses output message tool_calls"
         elif provider_shape == "responses.output.message.tool_call":
@@ -1230,6 +1284,22 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message functionCalls"
         elif item.get("_provider_shape") == "responses.message.function_calls":
             label = "native provider responses message function_calls"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.tool_calls":
+            label = "native provider typeless responses output message tool_calls"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.tool_call":
+            label = "native provider typeless responses output message tool_call"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.toolCalls":
+            label = "native provider typeless responses output message toolCalls"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.toolCall":
+            label = "native provider typeless responses output message toolCall"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.function_call":
+            label = "native provider typeless responses output message function_call"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.functionCall":
+            label = "native provider typeless responses output message functionCall"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.functionCalls":
+            label = "native provider typeless responses output message functionCalls"
+        elif item.get("_provider_shape") == "responses.output.message_typeless.function_calls":
+            label = "native provider typeless responses output message function_calls"
         elif item.get("_provider_shape") == "responses.output.message.tool_calls":
             label = "native provider responses output message tool_calls"
         elif item.get("_provider_shape") == "responses.output.message.tool_call":

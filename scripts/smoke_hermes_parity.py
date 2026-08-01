@@ -1994,6 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
             and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
             and native_status_milestone_contract.get("responses_output_message_typeless_wrapper_translation") is True
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_tool_calls_camel_alias_translation") is True
@@ -2057,6 +2058,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_typeless_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_output_message_typeless_direct" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -4119,6 +4121,129 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_output_message_result_marker not in native_responses_output_message_outputs
         )
 
+        native_responses_output_direct_message_captured = {}
+        native_responses_output_direct_message_result_marker = "NATIVE_RESPONSES_OUTPUT_DIRECT_MESSAGE_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesOutputTypelessDirectMessageSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_text": "native typeless direct responses output message token=native-responses-output-direct-message-secret",
+                    "output": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "native typeless direct responses output message text token=native-responses-output-direct-message-secret"},
+                                    {
+                                        "functionCall": {
+                                            "callId": "responses_output_direct_message_parts_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-responses-output-direct-message-parts-smoke", "value": "Typeless direct Responses output message content parts native tool call translated"},
+                                        }
+                                    },
+                                    {
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": native_responses_output_direct_message_result_marker + " token=native-responses-output-direct-message-secret"},
+                                        }
+                                    },
+                                ]
+                            },
+                            "tool_calls": [
+                                {
+                                    "id": "responses_output_direct_message_tool_calls_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-responses-output-direct-message-tool-calls-smoke", "value": "Typeless direct Responses output message tool_calls native tool call translated"}),
+                                    },
+                                }
+                            ],
+                            "toolCall": {
+                                "toolCallId": "responses_output_direct_message_tool_camel_memory",
+                                "name": "remember",
+                                "args": {"key": "native-responses-output-direct-message-tool-camel-smoke", "value": "Typeless direct Responses output message toolCall native tool call translated"},
+                            },
+                            "functionCalls": {
+                                "callId": "responses_output_direct_message_function_calls_memory",
+                                "name": "remember",
+                                "args": {"key": "native-responses-output-direct-message-functioncalls-smoke", "value": "Typeless direct Responses output message functionCalls native tool call translated"},
+                            },
+                        }
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_responses_output_direct_message_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_output_direct_message_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_output_direct_message_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResponsesOutputTypelessDirectMessageSmokeResponse()
+
+        native_responses_output_direct_message_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-output-typeless-direct-message.db"),
+                session_name="native-provider-responses-output-typeless-direct-message-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-responses-output-typeless-direct-message-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_output_direct_message_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_output_direct_message_urlopen
+            native_responses_output_direct_message_plan = native_responses_output_direct_message_runtime.handle_message('/auto model=true prompt="native typeless direct responses output message smoke token=native-responses-output-direct-message-secret"')
+            native_responses_output_direct_message_plan_payload = json.loads(native_responses_output_direct_message_plan.split("\n", 1)[1])
+            native_responses_output_direct_message_apply = native_responses_output_direct_message_runtime.handle_message('/auto apply=true model=true prompt="native typeless direct responses output message smoke token=native-responses-output-direct-message-secret"')
+            native_responses_output_direct_message_apply_payload = json.loads(native_responses_output_direct_message_apply.split("\n", 1)[1])
+            native_responses_output_direct_message_recall = native_responses_output_direct_message_runtime.handle_message('/recall query=native-responses-output-direct-message')
+            write("native-provider-responses-output-typeless-direct-message.json", json.dumps({
+                "plan": native_responses_output_direct_message_plan_payload,
+                "apply": native_responses_output_direct_message_apply_payload,
+                "captured": native_responses_output_direct_message_captured,
+                "recall": native_responses_output_direct_message_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_output_direct_message_original_urlopen
+            native_responses_output_direct_message_runtime.close()
+        native_responses_output_direct_message_calls = native_responses_output_direct_message_plan_payload.get("tool_calls", []) if isinstance(native_responses_output_direct_message_plan_payload.get("tool_calls"), list) else []
+        native_responses_output_direct_message_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_output_direct_message_calls]
+        native_responses_output_direct_message_ledger = native_responses_output_direct_message_apply_payload.get("execution_ledger", []) if isinstance(native_responses_output_direct_message_apply_payload.get("execution_ledger"), list) else []
+        native_responses_output_direct_message_outputs = native_responses_output_direct_message_plan + native_responses_output_direct_message_apply + native_responses_output_direct_message_recall + json.dumps(native_responses_output_direct_message_plan_payload) + json.dumps(native_responses_output_direct_message_apply_payload)
+        checks["native_provider_responses_output_message_typeless_direct_ok"] = (
+            native_responses_output_direct_message_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_output_direct_message_calls] == ["remember", "remember", "remember", "remember"]
+            and [item.get("native_tool_call_source") for item in native_responses_output_direct_message_call_metadata] == [
+                "native provider typeless responses output message tool_calls",
+                "native provider typeless responses output message toolCall",
+                "native provider typeless responses output message functionCalls",
+                "native provider typeless responses output message content parts functionCall",
+            ]
+            and [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_call_metadata] == [
+                "responses_output_direct_message_tool_calls_memory",
+                "responses_output_direct_message_tool_camel_memory",
+                "responses_output_direct_message_function_calls_memory",
+                "responses_output_direct_message_parts_memory",
+            ]
+            and [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_ledger] == [item.get("provider_tool_call_id") for item in native_responses_output_direct_message_call_metadata]
+            and [item.get("result", {}).get("status") for item in native_responses_output_direct_message_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok"]
+            and native_status_milestone_contract.get("responses_output_message_typeless_direct_translation") is True
+            and "responses_output_message_typeless_direct" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Typeless direct Responses output message tool_calls native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message toolCall native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message functionCalls native tool call translated" in native_responses_output_direct_message_recall
+            and "Typeless direct Responses output message content parts native tool call translated" in native_responses_output_direct_message_recall
+            and "functionResponse" in json.dumps(native_responses_output_direct_message_plan_payload.get("warnings", []))
+            and native_responses_output_direct_message_captured.get("tool_choice") == "auto"
+            and native_responses_output_direct_message_captured.get("tool_count", 0) > 0
+            and native_responses_output_direct_message_result_marker not in native_responses_output_direct_message_outputs
+            and "native-responses-output-direct-message-secret" not in native_responses_output_direct_message_outputs + json.dumps(native_responses_output_direct_message_call_metadata) + json.dumps(native_responses_output_direct_message_ledger)
+        )
+
         native_responses_message_tool_captured = {}
 
         class NativeOpenAIResponsesMessageToolCallSmokeResponse:
@@ -5756,6 +5881,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
+            "native_provider_responses_output_message_typeless_direct_ok",
             "native_provider_responses_message_tool_call_alias_ok",
             "native_provider_responses_message_function_calls_alias_ok",
             "native_provider_responses_message_content_tool_call_ok",
