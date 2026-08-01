@@ -4323,6 +4323,20 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "name": "remember",
                                     "parameters": {"key": "native-responses-message-functioncall", "value": "Responses message-level functionCall accepted"},
                                 },
+                                "functionCalls": [
+                                    {
+                                        "callId": "resp_message_function_calls_plural",
+                                        "name": "remember",
+                                        "args": {"key": "native-responses-message-functioncalls", "value": "Responses message-level functionCalls accepted"},
+                                    }
+                                ],
+                                "function_calls": {
+                                    "call_id": "resp_message_function_calls_snake",
+                                    "function_call": {
+                                        "name": "remember",
+                                        "parameters": {"key": "native-responses-message-function-calls-snake", "value": "Responses message-level function_calls accepted"},
+                                    },
+                                },
                             }
                         ],
                     }).encode("utf-8")
@@ -4345,12 +4359,14 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native responses message tool calls token=responses-message-tool-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember", "remember"])
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember", "remember", "remember", "remember"])
                     self.assertIn("native provider responses message tool_calls", payload["tool_calls"][0]["reason"])
                     self.assertIn("native provider responses message toolCall", payload["tool_calls"][2]["reason"])
                     self.assertIn("native provider responses message functionCall", payload["tool_calls"][3]["reason"])
+                    self.assertIn("native provider responses message functionCalls", payload["tool_calls"][4]["reason"])
+                    self.assertIn("native provider responses message function_calls", payload["tool_calls"][5]["reason"])
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias", "resp_message_function_calls_plural", "resp_message_function_calls_snake"])
                     self.assertEqual(
                         [item.get("native_tool_call_source") for item in call_metadata],
                         [
@@ -4358,26 +4374,34 @@ class AgentRuntimeTests(unittest.TestCase):
                             "native provider responses message tool_calls",
                             "native provider responses message toolCall",
                             "native provider responses message functionCall",
+                            "native provider responses message functionCalls",
+                            "native provider responses message function_calls",
                         ],
                     )
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 6)
                     self.assertNotIn("responses-message-tool-secret", planned + json.dumps(payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native responses message tool calls token=responses-message-tool-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok", "ok", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias", "resp_message_function_calls_plural", "resp_message_function_calls_snake"])
                     self.assertEqual([item.get("native_tool_call_source") for item in ledger], [item.get("native_tool_call_source") for item in call_metadata])
                 recall = runtime.handle_message('/recall query=native-responses-message')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("Responses message-level tool_calls accepted", recall)
                 self.assertIn("Responses message-level toolCall accepted", recall)
                 self.assertIn("Responses message-level functionCall accepted", recall)
+                self.assertIn("Responses message-level functionCalls accepted", recall)
+                self.assertIn("Responses message-level function_calls accepted", recall)
                 self.assertTrue(status.get("milestone_contract", {}).get("responses_message_tool_call_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_function_calls_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_function_calls_snake_alias_translation"), status)
                 self.assertIn("responses_message_tool_calls", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_toolCall", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_functionCalls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_function_calls", status.get("provider_native_tool_call_variants", []))
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 self.assertNotIn("responses-message-tool-secret", applied + recall + json.dumps(status))

@@ -1992,6 +1992,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
+            and native_status_milestone_contract.get("responses_message_function_calls_alias_translation") is True
+            and native_status_milestone_contract.get("responses_message_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("responses_message_content_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
@@ -2046,6 +2048,8 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3939,6 +3943,20 @@ def main(argv: list[str] | None = None) -> int:
                                 "name": "remember",
                                 "parameters": {"key": "native-responses-message-functioncall-smoke", "value": "Responses message-level functionCall native tool call translated"},
                             },
+                            "functionCalls": [
+                                {
+                                    "callId": "responses_message_function_calls_plural",
+                                    "name": "remember",
+                                    "args": {"key": "native-responses-message-functioncalls-smoke", "value": "Responses message-level functionCalls native tool call translated"},
+                                }
+                            ],
+                            "function_calls": {
+                                "call_id": "responses_message_function_calls_snake",
+                                "function_call": {
+                                    "name": "remember",
+                                    "parameters": {"key": "native-responses-message-function-calls-snake-smoke", "value": "Responses message-level function_calls native tool call translated"},
+                                },
+                            },
                         }
                     ],
                 }).encode("utf-8")
@@ -3982,27 +4000,40 @@ def main(argv: list[str] | None = None) -> int:
         native_responses_message_tool_outputs = native_responses_message_tool_plan + native_responses_message_tool_apply + native_responses_message_tool_recall + json.dumps(native_responses_message_tool_plan_payload) + json.dumps(native_responses_message_tool_apply_payload)
         checks["native_provider_responses_message_tool_call_alias_ok"] = (
             native_responses_message_tool_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_responses_message_tool_calls] == ["remember", "list_tasks", "remember", "remember"]
+            and [call.get("tool") for call in native_responses_message_tool_calls] == ["remember", "list_tasks", "remember", "remember", "remember", "remember"]
             and "native provider responses message tool_calls" in native_responses_message_tool_calls[0].get("reason", "")
             and "native provider responses message toolCall" in native_responses_message_tool_calls[2].get("reason", "")
             and "native provider responses message functionCall" in native_responses_message_tool_calls[3].get("reason", "")
+            and "native provider responses message functionCalls" in native_responses_message_tool_calls[4].get("reason", "")
+            and "native provider responses message function_calls" in native_responses_message_tool_calls[5].get("reason", "")
             and native_responses_message_tool_metadata.get("native_tool_calls") is True
-            and native_responses_message_tool_metadata.get("native_tool_call_count") == 4
-            and [item.get("provider_tool_call_id") for item in native_responses_message_tool_call_metadata] == ["responses_message_tool_memory", "responses_message_tool_tasks", "responses_message_tool_camel", "responses_message_function_alias"]
-            and [item.get("native_tool_call_source") for item in native_responses_message_tool_call_metadata] == ["native provider responses message tool_calls", "native provider responses message tool_calls", "native provider responses message toolCall", "native provider responses message functionCall"]
-            and [item.get("provider_tool_call_id") for item in native_responses_message_tool_ledger] == ["responses_message_tool_memory", "responses_message_tool_tasks", "responses_message_tool_camel", "responses_message_function_alias"]
-            and [item.get("native_tool_call_source") for item in native_responses_message_tool_ledger] == ["native provider responses message tool_calls", "native provider responses message tool_calls", "native provider responses message toolCall", "native provider responses message functionCall"]
-            and [item.get("result", {}).get("status") for item in native_responses_message_tool_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok"]
+            and native_responses_message_tool_metadata.get("native_tool_call_count") == 6
+            and [item.get("provider_tool_call_id") for item in native_responses_message_tool_call_metadata] == ["responses_message_tool_memory", "responses_message_tool_tasks", "responses_message_tool_camel", "responses_message_function_alias", "responses_message_function_calls_plural", "responses_message_function_calls_snake"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_tool_call_metadata] == ["native provider responses message tool_calls", "native provider responses message tool_calls", "native provider responses message toolCall", "native provider responses message functionCall", "native provider responses message functionCalls", "native provider responses message function_calls"]
+            and [item.get("provider_tool_call_id") for item in native_responses_message_tool_ledger] == ["responses_message_tool_memory", "responses_message_tool_tasks", "responses_message_tool_camel", "responses_message_function_alias", "responses_message_function_calls_plural", "responses_message_function_calls_snake"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_tool_ledger] == ["native provider responses message tool_calls", "native provider responses message tool_calls", "native provider responses message toolCall", "native provider responses message functionCall", "native provider responses message functionCalls", "native provider responses message function_calls"]
+            and [item.get("result", {}).get("status") for item in native_responses_message_tool_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok", "ok", "ok"]
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "Responses message-level tool_calls native tool call translated" in native_responses_message_tool_recall
             and "Responses message-level toolCall native tool call translated" in native_responses_message_tool_recall
             and "Responses message-level functionCall native tool call translated" in native_responses_message_tool_recall
+            and "Responses message-level functionCalls native tool call translated" in native_responses_message_tool_recall
+            and "Responses message-level function_calls native tool call translated" in native_responses_message_tool_recall
             and native_responses_message_tool_captured.get("tool_choice") == "auto"
             and native_responses_message_tool_captured.get("tool_count", 0) > 0
             and "native-responses-message-tool-secret" not in native_responses_message_tool_outputs + json.dumps(native_responses_message_tool_call_metadata) + json.dumps(native_responses_message_tool_ledger)
+        )
+        checks["native_provider_responses_message_function_calls_alias_ok"] = (
+            checks["native_provider_responses_message_tool_call_alias_ok"] is True
+            and native_status_milestone_contract.get("responses_message_function_calls_alias_translation") is True
+            and native_status_milestone_contract.get("responses_message_function_calls_snake_alias_translation") is True
+            and "responses_message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
         )
 
         native_responses_message_content_captured = {}
@@ -5470,6 +5501,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_message_tool_call_alias_ok",
+            "native_provider_responses_message_function_calls_alias_ok",
             "native_provider_responses_message_content_tool_call_ok",
             "native_provider_responses_message_content_function_call_alias_ok",
             "native_provider_responses_message_content_parts_function_call_ok",
