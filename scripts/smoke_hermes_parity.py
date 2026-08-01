@@ -1997,6 +1997,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_nested_function_call_translation") is True
+            and native_status_milestone_contract.get("message_function_call_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
@@ -2037,6 +2038,7 @@ def main(argv: list[str] | None = None) -> int:
             and "root_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCalls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2827,6 +2829,11 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "message": {
                                 "content": "native message functionCalls smoke token=native-message-function-secret",
+                                "functionCall": {
+                                    "callId": "message_function_call_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-message-function-call-smoke", "value": "message functionCall native tool call translated"},
+                                },
                                 "functionCalls": [
                                     {
                                         "callId": "message_function_calls_memory",
@@ -2879,12 +2886,14 @@ def main(argv: list[str] | None = None) -> int:
             native_message_function_plan_payload = json.loads(native_message_function_plan.split("\n", 1)[1])
             native_message_function_apply = native_message_function_runtime.handle_message('/auto apply=true model=true prompt="native message functionCalls smoke token=native-message-function-secret"')
             native_message_function_apply_payload = json.loads(native_message_function_apply.split("\n", 1)[1])
+            native_message_function_singular_recall = native_message_function_runtime.handle_message('/recall query=native-message-function-call-smoke')
             native_message_function_recall = native_message_function_runtime.handle_message('/recall query=native-message-function-calls-smoke')
             native_message_function_snake_recall = native_message_function_runtime.handle_message('/recall query=native-message-function-calls-snake-smoke')
             write("native-provider-message-function-calls.json", json.dumps({
                 "plan": native_message_function_plan_payload,
                 "apply": native_message_function_apply_payload,
                 "captured": native_message_function_captured,
+                "recall_singular": native_message_function_singular_recall,
                 "recall": native_message_function_recall,
                 "recall_snake": native_message_function_snake_recall,
             }, indent=2, sort_keys=True))
@@ -2895,15 +2904,30 @@ def main(argv: list[str] | None = None) -> int:
         native_message_function_metadata = native_message_function_plan_payload.get("metadata", {}) if isinstance(native_message_function_plan_payload.get("metadata"), dict) else {}
         native_message_function_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_message_function_calls]
         native_message_function_ledger = native_message_function_apply_payload.get("execution_ledger", []) if isinstance(native_message_function_apply_payload.get("execution_ledger"), list) else []
+        native_message_function_outputs = native_message_function_plan + native_message_function_apply + native_message_function_singular_recall + native_message_function_recall + native_message_function_snake_recall + json.dumps(native_message_function_plan_payload) + json.dumps(native_message_function_apply_payload)
+        checks["native_provider_message_function_call_alias_ok"] = (
+            native_message_function_plan_payload.get("mode") == "plan_only"
+            and len(native_message_function_calls) >= 4
+            and native_message_function_calls[0].get("tool") == "remember"
+            and native_message_function_call_metadata[0].get("provider_tool_call_id") == "message_function_call_memory"
+            and native_message_function_call_metadata[0].get("native_tool_call_source") == "native provider message functionCall"
+            and len(native_message_function_ledger) >= 4
+            and native_message_function_ledger[0].get("native_tool_call_source") == "native provider message functionCall"
+            and native_status_milestone_contract.get("message_function_call_alias_translation") is True
+            and "message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message functionCall native tool call translated" in native_message_function_singular_recall
+            and native_message_function_result_marker not in native_message_function_outputs
+            and "native-message-function-secret" not in native_message_function_outputs + json.dumps(native_message_function_call_metadata) + json.dumps(native_message_function_ledger)
+        )
         checks["native_provider_message_function_calls_alias_ok"] = (
             native_message_function_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_message_function_calls] == ["remember", "list_tasks", "remember"]
+            and [call.get("tool") for call in native_message_function_calls] == ["remember", "remember", "list_tasks", "remember"]
             and native_message_function_metadata.get("native_tool_calls") is True
-            and native_message_function_metadata.get("native_tool_call_count") == 3
-            and [item.get("provider_tool_call_id") for item in native_message_function_call_metadata] == ["message_function_calls_memory", "message_function_calls_tasks", "message_function_calls_snake_memory"]
-            and [item.get("native_tool_call_source") for item in native_message_function_call_metadata] == ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"]
-            and [item.get("result", {}).get("status") for item in native_message_function_apply_payload.get("results", [])] == ["ok", "ok", "ok"]
-            and [item.get("native_tool_call_source") for item in native_message_function_ledger] == ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"]
+            and native_message_function_metadata.get("native_tool_call_count") == 4
+            and [item.get("provider_tool_call_id") for item in native_message_function_call_metadata] == ["message_function_call_memory", "message_function_calls_memory", "message_function_calls_tasks", "message_function_calls_snake_memory"]
+            and [item.get("native_tool_call_source") for item in native_message_function_call_metadata] == ["native provider message functionCall", "native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"]
+            and [item.get("result", {}).get("status") for item in native_message_function_apply_payload.get("results", [])] == ["ok", "ok", "ok", "ok"]
+            and [item.get("native_tool_call_source") for item in native_message_function_ledger] == ["native provider message functionCall", "native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"]
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
             and "message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2911,8 +2935,8 @@ def main(argv: list[str] | None = None) -> int:
             and "message function_calls native tool call translated" in native_message_function_snake_recall
             and native_message_function_captured.get("tool_choice") == "auto"
             and native_message_function_captured.get("tool_count", 0) > 0
-            and native_message_function_result_marker not in native_message_function_plan + native_message_function_apply + native_message_function_recall + native_message_function_snake_recall + json.dumps(native_message_function_plan_payload) + json.dumps(native_message_function_apply_payload)
-            and "native-message-function-secret" not in native_message_function_plan + native_message_function_apply + native_message_function_recall + native_message_function_snake_recall + json.dumps(native_message_function_plan_payload) + json.dumps(native_message_function_apply_payload) + json.dumps(native_message_function_call_metadata) + json.dumps(native_message_function_ledger)
+            and native_message_function_result_marker not in native_message_function_outputs
+            and "native-message-function-secret" not in native_message_function_outputs + json.dumps(native_message_function_call_metadata) + json.dumps(native_message_function_ledger)
         )
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"

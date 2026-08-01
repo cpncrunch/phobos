@@ -753,7 +753,7 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
             "name": message_function_call.get("name") or message_function_call.get("tool"),
             "arguments": _native_argument_value(message_function_call, preferred=("args", "arguments", "parameters", "input", "params")),
             "call_id": str(_native_call_id(message_function_call)),
-            "_provider_shape": "root.functionCall",
+            "_provider_shape": "message.functionCall",
         })
     if isinstance(message.get("functionCalls"), (list, dict)):
         raw_call_items.extend(_native_function_call_batch_items("message.functionCalls", message.get("functionCalls")))
@@ -909,6 +909,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root function_calls"
         elif provider_shape == "message.functionCalls":
             label = "native provider message functionCalls"
+        elif provider_shape == "message.functionCall":
+            label = "native provider message functionCall"
         elif provider_shape == "message.function_calls":
             label = "native provider message function_calls"
         else:
@@ -942,6 +944,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root function_calls"
         elif item.get("_provider_shape") == "message.functionCalls":
             label = "native provider message functionCalls"
+        elif item.get("_provider_shape") == "message.functionCall":
+            label = "native provider message functionCall"
         elif item.get("_provider_shape") == "message.function_calls":
             label = "native provider message function_calls"
         elif provider_shape == "single_top_level.tool_calls":

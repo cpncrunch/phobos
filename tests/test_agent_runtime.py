@@ -4409,6 +4409,11 @@ class AgentRuntimeTests(unittest.TestCase):
                             {
                                 "message": {
                                     "content": "message functionCalls token=message-functions-secret",
+                                    "functionCall": {
+                                        "callId": "message_function_call_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-message-function-call", "value": "message functionCall accepted"},
+                                    },
                                     "functionCalls": [
                                         {
                                             "callId": "message_functions_memory",
@@ -4457,29 +4462,33 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native message functionCalls token=message-functions-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember"])
-                    self.assertIn("native provider message functionCalls", payload["tool_calls"][0].get("reason", ""))
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "remember", "list_tasks", "remember"])
+                    self.assertIn("native provider message functionCall", payload["tool_calls"][0].get("reason", ""))
                     self.assertIn("native provider message functionCalls", payload["tool_calls"][1].get("reason", ""))
-                    self.assertIn("native provider message function_calls", payload["tool_calls"][2].get("reason", ""))
+                    self.assertIn("native provider message functionCalls", payload["tool_calls"][2].get("reason", ""))
+                    self.assertIn("native provider message function_calls", payload["tool_calls"][3].get("reason", ""))
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["message_function_call_memory", "message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider message functionCall", "native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
                     self.assertNotIn("message-functions-secret", planned)
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native message functionCalls token=message-functions-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["message_function_call_memory", "message_functions_memory", "message_functions_tasks", "message_functions_snake_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider message functionCall", "native provider message functionCalls", "native provider message functionCalls", "native provider message function_calls"])
                 recall = runtime.handle_message('/recall query=native-message-function-calls')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("message functionCall accepted", runtime.handle_message('/recall query=native-message-function-call'))
                 self.assertIn("message functionCalls accepted", recall)
                 self.assertIn("message function_calls accepted", recall)
+                self.assertIn("message_functionCall", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("message_functionCalls", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("message_function_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("message_function_call_alias_translation"), status)
                 self.assertTrue(status.get("milestone_contract", {}).get("message_function_calls_alias_translation"), status)
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
@@ -5818,6 +5827,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("root_functionCalls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCalls_nested_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_function_calls", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("message_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("legacy_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
