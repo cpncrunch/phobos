@@ -2011,6 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_function_calls_nested_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_nested_function_call_translation") is True
             and native_status_milestone_contract.get("root_tool_use_alias_translation") is True
+            and native_status_milestone_contract.get("message_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("message_function_call_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_nested_function_call_translation") is True
@@ -2084,6 +2085,10 @@ def main(argv: list[str] | None = None) -> int:
             and "root_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_tool_uses" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_toolUses" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_tool_uses" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_toolUses" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3286,6 +3291,115 @@ def main(argv: list[str] | None = None) -> int:
             and native_root_tool_use_captured.get("tool_count", 0) > 0
             and native_root_tool_use_result_marker not in native_root_tool_use_plan + native_root_tool_use_apply + native_root_tool_use_recall + json.dumps(native_root_tool_use_plan_payload) + json.dumps(native_root_tool_use_apply_payload)
             and "native-root-tool-use-secret" not in native_root_tool_use_plan + native_root_tool_use_apply + native_root_tool_use_recall + json.dumps(native_root_tool_use_plan_payload) + json.dumps(native_root_tool_use_apply_payload)
+        )
+
+        native_message_tool_use_captured = {}
+        native_message_tool_use_result_marker = "MESSAGE_TOOL_USE_RESPONSE_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIMessageToolUseSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native message toolUse smoke token=native-message-tool-use-secret",
+                                "tool_use": {
+                                    "tool_use_id": "message_tool_use_memory",
+                                    "name": "remember",
+                                    "input": {"key": "native-message-tool-use-smoke", "value": "message tool_use native tool call translated"},
+                                },
+                                "toolUse": {
+                                    "toolUseId": "message_toolUse_tasks",
+                                    "toolName": "list_tasks",
+                                    "inputJson": {"status": "all", "limit": "1"},
+                                },
+                                "tool_uses": [
+                                    {
+                                        "tool_call_id": "message_tool_uses_memory",
+                                        "name": "remember",
+                                        "input": {"key": "native-message-tool-uses-smoke", "value": "message tool_uses native tool call translated"},
+                                    }
+                                ],
+                                "toolUses": [
+                                    {
+                                        "id": "message_toolUses_tasks",
+                                        "functionName": "list_tasks",
+                                        "argsJson": {"status": "all", "limit": 1},
+                                    }
+                                ],
+                                "functionResponse": {
+                                    "name": "remember",
+                                    "response": {"content": native_message_tool_use_result_marker + " token=native-message-tool-use-secret"},
+                                },
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_message_tool_use_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_message_tool_use_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_message_tool_use_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIMessageToolUseSmokeResponse()
+
+        native_message_tool_use_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-message-tool-use-aliases.db"),
+                session_name="native-provider-message-tool-use-aliases-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-message-tool-use-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_message_tool_use_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_message_tool_use_urlopen
+            native_message_tool_use_plan = native_message_tool_use_runtime.handle_message('/auto model=true prompt="native message toolUse smoke token=native-message-tool-use-secret"')
+            native_message_tool_use_plan_payload = json.loads(native_message_tool_use_plan.split("\n", 1)[1])
+            native_message_tool_use_apply = native_message_tool_use_runtime.handle_message('/auto apply=true model=true prompt="native message toolUse smoke token=native-message-tool-use-secret"')
+            native_message_tool_use_apply_payload = json.loads(native_message_tool_use_apply.split("\n", 1)[1])
+            native_message_tool_use_recall_one = native_message_tool_use_runtime.handle_message('/recall query=native-message-tool-use-smoke')
+            native_message_tool_use_recall_two = native_message_tool_use_runtime.handle_message('/recall query=native-message-tool-uses-smoke')
+            native_message_tool_use_recall = native_message_tool_use_recall_one + "\n" + native_message_tool_use_recall_two
+            write("native-provider-message-tool-use-aliases.json", json.dumps({
+                "plan": native_message_tool_use_plan_payload,
+                "apply": native_message_tool_use_apply_payload,
+                "captured": native_message_tool_use_captured,
+                "recall": native_message_tool_use_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_message_tool_use_original_urlopen
+            native_message_tool_use_runtime.close()
+        native_message_tool_use_calls = native_message_tool_use_plan_payload.get("tool_calls", []) if isinstance(native_message_tool_use_plan_payload.get("tool_calls"), list) else []
+        native_message_tool_use_metadata = native_message_tool_use_plan_payload.get("metadata", {}) if isinstance(native_message_tool_use_plan_payload.get("metadata"), dict) else {}
+        native_message_tool_use_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_message_tool_use_calls]
+        native_message_tool_use_sources = [item.get("native_tool_call_source") for item in native_message_tool_use_call_metadata]
+        native_message_tool_use_ids = [item.get("provider_tool_call_id") for item in native_message_tool_use_call_metadata]
+        native_message_tool_use_ledger = native_message_tool_use_apply_payload.get("execution_ledger", []) if isinstance(native_message_tool_use_apply_payload.get("execution_ledger"), list) else []
+        native_message_tool_use_variants = native_status_data.get("provider_native_tool_call_variants", [])
+        checks["native_provider_message_tool_use_aliases_ok"] = (
+            native_message_tool_use_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_message_tool_use_calls] == ["remember", "list_tasks", "remember", "list_tasks"]
+            and native_message_tool_use_metadata.get("native_tool_calls") is True
+            and native_message_tool_use_metadata.get("native_tool_call_count") == 4
+            and native_message_tool_use_sources == ["native provider message tool_use", "native provider message toolUse", "native provider message tool_uses", "native provider message toolUses"]
+            and native_message_tool_use_ids == ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks"]
+            and [item.get("result", {}).get("status") for item in native_message_tool_use_apply_payload.get("results", [])] == ["ok"] * 4
+            and [item.get("native_tool_call_source") for item in native_message_tool_use_ledger] == native_message_tool_use_sources
+            and native_status_milestone_contract.get("message_tool_use_alias_translation") is True
+            and all(variant in native_message_tool_use_variants for variant in ["message_tool_use", "message_toolUse", "message_tool_uses", "message_toolUses"])
+            and "message tool_use native tool call translated" in native_message_tool_use_recall
+            and "message tool_uses native tool call translated" in native_message_tool_use_recall
+            and native_message_tool_use_captured.get("tool_choice") == "auto"
+            and native_message_tool_use_captured.get("tool_count", 0) > 0
+            and native_message_tool_use_result_marker not in native_message_tool_use_plan + native_message_tool_use_apply + native_message_tool_use_recall + json.dumps(native_message_tool_use_plan_payload) + json.dumps(native_message_tool_use_apply_payload)
+            and "native-message-tool-use-secret" not in native_message_tool_use_plan + native_message_tool_use_apply + native_message_tool_use_recall + json.dumps(native_message_tool_use_plan_payload) + json.dumps(native_message_tool_use_apply_payload)
         )
 
         native_message_function_captured = {}
@@ -6492,6 +6606,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_root_function_calls_snake_alias_ok",
             "native_provider_root_function_calls_snake_nested_function_call_alias_ok",
             "native_provider_root_tool_use_aliases_ok",
+            "native_provider_message_tool_use_aliases_ok",
             "native_provider_message_function_call_alias_ok",
             "native_provider_message_function_calls_alias_ok",
             "native_provider_message_function_calls_nested_function_call_alias_ok",

@@ -6116,6 +6116,123 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_message_tool_use_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Message ToolUse Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            provider_result_marker = "MESSAGE_TOOL_USE_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeMessageToolUseHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "message toolUse aliases token=message-tool-use-secret",
+                                    "tool_use": {
+                                        "tool_use_id": "message_tool_use_memory",
+                                        "name": "remember",
+                                        "input": {"key": "native-message-tool-use", "value": "message tool_use alias accepted"},
+                                    },
+                                    "toolUse": {
+                                        "toolUseId": "message_toolUse_tasks",
+                                        "toolName": "list_tasks",
+                                        "inputJson": {"status": "all", "limit": "1"},
+                                    },
+                                    "tool_uses": [
+                                        {
+                                            "tool_call_id": "message_tool_uses_memory",
+                                            "name": "remember",
+                                            "input": {"key": "native-message-tool-uses", "value": "message tool_uses alias accepted"},
+                                        }
+                                    ],
+                                    "toolUses": [
+                                        {
+                                            "id": "message_toolUses_tasks",
+                                            "functionName": "list_tasks",
+                                            "argsJson": {"status": "all", "limit": 1},
+                                        }
+                                    ],
+                                    "functionResponse": {
+                                        "name": "remember",
+                                        "response": {"content": provider_result_marker + " token=message-tool-use-secret"},
+                                    },
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeMessageToolUseHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-message-tool-use-aliases",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-message-tool-use", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native message toolUse aliases token=message-tool-use-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    calls = payload.get("tool_calls", [])
+                    self.assertEqual([call["tool"] for call in calls], ["remember", "list_tasks", "remember", "list_tasks"])
+                    sources = [call.get("metadata", {}).get("native_tool_call_source") for call in calls]
+                    self.assertEqual(
+                        sources,
+                        [
+                            "native provider message tool_use",
+                            "native provider message toolUse",
+                            "native provider message tool_uses",
+                            "native provider message toolUses",
+                        ],
+                    )
+                    self.assertEqual(
+                        [call.get("metadata", {}).get("provider_tool_call_id") for call in calls],
+                        ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks"],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+                    self.assertNotIn("message-tool-use-secret", planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native message toolUse aliases token=message-tool-use-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertTrue(all(item.get("result", {}).get("status") == "ok" for item in applied_payload.get("results", [])))
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], sources)
+                recall = runtime.handle_message('/recall query=native-message-tool')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                variants = status.get("provider_native_tool_call_variants", [])
+                for variant in ["message_tool_use", "message_toolUse", "message_tool_uses", "message_toolUses"]:
+                    self.assertIn(variant, variants)
+                self.assertTrue(status.get("milestone_contract", {}).get("message_tool_use_alias_translation"), status)
+                self.assertIn("message tool_use alias accepted", recall)
+                self.assertIn("message tool_uses alias accepted", recall)
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn(provider_result_marker, applied + recall + json.dumps(status))
+                self.assertNotIn("message-tool-use-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_message_function_calls_aliases_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
