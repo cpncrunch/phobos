@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -44,6 +45,7 @@ _TIMELINE_ORDER_VALUES = ("desc", "asc", "newest", "newest-first", "oldest", "ol
 _MEDIA_KIND_VALUES = ("image", "audio", "voice", "video", "file")
 _NMAP_PROFILE_VALUES = ("safe", "version", "quick")
 _AUTO_TRANSCRIPT_KIND_VALUES = ("all", "plan", "loop")
+_DELEGATION_SANDBOX_VALUES = ("thread", "process")
 
 # Registry-level resource ceilings for operator/API-controlled numeric args.
 # Handlers may keep defensive clamps, but the generic /tool and gateway boundary
@@ -306,7 +308,7 @@ class OffSecToolRegistry:
         self.register_tool("disable_job", self.disable_job, _spec("disable_job", "Disable a current-session scheduled job without deleting audit history.", {"id": _integer("Current-session scheduled job id.", minimum=1)}, ["id"]))
         self.register_tool("run_due_jobs", self.run_due_jobs, _spec("run_due_jobs", "List due current-session jobs from tool-only context; runtime executes them.", {}))
         self.register_tool("subagent_review", self.subagent_review, _spec("subagent_review", "Run parallel role reviews using the configured model adapter.", {"prompt": _string("Task/finding to review."), "roles": _string("Comma-separated roles."), "context": _string("Optional context.")}))
-        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts.", allow_non_string=True), "roles": _string("Comma roles when tasks is omitted.", allow_non_string=True), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}}, []))
+        self.register_tool("delegate_tasks", self.delegate_tasks, _spec("delegate_tasks", "Run bounded local pseudo-subagent tasks in parallel and persist their artifacts; isolated child sessions are created by default. sandbox=process runs each task through a separate stdlib worker process with redacted inputs.", {"prompt": _string("Overall task."), "tasks": _string("JSON/list or newline-separated task prompts.", allow_non_string=True), "roles": _string("Comma roles when tasks is omitted.", allow_non_string=True), "isolate": {"type": "boolean", "description": "Create separate child sessions for each local subagent task; default true."}, "sandbox": _string_enum("Delegation execution sandbox: thread (default) or process.", _DELEGATION_SANDBOX_VALUES), "timeout": _integer("Per-task process sandbox timeout in seconds.", minimum=1, maximum=_SCHEMA_WAIT_TIMEOUT_MAX)}, []))
         self.register_tool("list_delegations", self.list_delegations, _spec("list_delegations", "List durable local delegation batches.", {"limit": _integer("Maximum rows to return.", minimum=1, maximum=_SCHEMA_ROW_LIMIT_MAX)}, []))
         self.register_tool("get_delegation", self.get_delegation, _spec("get_delegation", "Get one current-session delegation batch by id, including child-session metadata and artifact paths.", {"id": _integer("Current-session delegation id.", minimum=1)}, ["id"]))
         self.register_tool("auth_status", self.auth_status, _spec("auth_status", "Check model/provider and bridge token environment variables without revealing secret values.", {"include_environment": {"type": "boolean"}}, []))
@@ -1351,7 +1353,14 @@ class OffSecToolRegistry:
         task_specs = _parse_delegate_tasks(args)
         if not task_specs:
             return ToolResult("error", "Provide tasks as JSON/list/newline text, or roles plus prompt.")
-        isolate = bool(args.get("isolate", True))
+        sandbox = _normalize_delegation_sandbox(args.get("sandbox") or args.get("isolation") or "thread")
+        if sandbox not in _DELEGATION_SANDBOX_VALUES:
+            return ToolResult("error", "sandbox must be one of: thread, process.")
+        isolate = _truthy_bool(args.get("isolate", True), default=True)
+        if sandbox == "process":
+            isolate = True
+        raw_timeout = args.get("timeout")
+        timeout = min(max(int(self.default_timeout), 1), _SCHEMA_WAIT_TIMEOUT_MAX) if raw_timeout is None else max(1, min(int(raw_timeout), _SCHEMA_WAIT_TIMEOUT_MAX))
         delegation_id = self.store.create_delegation(self.session_id, prompt, task_specs)
         out_dir = self.harness.store.root / "agent" / "delegations" / f"delegation-{delegation_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1364,47 +1373,78 @@ class OffSecToolRegistry:
             task_context = str(task.get("context") or prompt)
             child_session_id = ""
             child_session_name = ""
+            child_workspace = ""
             if isolate:
                 child_session_name = f"delegation-{delegation_id}-task-{idx}-{_safe_filename(role)}"
                 child_session_id = self.store.get_or_create_session(child_session_name, engagement_path)
-                self.store.append_message(child_session_id, "user", task_prompt, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role})
-            prepared.append({"index": idx, "role": role, "prompt": task_prompt, "context": task_context, "child_session_id": child_session_id, "child_session_name": child_session_name})
+                self.store.append_message(child_session_id, "user", task_prompt, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role, "sandbox": sandbox})
+            if sandbox == "process":
+                child_workspace = str((out_dir / f"task-{idx}-{_safe_filename(role)}-workspace").resolve(strict=False))
+            prepared.append({"index": idx, "role": role, "prompt": task_prompt, "context": task_context, "child_session_id": child_session_id, "child_session_name": child_session_name, "child_workspace": child_workspace})
         results: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(6, len(prepared))) as pool:
-            future_map = {pool.submit(self.model_adapter.generate, item["role"], item["prompt"], item["context"]): item for item in prepared}
-            for future in as_completed(future_map):
-                item = future_map[future]
-                idx = int(item["index"])
-                role = str(item["role"])
-                task_prompt = str(item["prompt"])
-                try:
-                    content = redact_secrets(future.result().content) or ""
-                    status = "ok"
-                except Exception as exc:
-                    content = f"ERROR: {exc}"
-                    status = "error"
-                if item.get("child_session_id"):
-                    self.store.append_message(str(item["child_session_id"]), "assistant", content, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role, "status": status})
-                path = out_dir / f"task-{idx}-{_safe_filename(role)}.md"
-                child_line = f"Child session: {item.get('child_session_id') or 'none'}\n\n"
-                path.write_text(f"# Delegated Task {idx}: {role}\n\n{child_line}Prompt: {redact_secrets(task_prompt)}\n\n{content}\n", encoding="utf-8")
-                results.append({"index": idx, "role": role, "prompt": redact_secrets(task_prompt), "status": status, "content": content, "artifact": str(path), "child_session_id": item.get("child_session_id") or "", "child_session_name": item.get("child_session_name") or ""})
+
+        def record_result(item: dict[str, Any], content: str, status: str, worker_metadata: dict[str, Any] | None = None) -> None:
+            idx = int(item["index"])
+            role = str(item["role"])
+            task_prompt = str(item["prompt"])
+            if item.get("child_session_id"):
+                self.store.append_message(str(item["child_session_id"]), "assistant", content, {"delegation_id": delegation_id, "parent_session_id": self.session_id, "role": role, "status": status, "sandbox": sandbox})
+            path = out_dir / f"task-{idx}-{_safe_filename(role)}.md"
+            child_line = f"Child session: {item.get('child_session_id') or 'none'}\n"
+            sandbox_line = f"Sandbox: {sandbox}\n"
+            workspace_line = f"Child workspace: {item.get('child_workspace') or 'none'}\n\n"
+            path.write_text(f"# Delegated Task {idx}: {role}\n\n{child_line}{sandbox_line}{workspace_line}Prompt: {redact_secrets(task_prompt)}\n\n{content}\n", encoding="utf-8")
+            result_row = {"index": idx, "role": role, "prompt": redact_secrets(task_prompt), "status": status, "content": content, "artifact": str(path), "child_session_id": item.get("child_session_id") or "", "child_session_name": item.get("child_session_name") or "", "sandbox": sandbox}
+            if item.get("child_workspace"):
+                result_row["child_workspace"] = item.get("child_workspace") or ""
+            if worker_metadata:
+                result_row["worker"] = worker_metadata
+            results.append(result_row)
+
+        if sandbox == "process":
+            with ThreadPoolExecutor(max_workers=min(6, len(prepared))) as pool:
+                future_map = {pool.submit(_run_delegation_process_worker, item, out_dir, timeout): item for item in prepared}
+                for future in as_completed(future_map):
+                    item = future_map[future]
+                    try:
+                        worker_result = future.result()
+                        content = str(worker_result.get("content") or "")
+                        status = str(worker_result.get("status") or "error")
+                        worker_metadata = dict(worker_result.get("metadata") or {}) if isinstance(worker_result.get("metadata"), dict) else {}
+                    except Exception as exc:
+                        content = f"ERROR: {redact_secrets(str(exc))}"
+                        status = "error"
+                        worker_metadata = {}
+                    record_result(item, content, status, worker_metadata)
+        else:
+            with ThreadPoolExecutor(max_workers=min(6, len(prepared))) as pool:
+                future_map = {pool.submit(self.model_adapter.generate, item["role"], item["prompt"], item["context"]): item for item in prepared}
+                for future in as_completed(future_map):
+                    item = future_map[future]
+                    try:
+                        content = redact_secrets(future.result().content) or ""
+                        status = "ok"
+                    except Exception as exc:
+                        content = f"ERROR: {redact_secrets(str(exc))}"
+                        status = "error"
+                    record_result(item, content, status)
         results.sort(key=lambda item: int(item["index"]))
         summary_path = out_dir / "SUMMARY.md"
-        summary_lines = ["# Phobos Local Delegation", "", f"Delegation: {delegation_id}", f"Parent session: {self.session_id}", f"Isolated child sessions: {isolate}", f"Prompt: {redact_secrets(prompt)}", ""]
+        summary_lines = ["# Phobos Local Delegation", "", f"Delegation: {delegation_id}", f"Parent session: {self.session_id}", f"Isolated child sessions: {isolate}", f"Sandbox: {sandbox}", f"Prompt: {redact_secrets(prompt)}", ""]
         for result in results:
             session_note = f" — child session `{result.get('child_session_id')}`" if result.get("child_session_id") else ""
-            summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']}){session_note}", "", str(result["content"])[:4000], ""]
+            sandbox_note = f" — sandbox `{result.get('sandbox', 'thread')}`"
+            summary_lines += [f"## Task {result['index']} — {result['role']} ({result['status']}){session_note}{sandbox_note}", "", str(result["content"])[:4000], ""]
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
         status = "ok" if all(result["status"] == "ok" for result in results) else "error"
         delegation = self.store.complete_delegation(
             delegation_id,
             status,
             results,
-            {"summary": str(summary_path), "dir": str(out_dir), "isolated_child_sessions": isolate},
+            {"summary": str(summary_path), "dir": str(out_dir), "isolated_child_sessions": isolate, "sandbox": sandbox, "process_isolated": sandbox == "process"},
             session_id=self.session_id,
         )
-        return ToolResult(status, f"Delegation {delegation_id} completed with {len(results)} task(s).", {"delegation": delegation}, {"summary": str(summary_path), "directory": str(out_dir)})
+        return ToolResult(status, f"Delegation {delegation_id} completed with {len(results)} task(s) in {sandbox} sandbox mode.", {"delegation": delegation}, {"summary": str(summary_path), "directory": str(out_dir)})
 
     def list_delegations(self, args: dict[str, Any]) -> ToolResult:
         delegations = self.store.list_delegations(self.session_id, limit=int(args.get("limit", 20)))
@@ -1913,6 +1953,7 @@ class OffSecToolRegistry:
             "open_tasks": len([task for task in tasks if task["status"] not in {"completed", "cancelled"}]),
             "context_nodes": len(context_nodes),
             "delegations": len(delegations),
+            "delegation_sandboxing": {"default": "thread", "supported": list(_DELEGATION_SANDBOX_VALUES), "process_worker_available": True, "process_worker_no_target_activity": True},
             "media_artifacts": len(media),
             "tool_runs": len(tool_runs),
             "findings": len(findings),
@@ -4414,6 +4455,88 @@ def _request_from_args(args: dict[str, Any]) -> ActionRequest:
         command=args.get("command"),
         actor=str(args.get("actor", "operator")),
     )
+
+
+def _normalize_delegation_sandbox(value: Any) -> str:
+    text = str(value or "thread").strip().lower().replace("_", "-")
+    aliases = {
+        "": "thread",
+        "local": "thread",
+        "threads": "thread",
+        "threaded": "thread",
+        "subprocess": "process",
+        "process-isolated": "process",
+        "process-isolation": "process",
+        "worker": "process",
+    }
+    return aliases.get(text, text)
+
+
+def _run_delegation_process_worker(item: dict[str, Any], out_dir: Path, timeout: int) -> dict[str, Any]:
+    idx = int(item.get("index") or 0)
+    role = _safe_filename(str(item.get("role") or "impact"))
+    input_path = out_dir / f"task-{idx}-{role}-worker-input.json"
+    output_path = out_dir / f"task-{idx}-{role}-worker-output.json"
+    payload = _redacted_mapping({
+        "index": idx,
+        "role": str(item.get("role") or "impact"),
+        "prompt": str(item.get("prompt") or ""),
+        "context": str(item.get("context") or ""),
+        "child_session_id": str(item.get("child_session_id") or ""),
+        "child_session_name": str(item.get("child_session_name") or ""),
+        "child_workspace": str(item.get("child_workspace") or ""),
+    })
+    input_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    command = [sys.executable, "-m", "offsec_agent_harness.delegation_worker", "--input", str(input_path), "--output", str(output_path)]
+    env = os.environ.copy()
+    src_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = src_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    try:
+        completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "error",
+            "content": f"ERROR: process sandbox timed out after {timeout} second(s).",
+            "metadata": {
+                "sandbox": "process",
+                "process_isolated": True,
+                "no_target_activity": True,
+                "timeout_seconds": timeout,
+                "stdout_tail": redact_secrets(str(exc.stdout or "")[-1000:]) or "",
+                "stderr_tail": redact_secrets(str(exc.stderr or "")[-1000:]) or "",
+                "input": str(input_path),
+                "output": str(output_path),
+            },
+        }
+    metadata = {
+        "sandbox": "process",
+        "process_isolated": True,
+        "no_target_activity": True,
+        "returncode": completed.returncode,
+        "stdout_tail": redact_secrets(str(completed.stdout or "")[-1000:]) or "",
+        "stderr_tail": redact_secrets(str(completed.stderr or "")[-1000:]) or "",
+        "input": str(input_path),
+        "output": str(output_path),
+    }
+    if not output_path.is_file():
+        return {"status": "error", "content": "ERROR: process sandbox did not write an output artifact.", "metadata": metadata}
+    try:
+        parsed = json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "error", "content": f"ERROR: process sandbox output could not be parsed: {redact_secrets(str(exc))}", "metadata": metadata}
+    if not isinstance(parsed, dict):
+        return {"status": "error", "content": "ERROR: process sandbox output was not an object.", "metadata": metadata}
+    worker_metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+    merged_metadata = dict(metadata)
+    if isinstance(worker_metadata, dict):
+        merged_metadata.update(worker_metadata)
+    status = str(parsed.get("status") or ("ok" if completed.returncode == 0 else "error"))
+    content = redact_secrets(str(parsed.get("content") or "")) or ""
+    if completed.returncode != 0 and status == "ok":
+        status = "error"
+    if status != "ok" and not content:
+        content = "ERROR: process sandbox failed."
+    return _redacted_mapping({"status": status, "content": content, "metadata": merged_metadata})
 
 
 def _parse_delegate_tasks(args: dict[str, Any]) -> list[dict[str, Any]]:

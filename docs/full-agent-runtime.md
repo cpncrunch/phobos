@@ -21,7 +21,7 @@ The project now includes a local standalone agent runtime exposed as `phobos-age
 - **Foreground execution:** `/run` runs short ROE-gated commands when `execute=true`.
 - **Background processes:** `/start`, `/poll`, `/wait`, `/log`, `/kill`, `/process-detail`, and `/processes` provide Hermes-like process management with stdout/stderr artifacts and redacted current-session drill-down views.
 - **Job scheduling:** local durable job table with simple schedules such as `manual`, `every 15 m`, `every 1 h`, and `every 1 d`; redacted session-bound detail/update/enable/disable controls; run via `phobos-agent run-due` or external cron.
-- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail/completion paths, per-task artifacts, and child session records by default. Delegation prompts, task specs, results, and artifact metadata are redacted before SQLite storage.
+- **Subagent orchestration:** parallel role reviews plus durable local `/delegate` batches with session-bound detail/completion paths, per-task artifacts, and child session records by default. `delegate_tasks sandbox=process` runs tasks through separate bounded stdlib worker processes with redacted worker input/output artifacts, per-task child workspaces, and parent-only SQLite completion. Delegation prompts, task specs, results, and artifact metadata are redacted before SQLite storage.
 - **Model fallback chain:** `agent.config.json` can define ordered providers; the runtime tries them in order for both natural responses and native/JSON tool-call planning, preserving fallback attempt metadata in redacted auto transcripts.
 - **Native tool-calling status contract:** `/status` now exposes read-only native autonomy safety metadata plus a milestone acceptance matrix: model-planning enablement, wrapped/fenced JSON plan extraction support, the bounded step budget, follow-up prompt redaction, terminal no-tool/no-dispatch markers, execution-summary claim-count support, and max-step/model-error/invalid-plan/duplicate/same-step-duplicate stop enforcement, plan-only and explicit-`execute=true` defaults, one-shot and per-step planner traces, per-step execution-ledger delta support, supported provider-native tool-call variants, provider argument aliases such as `arguments_json`/`inputJson`, provider tool-call ID provenance in plan/result ledgers and transcript review summaries, provider `tool_result`/`function_result`/`function_call_output`/`functionResponse`/`function_response` echo suppression, custom/freeform provider tool-call rejection, model-hidden approval controls, execution-capable and target-affecting tool classes, local native-loop contract completion flags, and local transcript counts without reading target systems or raw transcript contents.
 - **Workspace file tools:** `/read`, `/write`, `/workspace-search`, and `/patch-file` are constrained to the engagement workspace and resolve symlink candidates before reading/searching.
@@ -910,6 +910,7 @@ session_bound_context_nodes_ok=True
 hindsight_lcm_aliases_ok=True
 delegation_batches_ok=True
 isolated_delegation_sessions_ok=True
+process_isolated_delegation_ok=True
 delegation_detail_session_bound_ok=True
 delegation_storage_redaction_ok=True
 auth_status_redacted_ok=True
@@ -947,7 +948,7 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=563
+artifact_count=577
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
@@ -1001,6 +1002,7 @@ secret-scan-cli.command.txt
 secret-scan-cli.stderr.txt
 secret-scan-cli.stdout.txt
 delegation.json
+delegation-process.json
 delegation-storage.json
 delegations.json
 deploy-kit.stdout.txt
@@ -1101,7 +1103,7 @@ This is now a real local Hermes-like offsec agent runtime, but it is still not a
 - bridge media handling imports explicit local files and records remote platform attachment metadata, but does not blindly download remote attachments or transcribe voice/audio;
 - web UI is intentionally minimal and single-operator oriented, not a production multi-user console; remote/VPS use requires bearer-token auth plus TLS/reverse proxy, firewall, VPN, or SSH tunnel controls, and there is no RBAC/session management;
 - `/auto` has a verified local native model/tool-calling loop with deterministic fake-adapter smoke coverage, bounded redacted runtime context, wrapped/fenced JSON plan extraction, pre-dispatch name/schema validation, runtime-policy confirm/block annotations, read-only guardrail preview metadata for target-affecting calls, explicit allowed-execution ledger proof, natural-message auto-execute provenance when that opt-in mode is enabled, direct operator approval replay proof for confirm-gated native plans, redacted one-shot planner/provider traces, redacted rejected-call transcript entries, provider `tool_result`/`functionResponse` ignore handling, provider candidate list-or-single `parts` `functionCall` translation, custom/freeform native-call rejection without input echo that is part of the aggregate milestone smoke gate, redacted plan-preview and applied-plan transcripts under `agent/auto-plans`, redacted execution ledgers, a `/status` milestone contract matrix, and a bounded cumulative result-feedback `/auto-loop` that redacts follow-up copies of the original prompt plus tool-result feedback and writes redacted transcript artifacts that respect terminal no-tool model responses after feedback, stops with explicit `model_error` state on post-feedback provider failure, and stops rather than continuing past queued approvals or blocked results, but it is still scoped to Phobos' local registry/guardrail runtime rather than Hermes' full general-purpose autonomy;
-- local `/delegate` persists batches, artifacts, and child session records, but it is not Hermes' true isolated subagent runtime with separate tool/terminal sandboxes;
+- local `/delegate` now supports process-isolated deterministic worker tasks with per-task child sessions/workspaces/artifacts, but it is still not Hermes' true distributed subagent sandbox with independent terminal/tool backends or separate model credentials;
 - sealed snapshots and `seal-db`/`unseal-db` provide authenticated passphrase-env protected exports/backups; this is not transparent live SQLite page encryption unless the operator also uses filesystem encryption, SQLCipher, or another deployment control;
 - Phobos now has explicit LCM-style context nodes and Hindsight-style aliases over local memory/context, but it does not implement Hermes' live long-context compression DAG or full Hindsight/Obsidian memory system;
 

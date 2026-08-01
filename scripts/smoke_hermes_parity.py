@@ -4995,9 +4995,34 @@ def main(argv: list[str] | None = None) -> int:
         write("delegation.json", json.dumps(delegation.to_dict(), indent=2))
         write("delegations.json", json.dumps(delegation_list.to_dict(), indent=2))
         write("delegation-storage.json", json.dumps({"cross_complete": cross_complete_delegation, "raw_delegation": raw_delegation}, indent=2))
+        process_delegation = runtime.registry.run("delegate_tasks", {"prompt": "Review process isolation token=delegation-process-secret", "roles": "scope,safety", "sandbox": "process", "timeout": 20})
+        write("delegation-process.json", json.dumps(process_delegation.to_dict(), indent=2))
+        process_results = process_delegation.data.get("delegation", {}).get("results", []) if isinstance(process_delegation.data.get("delegation"), dict) else []
+        process_blob = json.dumps(process_delegation.to_dict())
+        process_worker_artifact_blob = ""
+        for item in process_results:
+            worker = item.get("worker", {}) if isinstance(item, dict) else {}
+            if isinstance(worker, dict):
+                for key in ("input", "output"):
+                    worker_path = Path(str(worker.get(key, "")))
+                    if worker_path.is_file():
+                        process_worker_artifact_blob += worker_path.read_text(encoding="utf-8")
         child_session_ids = [item.get("child_session_id") for item in delegation.data.get("delegation", {}).get("results", [])]
         checks["delegation_batches_ok"] = delegation.status == "ok" and delegation_list.data.get("delegations") and Path(delegation.artifacts.get("summary", "")).exists()
         checks["isolated_delegation_sessions_ok"] = len([sid for sid in child_session_ids if sid]) == 2 and all(sid != runtime.session_id for sid in child_session_ids)
+        checks["process_isolated_delegation_ok"] = (
+            process_delegation.status == "ok"
+            and len(process_results) == 2
+            and all(item.get("sandbox") == "process" for item in process_results)
+            and all(item.get("worker", {}).get("process_isolated") is True for item in process_results)
+            and all(item.get("worker", {}).get("no_target_activity") is True for item in process_results)
+            and all(Path(str(item.get("worker", {}).get("input", ""))).is_file() for item in process_results)
+            and all(Path(str(item.get("worker", {}).get("output", ""))).is_file() for item in process_results)
+            and all(Path(str(item.get("child_workspace", ""))).is_dir() for item in process_results)
+            and "delegation-process-secret" not in process_blob
+            and "delegation-process-secret" not in process_worker_artifact_blob
+            and "<REDACTED>" in process_worker_artifact_blob
+        )
         checks["delegation_detail_session_bound_ok"] = delegation_detail.status == "ok" and cross_delegation_detail.status == "error" and "not found in this session" in cross_delegation_detail.message and "supersecret" not in json.dumps(cross_delegation_detail.to_dict())
         checks["delegation_storage_redaction_ok"] = (
             cross_complete_delegation is None

@@ -2558,6 +2558,48 @@ class AgentRuntimeTests(unittest.TestCase):
                 child_search = runtime.store.search_all_messages("review lcm parity evidence", limit=10)
                 self.assertTrue(any(row.get("session_id") in child_ids for row in child_search))
 
+                process_schema = runtime.registry.run("tool_schemas", {"name": "delegate_tasks"})
+                schema_props = process_schema.data["tools"][0]["schema"]["properties"]
+                self.assertEqual(schema_props["sandbox"]["enum"], ["thread", "process"])
+                self.assertEqual(schema_props["timeout"]["maximum"], 300)
+                process_delegated = runtime.registry.run("delegate_tasks", {"prompt": "process isolated delegation token=process-secret", "roles": "scope,safety", "sandbox": "process", "timeout": 20})
+                self.assertEqual(process_delegated.status, "ok", process_delegated.to_dict())
+                process_delegation_id = process_delegated.data["delegation"]["id"]
+                process_results = process_delegated.data["delegation"]["results"]
+                self.assertEqual(len(process_results), 2)
+                self.assertTrue(all(item.get("sandbox") == "process" for item in process_results))
+                self.assertTrue(all(item.get("worker", {}).get("process_isolated") is True for item in process_results))
+                self.assertTrue(all(item.get("worker", {}).get("no_target_activity") is True for item in process_results))
+                self.assertTrue(all(Path(str(item.get("worker", {}).get("output", ""))).is_file() for item in process_results))
+                self.assertTrue(all(Path(str(item.get("child_workspace", ""))).is_dir() for item in process_results))
+                process_child_ids = {item["child_session_id"] for item in process_results}
+                self.assertEqual(len(process_child_ids), 2)
+                self.assertNotIn(runtime.session_id, process_child_ids)
+                process_blob = json.dumps(process_delegated.to_dict())
+                self.assertNotIn("process-secret", process_blob)
+                process_artifact_text = Path(process_delegated.artifacts["summary"]).read_text(encoding="utf-8")
+                self.assertIn("Sandbox: process", process_artifact_text)
+                self.assertNotIn("process-secret", process_artifact_text)
+                for item in process_results:
+                    worker = item.get("worker", {})
+                    worker_blob = ""
+                    for key in ("input", "output"):
+                        worker_path = Path(str(worker.get(key, "")))
+                        self.assertTrue(worker_path.is_file(), worker)
+                        worker_blob += worker_path.read_text(encoding="utf-8")
+                    self.assertNotIn("process-secret", worker_blob)
+                    self.assertIn("<REDACTED>", worker_blob)
+                process_raw = runtime.store.conn.execute(
+                    "SELECT prompt, tasks_json, results_json, artifacts_json FROM delegations WHERE id=?",
+                    (process_delegation_id,),
+                ).fetchone()
+                process_raw_text = "".join(str(process_raw[key] or "") for key in process_raw.keys()) if process_raw else ""
+                self.assertNotIn("process-secret", process_raw_text)
+                self.assertIn("<REDACTED>", process_raw_text)
+                status = runtime.registry.run("runtime_status", {})
+                self.assertIn("process", status.data.get("delegation_sandboxing", {}).get("supported", []))
+                self.assertTrue(status.data.get("delegation_sandboxing", {}).get("process_worker_no_target_activity"), status.to_dict())
+
                 started = runtime.registry.run("start_process", {
                     "target": "app.example.test",
                     "type": "host",
