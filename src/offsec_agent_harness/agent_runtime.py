@@ -39,6 +39,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "candidate_function_call_translation": True,
     "single_candidate_part_function_call_translation": True,
     "single_content_block_tool_call_translation": True,
+    "top_level_content_block_tool_call_translation": True,
     "provider_argument_alias_translation": True,
     "schema_validation_before_dispatch": True,
     "runtime_policy_boundary": True,
@@ -1340,6 +1341,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
                 "content_block_tool_use",
                 "content_block_function_call",
                 "single_content_block_tool_call",
+                "top_level_content_block_tool_use",
                 "responses_output_function_call",
                 "candidate_function_call",
                 "single_candidate_part_function_call",
@@ -2425,7 +2427,11 @@ def _format_result(result: ToolResult) -> str:
         lines.extend(f"- {key}: {value}" for key, value in result.artifacts.items())
     if result.data:
         lines.append("Data:")
-        lines.append(json.dumps(result.data, indent=2)[:6000])
+        # Keep slash/gateway raw responses machine-parseable as features grow.
+        # Chat bridges and transcript detail renderers perform their own bounded
+        # summaries; truncating JSON here can break status/schema/native-loop
+        # contract parsing and cause bridge summaries to fall back to generic text.
+        lines.append(json.dumps(result.data, indent=2))
     return "\n".join(lines)
 
 

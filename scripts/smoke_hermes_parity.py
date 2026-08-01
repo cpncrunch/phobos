@@ -1991,6 +1991,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
+            and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
@@ -2017,6 +2018,7 @@ def main(argv: list[str] | None = None) -> int:
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2590,6 +2592,87 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_content_ledger] == ["content_memory_alias", "content_tasks_alias"]
             and [item.get("native_tool_call_source") for item in native_content_ledger] == ["native content-block tool_use", "native content-block function_call"]
             and "native-content-block-secret" not in json.dumps(native_content_call_metadata) + json.dumps(native_content_ledger)
+        )
+
+        native_top_level_content_captured = {}
+
+        class NativeTopLevelContentBlockSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "id": "msg_top_level_content_smoke",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "native top-level content smoke token=native-top-level-content-secret"},
+                        {
+                            "type": "tool_use",
+                            "tool_use_id": "top_level_content_memory",
+                            "name": "remember",
+                            "input": {"key": "native-top-level-content-smoke", "value": "top-level content native tool call translated"},
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "top_level_content_tasks",
+                            "name": "list_tasks",
+                            "argumentsJson": {"status": "all", "limit": "1"},
+                        },
+                        {"type": "tool_result", "content": native_provider_result_marker + " token=native-top-level-content-secret"},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_top_level_content_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_top_level_content_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_top_level_content_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeTopLevelContentBlockSmokeResponse()
+
+        native_top_level_content_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-top-level-content-block.db"),
+                session_name="native-provider-top-level-content-block-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-top-level-content-block-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_top_level_content_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_top_level_content_urlopen
+            native_top_level_content_plan = native_top_level_content_runtime.handle_message('/auto model=true prompt="native top-level content block smoke token=native-top-level-content-secret"')
+            native_top_level_content_plan_payload = json.loads(native_top_level_content_plan.split("\n", 1)[1])
+            native_top_level_content_apply = native_top_level_content_runtime.handle_message('/auto apply=true model=true prompt="native top-level content block smoke token=native-top-level-content-secret"')
+            native_top_level_content_apply_payload = json.loads(native_top_level_content_apply.split("\n", 1)[1])
+            native_top_level_content_recall = native_top_level_content_runtime.handle_message('/recall query=native-top-level-content-smoke')
+            write("native-provider-top-level-content-block-tool-calls.json", json.dumps({
+                "plan": native_top_level_content_plan_payload,
+                "apply": native_top_level_content_apply_payload,
+                "captured": native_top_level_content_captured,
+                "recall": native_top_level_content_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_top_level_content_original_urlopen
+            native_top_level_content_runtime.close()
+        native_top_level_content_calls = native_top_level_content_plan_payload.get("tool_calls", []) if isinstance(native_top_level_content_plan_payload.get("tool_calls"), list) else []
+        native_top_level_content_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_top_level_content_calls]
+        native_top_level_content_ledger = native_top_level_content_apply_payload.get("execution_ledger", []) if isinstance(native_top_level_content_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_top_level_content_block_tool_call_ok"] = (
+            native_top_level_content_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_top_level_content_calls] == ["remember", "list_tasks"]
+            and [item.get("provider_tool_call_id") for item in native_top_level_content_call_metadata] == ["top_level_content_memory", "top_level_content_tasks"]
+            and [item.get("provider_tool_call_id") for item in native_top_level_content_ledger] == ["top_level_content_memory", "top_level_content_tasks"]
+            and [item.get("result", {}).get("status") for item in native_top_level_content_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
+            and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "top-level content native tool call translated" in native_top_level_content_recall
+            and native_top_level_content_captured.get("tool_choice") == "auto"
+            and native_top_level_content_captured.get("tool_count", 0) > 0
+            and native_provider_result_marker not in native_top_level_content_plan + native_top_level_content_apply + native_top_level_content_recall + json.dumps(native_top_level_content_plan_payload) + json.dumps(native_top_level_content_apply_payload)
+            and "native-top-level-content-secret" not in native_top_level_content_plan + native_top_level_content_apply + native_top_level_content_recall + json.dumps(native_top_level_content_plan_payload) + json.dumps(native_top_level_content_apply_payload)
         )
 
         native_argument_alias_captured = {}

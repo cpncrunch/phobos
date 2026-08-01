@@ -342,6 +342,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     responses_message = _responses_output_to_message(raw)
     if responses_message:
         return responses_message
+    top_level_message = _top_level_content_message(raw)
+    if top_level_message:
+        return top_level_message
     return {}
 
 
@@ -554,6 +557,32 @@ def _extend_responses_content_blocks(blocks: list[dict[str, Any]], content: Any)
             blocks.append(dict(block))
         elif isinstance(block, str):
             blocks.append({"type": "text", "text": block})
+
+
+def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize top-level content/tool-call payloads into chat message shape.
+
+    Some local shims expose Anthropic-style Messages responses directly instead
+    of wrapping them in Chat Completions ``choices`` or Responses ``output``.
+    Those payloads commonly put ``content`` blocks (including ``tool_use``) at
+    the response root.  Treat them as planner proposals only: this adapter-level
+    conversion does not dispatch handlers or queue approvals, and the runtime's
+    normal schema, runtime-policy, ROE, and transcript boundaries remain
+    authoritative.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    message: dict[str, Any] = {}
+    if "content" in raw:
+        content = raw.get("content")
+        if isinstance(content, (str, list, dict)) or content is None:
+            message["content"] = content
+    if "tool_calls" in raw:
+        message["tool_calls"] = raw.get("tool_calls")
+    if isinstance(raw.get("function_call"), dict):
+        message["function_call"] = raw.get("function_call")
+    return message if message else {}
 
 
 def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
