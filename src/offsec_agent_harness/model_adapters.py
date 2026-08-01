@@ -1120,7 +1120,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message tool_calls"
         elif provider_shape == "responses.message.tool_call":
             label = "native provider responses message tool_call"
-        elif provider_shape in {"responses.message.toolCalls", "responses.message.toolCall"}:
+        elif provider_shape == "responses.message.toolCalls":
+            label = "native provider responses message toolCalls"
+        elif provider_shape == "responses.message.toolCall":
             label = "native provider responses message toolCall"
         elif provider_shape == "responses.message.function_call":
             label = "native provider responses message function_call"
@@ -1173,7 +1175,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses message tool_calls"
         elif item.get("_provider_shape") == "responses.message.tool_call":
             label = "native provider responses message tool_call"
-        elif item.get("_provider_shape") in {"responses.message.toolCalls", "responses.message.toolCall"}:
+        elif item.get("_provider_shape") == "responses.message.toolCalls":
+            label = "native provider responses message toolCalls"
+        elif item.get("_provider_shape") == "responses.message.toolCall":
             label = "native provider responses message toolCall"
         elif item.get("_provider_shape") == "responses.message.function_call":
             label = "native provider responses message function_call"
