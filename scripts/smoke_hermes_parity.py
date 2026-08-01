@@ -2067,6 +2067,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
+            and native_status_milestone_contract.get("provider_call_id_redaction_bounds") is True
             and native_status_milestone_contract.get("transcript_provider_call_provenance") is True
             and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("singular_tool_call_alias_translation") is True
@@ -2127,6 +2128,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("followup_prompt_secret_redaction") is True
             and native_status_data.get("execution_summary_contract") is True
             and native_status_data.get("provider_tool_call_id_provenance") is True
+            and native_status_data.get("provider_call_id_redaction_bounds") is True
             and native_status_data.get("transcript_provider_call_provenance") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
@@ -2471,6 +2473,96 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_flat_ledger] == ["flat_memory", "flat_dry"]
             and native_flat_ledger[1].get("native_tool_call_source") == "native provider flat tool_call"
             and "native-flat-secret" not in json.dumps(native_flat_call_metadata) + json.dumps(native_flat_ledger)
+        )
+
+        native_call_id_secret = "token=native-call-id-smoke-secret\n" + ("I" * 260)
+
+        class NativeCallIdBoundarySmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native call-id boundary smoke token=native-call-id-smoke-secret",
+                                "tool_calls": [
+                                    {
+                                        "id": native_call_id_secret,
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-call-id-boundary-smoke", "value": "call id boundary translated"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_call_id_urlopen(request, timeout=0):
+            return NativeCallIdBoundarySmokeResponse()
+
+        native_call_id_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-call-id-boundary.db"),
+                session_name="native-provider-call-id-boundary-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-call-id-boundary", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_call_id_original_urlopen = model_adapters.urllib.request.urlopen
+        native_call_id_transcript_text = ""
+        native_call_id_transcript_detail = {"status": "missing"}
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_call_id_urlopen
+            native_call_id_plan = native_call_id_runtime.handle_message('/auto model=true prompt="native call id boundary smoke"')
+            native_call_id_payload = json.loads(native_call_id_plan.split("\n", 1)[1])
+            native_call_id_artifacts = native_call_id_payload.get("artifacts", {}) if isinstance(native_call_id_payload.get("artifacts"), dict) else {}
+            for artifact in native_call_id_artifacts.values():
+                artifact_path = Path(str(artifact))
+                if artifact_path.is_file():
+                    native_call_id_transcript_text += artifact_path.read_text(encoding="utf-8")
+            native_call_id_json_path = Path(str(native_call_id_artifacts.get("json", "")))
+            if native_call_id_json_path.is_file():
+                native_call_id_rel = native_call_id_json_path.relative_to(native_call_id_runtime.registry.harness.store.root).as_posix()
+                native_call_id_transcript_detail = native_call_id_runtime.registry.run("get_auto_transcript", {"path": native_call_id_rel, "max_ledger": 5}).to_dict()
+            native_call_id_status = native_call_id_runtime.registry.run("runtime_status", {}).to_dict()
+            write("native-provider-call-id-boundary.json", json.dumps({
+                "payload": native_call_id_payload,
+                "transcript_detail": native_call_id_transcript_detail,
+                "status": native_call_id_status,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_call_id_original_urlopen
+            native_call_id_runtime.close()
+        native_call_id_metadata = native_call_id_payload.get("tool_calls", [{}])[0].get("metadata", {}) if isinstance(native_call_id_payload.get("tool_calls"), list) else {}
+        native_call_id_value = str(native_call_id_metadata.get("provider_tool_call_id") or "")
+        native_call_id_summary = native_call_id_transcript_detail.get("data", {}).get("summary", {}) if isinstance(native_call_id_transcript_detail.get("data"), dict) else {}
+        native_call_id_transcript_value = str(native_call_id_summary.get("tool_calls", [{}])[0].get("provider_tool_call_id") or "") if isinstance(native_call_id_summary.get("tool_calls"), list) else ""
+        native_call_id_status_data = native_call_id_status.get("data", {}).get("native_tool_calling", {}) if isinstance(native_call_id_status.get("data"), dict) else {}
+        native_call_id_blob = json.dumps({
+            "payload": native_call_id_payload,
+            "transcript_detail": native_call_id_transcript_detail,
+            "status": native_call_id_status,
+        }, sort_keys=True) + native_call_id_transcript_text + native_call_id_plan
+        checks["native_provider_call_id_redaction_bounds_ok"] = (
+            native_call_id_payload.get("mode") == "plan_only"
+            and native_call_id_value == native_call_id_transcript_value
+            and len(native_call_id_value) <= 200
+            and "\n" not in native_call_id_value
+            and "token=<REDACTED>" in native_call_id_value
+            and "...[truncated]" in native_call_id_value
+            and native_call_id_status_data.get("provider_call_id_redaction_bounds") is True
+            and native_call_id_status_data.get("milestone_contract", {}).get("provider_call_id_redaction_bounds") is True
+            and "native-call-id-smoke-secret" not in native_call_id_blob
+            and ("I" * 210) not in native_call_id_blob
         )
         checks["native_tool_call_transcript_provenance_ok"] = (
             native_flat_transcript_detail.get("status") == "ok"
@@ -7602,6 +7694,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_choice_delta_tool_use_fragment_ok",
             "native_provider_tool_calls_nested_aliases_ok",
             "native_tool_call_provider_call_id_provenance_ok",
+            "native_provider_call_id_redaction_bounds_ok",
             "native_tool_call_transcript_provenance_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",

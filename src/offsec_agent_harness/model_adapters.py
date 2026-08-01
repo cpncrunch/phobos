@@ -2117,8 +2117,24 @@ def _native_call_id(*items: Any) -> str:
         for key in ("id", "call_id", "tool_call_id", "tool_use_id", "callId", "toolCallId", "toolUseId"):
             value = item.get(key)
             if value not in (None, ""):
-                return str(value)
+                return _sanitize_native_call_id(value)
     return ""
+
+
+def _sanitize_native_call_id(value: Any, *, limit: int = 200) -> str:
+    """Return a transcript-safe provider tool-call correlation id.
+
+    Provider call ids are useful provenance, but they are still model/provider
+    controlled strings.  Keep them single-line, redacted, and bounded before they
+    reach reasons, metadata, ledgers, or transcript Markdown.
+    """
+
+    text = redact_secrets(str(value)) or ""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
+    if len(text) > limit:
+        suffix = "...[truncated]"
+        text = text[: max(0, limit - len(suffix))] + suffix
+    return text
 
 
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "toolUse", "tool_call", "function_call", "functionCall"}

@@ -2943,6 +2943,89 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_native_provider_call_ids_are_redacted_bounded_and_single_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Provider Call ID Boundary",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            raw_call_id = "provider-id token=provider-call-id-secret\n" + ("A" * 260)
+
+            class FakeCallIdHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native provider call-id boundary",
+                                    "tool_calls": [
+                                        {
+                                            "id": raw_call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-call-id-boundary", "value": "bounded provider call id accepted"}),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                return FakeCallIdHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-call-id-boundary",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-call-id-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native provider call id boundary"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(payload.get("mode"), "plan_only")
+                call_metadata = payload.get("tool_calls", [{}])[0].get("metadata", {})
+                provider_call_id = call_metadata.get("provider_tool_call_id", "")
+                self.assertLessEqual(len(provider_call_id), 200)
+                self.assertNotIn("\n", provider_call_id)
+                self.assertIn("token=<REDACTED>", provider_call_id)
+                self.assertIn("...[truncated]", provider_call_id)
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("provider_call_id_redaction_bounds"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_call_id_redaction_bounds"), status)
+                artifact_paths = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+                transcript_text = ""
+                for artifact in artifact_paths.values():
+                    path = Path(str(artifact))
+                    if path.is_file():
+                        transcript_text += path.read_text(encoding="utf-8")
+                transcript_rel = Path(artifact_paths.get("json", "")).relative_to(runtime.registry.harness.store.root).as_posix()
+                transcript_detail = runtime.registry.run("get_auto_transcript", {"path": transcript_rel, "max_ledger": 5}).to_dict()
+                transcript_call_id = transcript_detail.get("data", {}).get("summary", {}).get("tool_calls", [{}])[0].get("provider_tool_call_id", "")
+                combined = planned + json.dumps(payload) + transcript_text + json.dumps(transcript_detail) + json.dumps(status)
+                self.assertEqual(transcript_call_id, provider_call_id)
+                self.assertNotIn("provider-call-id-secret", combined)
+                self.assertNotIn("A" * 210, combined)
+                self.assertNotIn("\nAAAAAAAAAA", combined)
+            finally:
+                runtime.close()
+
     def test_openai_responses_adapter_native_tool_plan_uses_responses_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
