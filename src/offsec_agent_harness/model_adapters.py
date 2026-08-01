@@ -370,6 +370,27 @@ def _message_content_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _native_argument_keys(preferred: tuple[str, ...]) -> list[str]:
+    """Return provider argument keys plus common JSON alias variants.
+
+    Most providers use ``arguments``, ``args`` or ``input``.  A few
+    OpenAI-compatible and bridge shims expose the same payload under aliases
+    such as ``arguments_json`` or camelCase ``inputJson``.  Normalize those at
+    the adapter boundary so schema/ROE/runtime-policy validation still happens
+    in the Phobos runtime rather than requiring provider-specific planner code.
+    """
+
+    keys: list[str] = []
+    for raw_key in preferred:
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        for candidate in (key, f"{key}_json", f"{key}Json"):
+            if candidate not in keys:
+                keys.append(candidate)
+    return keys
+
+
 def _native_argument_value(
     mapping: dict[str, Any],
     *,
@@ -377,10 +398,18 @@ def _native_argument_value(
 ) -> Any:
     if not isinstance(mapping, dict):
         return {}
-    for key in preferred:
-        if key in mapping:
-            return mapping.get(key)
-    return {}
+    first_present: Any = None
+    has_present = False
+    for key in _native_argument_keys(preferred):
+        if key not in mapping:
+            continue
+        value = mapping.get(key)
+        if not has_present:
+            first_present = value
+            has_present = True
+        if value not in (None, ""):
+            return value
+    return first_present if has_present else {}
 
 
 def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:

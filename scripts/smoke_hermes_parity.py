@@ -1991,6 +1991,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("single_content_block_tool_call_translation") is True
+            and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
             and native_status_data.get("natural_auto_execute_enabled") is False
@@ -2021,6 +2022,8 @@ def main(argv: list[str] | None = None) -> int:
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
+            and "inputJson" in native_status_data.get("provider_argument_aliases", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
@@ -2587,6 +2590,97 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_content_ledger] == ["content_memory_alias", "content_tasks_alias"]
             and [item.get("native_tool_call_source") for item in native_content_ledger] == ["native content-block tool_use", "native content-block function_call"]
             and "native-content-block-secret" not in json.dumps(native_content_call_metadata) + json.dumps(native_content_ledger)
+        )
+
+        native_argument_alias_captured = {}
+
+        class NativeOpenAIArgumentAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "native argument alias smoke token=native-argument-alias-secret"},
+                                    {
+                                        "type": "tool_use",
+                                        "tool_use_id": "alias_content_tasks",
+                                        "name": "list_tasks",
+                                        "inputJson": {"status": "all", "limit": "1"},
+                                    },
+                                ],
+                                "tool_calls": [
+                                    {
+                                        "id": "alias_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments_json": {"key": "native-argument-alias-smoke", "value": "argument alias native tool call translated"},
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_argument_alias_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_argument_alias_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_argument_alias_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIArgumentAliasSmokeResponse()
+
+        native_argument_alias_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-argument-aliases.db"),
+                session_name="native-provider-argument-aliases-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-argument-alias-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_argument_alias_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_argument_alias_urlopen
+            native_argument_alias_plan = native_argument_alias_runtime.handle_message('/auto model=true prompt="native argument alias smoke token=native-argument-alias-secret"')
+            native_argument_alias_plan_payload = json.loads(native_argument_alias_plan.split("\n", 1)[1])
+            native_argument_alias_apply = native_argument_alias_runtime.handle_message('/auto apply=true model=true prompt="native argument alias smoke token=native-argument-alias-secret"')
+            native_argument_alias_apply_payload = json.loads(native_argument_alias_apply.split("\n", 1)[1])
+            native_argument_alias_recall = native_argument_alias_runtime.handle_message('/recall query=native-argument-alias-smoke')
+            write("native-provider-argument-aliases.json", json.dumps({
+                "plan": native_argument_alias_plan_payload,
+                "apply": native_argument_alias_apply_payload,
+                "captured": native_argument_alias_captured,
+                "recall": native_argument_alias_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_argument_alias_original_urlopen
+            native_argument_alias_runtime.close()
+        native_argument_alias_calls = native_argument_alias_plan_payload.get("tool_calls", []) if isinstance(native_argument_alias_plan_payload.get("tool_calls"), list) else []
+        native_argument_alias_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_argument_alias_calls]
+        native_argument_alias_ledger = native_argument_alias_apply_payload.get("execution_ledger", []) if isinstance(native_argument_alias_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_argument_aliases_ok"] = (
+            native_argument_alias_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_argument_alias_calls] == ["remember", "list_tasks"]
+            and native_argument_alias_calls[0].get("args", {}).get("key") == "native-argument-alias-smoke"
+            and native_argument_alias_calls[1].get("args", {}).get("status") == "all"
+            and native_argument_alias_calls[1].get("args", {}).get("limit") == 1
+            and [item.get("provider_tool_call_id") for item in native_argument_alias_call_metadata] == ["alias_memory", "alias_content_tasks"]
+            and [item.get("provider_tool_call_id") for item in native_argument_alias_ledger] == ["alias_memory", "alias_content_tasks"]
+            and [item.get("result", {}).get("status") for item in native_argument_alias_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("provider_argument_alias_translation") is True
+            and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
+            and "inputJson" in native_status_data.get("provider_argument_aliases", [])
+            and "argument alias native tool call translated" in native_argument_alias_recall
+            and native_argument_alias_captured.get("tool_choice") == "auto"
+            and native_argument_alias_captured.get("tool_count", 0) > 0
+            and "native-argument-alias-secret" not in native_argument_alias_plan + native_argument_alias_apply + native_argument_alias_recall + json.dumps(native_argument_alias_plan_payload) + json.dumps(native_argument_alias_apply_payload)
         )
 
         native_single_content_captured = {}
@@ -3938,6 +4032,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_legacy_function_call_ok",
             "native_provider_content_block_tool_call_ok",
             "native_provider_content_block_call_id_alias_ok",
+            "native_provider_argument_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",

@@ -3025,6 +3025,98 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_argument_aliases_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Argument Alias Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeArgumentAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": [
+                                        {"type": "text", "text": "native argument alias plan token=alias-secret"},
+                                        {
+                                            "type": "tool_use",
+                                            "tool_use_id": "alias_content_tasks",
+                                            "name": "list_tasks",
+                                            "inputJson": {"status": "all", "limit": "1"},
+                                        },
+                                    ],
+                                    "tool_calls": [
+                                        {
+                                            "id": "alias_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments_json": {"key": "native-argument-alias", "value": "argument alias native tool call accepted"},
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeArgumentAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-argument-aliases",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-argument-aliases", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native argument alias token=alias-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-argument-alias")
+                    self.assertEqual(payload["tool_calls"][1]["args"]["status"], "all")
+                    self.assertEqual(payload["tool_calls"][1]["args"]["limit"], 1)
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["alias_memory", "alias_content_tasks"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider tool_call", "native content-block tool_use"])
+                    self.assertNotIn("alias-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native argument alias token=alias-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["alias_memory", "alias_content_tasks"])
+                recall = runtime.handle_message('/recall query=native-argument-alias')
+                self.assertIn("argument alias native tool call accepted", recall)
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_argument_alias_translation"), status)
+                self.assertIn("arguments_json", status.get("provider_argument_aliases", []))
+                self.assertIn("inputJson", status.get("provider_argument_aliases", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("alias-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_content_block_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
