@@ -2731,6 +2731,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 evidence_dir=str(tmp_path / "evidence"),
             ).save(engagement)
             captured_payloads = []
+            custom_input_marker = "CUSTOM_NATIVE_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
             class FakeEdgeHTTPResponse:
                 def __enter__(self):
@@ -2751,6 +2752,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                         {"id": "call_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=edge-secret}"}},
                                         {"id": "call_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
                                         {"id": "call_tool_result", "type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
+                                        {"id": "call_custom_freeform", "type": "custom_tool_call", "name": "run_command", "input": custom_input_marker + " token=edge-secret"},
                                         {
                                             "id": "call_valid_memory",
                                             "type": "function",
@@ -2793,12 +2795,15 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertIn("Only function tool calls are supported", rejected_blob)
                     self.assertIn("Native tool arguments were not valid JSON", rejected_blob)
                     self.assertIn("Native tool arguments must decode to a JSON object", rejected_blob)
+                    self.assertIn("Custom/freeform native tool calls are not supported", rejected_blob)
                     self.assertIn("tool_result", json.dumps(plan_payload.get("warnings", [])).lower())
+                    self.assertIn("custom/freeform", json.dumps(plan_payload.get("warnings", [])).lower())
                     self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(plan_payload))
+                    self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(plan_payload))
                     metadata = plan_payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
-                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 4)
+                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 5)
                     self.assertNotIn("edge-secret", planned)
                     self.assertEqual(runtime.store.list_approvals(runtime.session_id, status="pending"), [])
 
@@ -2924,6 +2929,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 evidence_dir=str(tmp_path / "evidence"),
             ).save(engagement)
             captured_payloads = []
+            custom_input_marker = "CONTENT_BLOCK_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
 
             class FakeContentBlockHTTPResponse:
                 def __enter__(self):
@@ -2951,6 +2957,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                             "arguments": json.dumps({"status": "all", "limit": "1"}),
                                         },
                                         {"type": "tool_use", "id": "toolu_bad_args", "name": "remember", "input": ["not", "object"]},
+                                        {"type": "custom_tool_call", "id": "toolu_custom", "name": "run_command", "input": custom_input_marker + " token=content-secret"},
                                         {"type": "tool_result", "content": "PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE"},
                                     ],
                                 }
@@ -2985,12 +2992,16 @@ class AgentRuntimeTests(unittest.TestCase):
                     self.assertEqual([item.get("native_tool_call_index") for item in call_metadata], [1, 2])
                     rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
                     self.assertIn("Native tool arguments must be a JSON object", rejected_blob)
-                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertIn("Custom/freeform native tool calls are not supported", rejected_blob)
+                    warnings_blob = json.dumps(payload.get("warnings", [])).lower()
+                    self.assertIn("tool_result", warnings_blob)
+                    self.assertIn("custom/freeform", warnings_blob)
                     self.assertNotIn("PROVIDER_RESULT_CONTENT_SHOULD_NOT_SURFACE", planned + rejected_blob + json.dumps(payload))
+                    self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(payload))
                     metadata = payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
-                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 1)
+                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 2)
                     self.assertNotIn("content-secret", planned)
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native content block token=content-secret"')
@@ -3020,6 +3031,7 @@ class AgentRuntimeTests(unittest.TestCase):
             captured_payloads = []
             dry_run_marker = tmp_path / "native-responses-should-not-run.txt"
             provider_result_marker = "PROVIDER_RESPONSES_RESULT_SHOULD_NOT_SURFACE"
+            custom_input_marker = "RESPONSES_CUSTOM_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
             class FakeResponsesOutputHTTPResponse:
                 def __enter__(self):
@@ -3055,6 +3067,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "execute": True,
                                 }),
                             },
+                            {"type": "custom_tool_call", "call_id": "resp_custom", "name": "run_command", "input": custom_input_marker + " token=responses-secret"},
                             {"type": "function_call_output", "call_id": "resp_result", "output": provider_result_marker},
                         ],
                     }).encode("utf-8")
@@ -3084,11 +3097,16 @@ class AgentRuntimeTests(unittest.TestCase):
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
                     self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_memory", "resp_dry_run"])
                     self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses output function_call", "native provider responses output function_call"])
+                    rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
+                    self.assertIn("Custom/freeform native tool calls are not supported", rejected_blob)
                     self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertIn("custom/freeform", json.dumps(payload.get("warnings", [])).lower())
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+                    self.assertNotIn(custom_input_marker, planned + rejected_blob + json.dumps(payload))
                     metadata = payload.get("metadata", {})
                     self.assertTrue(metadata.get("native_tool_calls"), metadata)
                     self.assertEqual(metadata.get("native_tool_call_count"), 2)
+                    self.assertGreaterEqual(metadata.get("rejected_native_tool_call_count", 0), 1)
                     self.assertNotIn("responses-secret", planned)
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native responses output token=responses-secret"')
@@ -4405,6 +4423,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("approval_queue_direct_replay_boundary"), native_status)
                 self.assertTrue(milestone_contract.get("execution_ledger_claim_contract"), native_status)
                 self.assertTrue(milestone_contract.get("provider_tool_call_id_provenance"), native_status)
+                self.assertTrue(milestone_contract.get("custom_freeform_tool_calls_rejected"), native_status)
                 self.assertTrue(milestone_contract.get("followup_prompt_secret_redaction"), native_status)
                 self.assertTrue(milestone_contract.get("gateway_and_bridge_surfaces"), native_status)
                 self.assertTrue(native_status.get("model_planning_enabled"), native_status)

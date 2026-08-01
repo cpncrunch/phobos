@@ -350,7 +350,7 @@ def _message_content_text(content: Any) -> str:
         for item in content:
             if isinstance(item, dict):
                 block_type = str(item.get("type") or "").strip()
-                if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES | _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES:
+                if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES | _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES | _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
                     # Provider-side tool-call/result blocks are planner state,
                     # not assistant summary text.  In particular, ``tool_result``
                     # content may contain raw tool output from an upstream model
@@ -394,6 +394,15 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             text = item.get("text") or item.get("content")
             if isinstance(text, str):
                 content_blocks.append({"type": "text", "text": text})
+            continue
+        if block_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
+            call_id = item.get("call_id") or item.get("id") or item.get("tool_call_id") or ""
+            tool_calls.append({
+                "type": block_type,
+                "name": item.get("name") or item.get("tool"),
+                "call_id": str(call_id),
+                "_provider_shape": "responses.output",
+            })
             continue
         if block_type in {"function_call", "tool_call", "tool_use"}:
             name = item.get("name") or item.get("tool")
@@ -519,6 +528,16 @@ def _parse_native_content_tool_blocks(
         if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
             warnings.append("Native provider tool_result content ignored; Phobos only accepts model-requested tool calls at this boundary.")
             continue
+        if block_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
+            parsed, rejected_item, warning = _reject_unsupported_native_tool_call(item, index=index, native_type=block_type)
+            if warning:
+                warnings.append(warning)
+            if parsed:
+                calls.append(parsed)
+            if rejected_item:
+                rejected.append(rejected_item)
+            index += 1
+            continue
         if block_type not in _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES:
             continue
         parsed, rejected_item, warning = _parse_native_content_tool_block(item, index=index, block_type=block_type)
@@ -564,6 +583,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     native_type = item.get("type")
     if native_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES:
         return None, None, "Native provider tool_result entry ignored; Phobos only accepts model-requested tool calls at this boundary."
+    if native_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
+        return _reject_unsupported_native_tool_call(item, index=index, native_type=str(native_type))
     if native_type not in {None, "function", "tool_call", "tool_use"}:
         return None, {"tool": None, "reason": "Only function tool calls are supported.", "args": {"native_type": str(native_type)}}, "Native non-function tool call skipped."
     function = item.get("function")
@@ -590,6 +611,32 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
 
 _NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
 _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {"tool_result", "function_result", "function_call_output"}
+_NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {"custom_tool_call"}
+
+
+def _reject_unsupported_native_tool_call(
+    item: dict[str, Any],
+    *,
+    index: int,
+    native_type: str,
+) -> tuple[None, dict[str, Any], str]:
+    """Reject provider-native freeform/custom tool calls without surfacing input.
+
+    Phobos only accepts registered JSON-schema function/tool calls at this
+    boundary.  Provider custom/freeform calls can carry arbitrary text in fields
+    such as ``input`` or ``content``; keep those bytes out of transcripts and ask
+    the model/provider to use a registered function call instead.
+    """
+
+    raw_tool_name = str(item.get("name") or item.get("tool") or "").strip()
+    tool_name = redact_secrets(raw_tool_name[:200]) or None
+    call_id = str(item.get("id") or item.get("call_id") or item.get("tool_call_id") or "").strip()
+    args: dict[str, Any] = {"native_type": str(native_type or "custom_tool_call"), "native_tool_call_index": index}
+    if call_id:
+        args["provider_tool_call_id"] = redact_secrets(call_id[:200]) or ""
+    reason = "Custom/freeform native tool calls are not supported; use registered JSON-schema function calls."
+    warning = "Native custom/freeform tool call skipped; Phobos only accepts registered JSON-schema function calls."
+    return None, {"tool": tool_name, "reason": reason, "args": args}, warning
 
 
 def _parse_native_function_call(

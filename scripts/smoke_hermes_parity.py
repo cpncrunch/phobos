@@ -1911,6 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
+            and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_data.get("model_planning_enabled") is True
@@ -1937,6 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "function_result" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
+            and "custom_tool_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -2185,6 +2187,7 @@ def main(argv: list[str] | None = None) -> int:
 
         native_provider_result_marker = "PROVIDER_RESULT_CONTENT_SHOULD_BE_IGNORED_SMOKE"
         native_edge_captured = {}
+        native_provider_custom_marker = "NATIVE_CUSTOM_TOOL_INPUT_SHOULD_NOT_SURFACE"
 
         class NativeOpenAIEdgeSmokeResponse:
             def __enter__(self):
@@ -2205,6 +2208,7 @@ def main(argv: list[str] | None = None) -> int:
                                     {"id": "edge_bad_json", "type": "function", "function": {"name": "remember", "arguments": "{not json token=native-edge-secret}"}},
                                     {"id": "edge_non_object", "type": "function", "function": {"name": "remember", "arguments": json.dumps(["not", "object"])}},
                                     {"id": "edge_tool_result", "type": "tool_result", "content": native_provider_result_marker},
+                                    {"id": "edge_custom_freeform", "type": "custom_tool_call", "name": "run_command", "input": native_provider_custom_marker + " token=native-edge-secret"},
                                     {
                                         "id": "edge_memory",
                                         "type": "function",
@@ -2265,13 +2269,16 @@ def main(argv: list[str] | None = None) -> int:
             and "Only function tool calls are supported" in native_edge_rejected
             and "Native tool arguments were not valid JSON" in native_edge_rejected
             and "Native tool arguments must decode to a JSON object" in native_edge_rejected
+            and "Custom/freeform native tool calls are not supported" in native_edge_rejected
+            and "custom/freeform" in native_edge_warnings.lower()
             and native_edge_metadata.get("native_tool_calls") is True
             and native_edge_metadata.get("native_tool_call_count") == 2
-            and int(native_edge_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 4
+            and int(native_edge_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 5
             and [item.get("result", {}).get("status") for item in native_edge_apply_payload.get("results", [])] == ["ok", "ok"]
             and "legacy/native edge accepted" in native_edge_recall
             and native_edge_captured.get("tool_choice") == "auto"
             and native_edge_captured.get("tool_count", 0) > 0
+            and native_provider_custom_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and "native-edge-secret" not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
         )
 
@@ -2364,6 +2371,7 @@ def main(argv: list[str] | None = None) -> int:
 
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
+        native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
 
         class NativeOpenAIResponsesOutputSmokeResponse:
             def __enter__(self):
@@ -2394,6 +2402,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "execute": True,
                             }),
                         },
+                        {"type": "custom_tool_call", "call_id": "responses_custom", "name": "run_command", "input": native_responses_custom_marker + " token=native-responses-secret"},
                         {"type": "function_call_output", "call_id": "responses_result", "output": native_provider_result_marker},
                     ],
                 }).encode("utf-8")
@@ -2432,6 +2441,7 @@ def main(argv: list[str] | None = None) -> int:
             model_adapters.urllib.request.urlopen = native_responses_original_urlopen
             native_responses_runtime.close()
         native_responses_calls = native_responses_plan_payload.get("tool_calls", []) if isinstance(native_responses_plan_payload.get("tool_calls"), list) else []
+        native_responses_rejected = json.dumps(native_responses_plan_payload.get("rejected_tool_calls", []))
         native_responses_warnings = json.dumps(native_responses_plan_payload.get("warnings", []))
         native_responses_metadata = native_responses_plan_payload.get("metadata", {}) if isinstance(native_responses_plan_payload.get("metadata"), dict) else {}
         native_responses_ledger = native_responses_apply_payload.get("execution_ledger", []) if isinstance(native_responses_apply_payload.get("execution_ledger"), list) else []
@@ -2443,6 +2453,9 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_calls[1].get("args", {}).get("execute") is False
             and native_responses_metadata.get("native_tool_calls") is True
             and native_responses_metadata.get("native_tool_call_count") == 2
+            and int(native_responses_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 1
+            and "Custom/freeform native tool calls are not supported" in native_responses_rejected
+            and "custom/freeform" in native_responses_warnings.lower()
             and [item.get("provider_tool_call_id") for item in native_responses_call_metadata] == ["responses_memory", "responses_dry"]
             and [item.get("provider_tool_call_id") for item in native_responses_ledger] == ["responses_memory", "responses_dry"]
             and native_responses_ledger[1].get("native_tool_call_source") == "native provider responses output function_call"
@@ -2452,8 +2465,19 @@ def main(argv: list[str] | None = None) -> int:
             and native_responses_captured.get("tool_choice") == "auto"
             and native_responses_captured.get("tool_count", 0) > 0
             and not native_responses_marker.exists()
+            and native_responses_custom_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and "native-responses-secret" not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
             and native_provider_result_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
+        )
+        checks["native_provider_custom_tool_call_reject_ok"] = (
+            "Custom/freeform native tool calls are not supported" in native_edge_rejected
+            and "Custom/freeform native tool calls are not supported" in native_responses_rejected
+            and "custom/freeform" in native_edge_warnings.lower()
+            and "custom/freeform" in native_responses_warnings.lower()
+            and int(native_edge_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 5
+            and int(native_responses_metadata.get("rejected_native_tool_call_count", 0) or 0) >= 1
+            and native_provider_custom_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
+            and native_responses_custom_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
         )
         checks["native_provider_tool_result_ignore_ok"] = (
             "tool_result" in native_edge_warnings.lower()

@@ -48,6 +48,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "redacted_transcripts_and_audit": True,
     "execution_ledger_claim_contract": True,
     "provider_tool_call_id_provenance": True,
+    "custom_freeform_tool_calls_rejected": True,
     "gateway_and_bridge_surfaces": True,
 }
 
@@ -1332,6 +1333,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             ],
             "provider_tool_result_echo_ignored": True,
             "provider_tool_result_block_types_ignored": ["tool_result", "function_result", "function_call_output"],
+            "provider_unsupported_tool_call_types_rejected": ["custom_tool_call"],
             "approval_control_tools_hidden_from_model": sorted(_MODEL_PLANNER_APPROVAL_ACTION_TOOLS),
             "execution_capable_tools": sorted(_EXECUTION_CAPABLE_TOOLS),
             "target_affecting_tools": sorted(_TARGET_AFFECTING_PLANNED_TOOLS),
