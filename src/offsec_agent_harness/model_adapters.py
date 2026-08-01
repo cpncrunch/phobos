@@ -644,6 +644,25 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
                     },
                 )
                 continue
+            function_call = root_item.get("functionCall") or root_item.get("function_call")
+            if isinstance(function_call, dict):
+                # Some Gemini/OpenAI-compatible shims expose root
+                # ``functionCalls``/``function_calls`` arrays whose individual
+                # entries contain Gemini-style ``functionCall`` objects instead
+                # of flat name/args fields or OpenAI-style ``function`` blocks.
+                # Normalize that shape at the adapter boundary; execution still
+                # waits for runtime schema, policy, ROE, and approval checks.
+                _append_message_tool_call(
+                    message,
+                    {
+                        "type": "tool_call",
+                        "name": function_call.get("name") or function_call.get("tool"),
+                        "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
+                        "call_id": str(_native_call_id(root_item, function_call)),
+                        "_provider_shape": provider_shape,
+                    },
+                )
+                continue
             _append_message_tool_call(
                 message,
                 {
