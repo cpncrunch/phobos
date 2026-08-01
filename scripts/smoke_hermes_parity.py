@@ -1993,6 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
             and native_status_milestone_contract.get("responses_message_content_tool_call_translation") is True
+            and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
@@ -2041,6 +2042,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_content_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -3803,7 +3805,22 @@ def main(argv: list[str] | None = None) -> int:
                                     "name": "list_tasks",
                                     "input": {"status": "all", "limit": 1},
                                 },
+                                {
+                                    "type": "functionCall",
+                                    "callId": "responses_message_content_function_alias",
+                                    "functionCall": {
+                                        "name": "remember",
+                                        "argumentsJson": {"key": "native-responses-message-content-functioncall-smoke", "value": "Responses message content functionCall native tool call translated"},
+                                    },
+                                },
                                 {"type": "function_call_output", "call_id": "responses_message_content_result", "output": native_responses_message_content_result_marker + " token=native-responses-message-secret"},
+                                {
+                                    "type": "functionResponse",
+                                    "functionResponse": {
+                                        "name": "remember",
+                                        "response": {"content": native_responses_message_content_result_marker + " token=native-responses-message-secret"},
+                                    },
+                                },
                             ],
                         }
                     ],
@@ -3831,7 +3848,7 @@ def main(argv: list[str] | None = None) -> int:
             native_responses_message_content_plan_payload = json.loads(native_responses_message_content_plan.split("\n", 1)[1])
             native_responses_message_content_apply = native_responses_message_content_runtime.handle_message('/auto apply=true model=true prompt="native responses message content smoke token=native-responses-message-secret"')
             native_responses_message_content_apply_payload = json.loads(native_responses_message_content_apply.split("\n", 1)[1])
-            native_responses_message_content_recall = native_responses_message_content_runtime.handle_message('/recall query=native-responses-message-content-smoke')
+            native_responses_message_content_recall = native_responses_message_content_runtime.handle_message('/recall query=native-responses-message-content')
             write("native-provider-responses-message-content-tool-calls.json", json.dumps({
                 "plan": native_responses_message_content_plan_payload,
                 "apply": native_responses_message_content_apply_payload,
@@ -3848,23 +3865,44 @@ def main(argv: list[str] | None = None) -> int:
         native_responses_message_content_outputs = native_responses_message_content_plan + native_responses_message_content_apply + native_responses_message_content_recall + json.dumps(native_responses_message_content_plan_payload) + json.dumps(native_responses_message_content_apply_payload)
         checks["native_provider_responses_message_content_tool_call_ok"] = (
             native_responses_message_content_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_responses_message_content_calls] == ["remember", "list_tasks"]
+            and [call.get("tool") for call in native_responses_message_content_calls] == ["remember", "list_tasks", "remember"]
             and "native provider responses message content function_call" in native_responses_message_content_calls[0].get("reason", "")
             and "native provider responses message content tool_use" in native_responses_message_content_calls[1].get("reason", "")
+            and "native provider responses message content functionCall" in native_responses_message_content_calls[2].get("reason", "")
             and native_responses_message_content_metadata.get("native_tool_calls") is True
-            and native_responses_message_content_metadata.get("native_tool_call_count") == 2
-            and [item.get("provider_tool_call_id") for item in native_responses_message_content_call_metadata] == ["responses_message_content_memory", "responses_message_content_tasks"]
-            and [item.get("native_tool_call_source") for item in native_responses_message_content_call_metadata] == ["native provider responses message content function_call", "native provider responses message content tool_use"]
-            and [item.get("provider_tool_call_id") for item in native_responses_message_content_ledger] == ["responses_message_content_memory", "responses_message_content_tasks"]
-            and [item.get("native_tool_call_source") for item in native_responses_message_content_ledger] == ["native provider responses message content function_call", "native provider responses message content tool_use"]
-            and [item.get("result", {}).get("status") for item in native_responses_message_content_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_responses_message_content_metadata.get("native_tool_call_count") == 3
+            and [item.get("provider_tool_call_id") for item in native_responses_message_content_call_metadata] == ["responses_message_content_memory", "responses_message_content_tasks", "responses_message_content_function_alias"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_content_call_metadata] == ["native provider responses message content function_call", "native provider responses message content tool_use", "native provider responses message content functionCall"]
+            and [item.get("provider_tool_call_id") for item in native_responses_message_content_ledger] == ["responses_message_content_memory", "responses_message_content_tasks", "responses_message_content_function_alias"]
+            and [item.get("native_tool_call_source") for item in native_responses_message_content_ledger] == ["native provider responses message content function_call", "native provider responses message content tool_use", "native provider responses message content functionCall"]
+            and [item.get("result", {}).get("status") for item in native_responses_message_content_apply_payload.get("results", [])] == ["ok", "ok", "ok"]
             and native_status_milestone_contract.get("responses_message_content_tool_call_translation") is True
+            and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
             and "responses_message_content_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_message_content_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "Responses message content function_call native tool call translated" in native_responses_message_content_recall
+            and "Responses message content functionCall native tool call translated" in native_responses_message_content_recall
             and "tool_result" in json.dumps(native_responses_message_content_plan_payload.get("warnings", [])).lower()
+            and "functionResponse" in json.dumps(native_responses_message_content_plan_payload.get("warnings", []))
             and native_responses_message_content_captured.get("tool_choice") == "auto"
             and native_responses_message_content_captured.get("tool_count", 0) > 0
+            and native_responses_message_content_result_marker not in native_responses_message_content_outputs
+            and "native-responses-message-secret" not in native_responses_message_content_outputs + json.dumps(native_responses_message_content_call_metadata) + json.dumps(native_responses_message_content_ledger)
+        )
+        checks["native_provider_responses_message_content_function_call_alias_ok"] = (
+            native_responses_message_content_plan_payload.get("mode") == "plan_only"
+            and len(native_responses_message_content_calls) == 3
+            and native_responses_message_content_calls[2].get("tool") == "remember"
+            and native_responses_message_content_calls[2].get("args", {}).get("key") == "native-responses-message-content-functioncall-smoke"
+            and "native provider responses message content functionCall" in native_responses_message_content_calls[2].get("reason", "")
+            and native_responses_message_content_call_metadata[2].get("provider_tool_call_id") == "responses_message_content_function_alias"
+            and native_responses_message_content_call_metadata[2].get("native_tool_call_source") == "native provider responses message content functionCall"
+            and native_responses_message_content_ledger[2].get("provider_tool_call_id") == "responses_message_content_function_alias"
+            and native_responses_message_content_ledger[2].get("native_tool_call_source") == "native provider responses message content functionCall"
+            and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
+            and "responses_message_content_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses message content functionCall native tool call translated" in native_responses_message_content_recall
             and native_responses_message_content_result_marker not in native_responses_message_content_outputs
             and "native-responses-message-secret" not in native_responses_message_content_outputs + json.dumps(native_responses_message_content_call_metadata) + json.dumps(native_responses_message_content_ledger)
         )
@@ -5087,6 +5125,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_message_content_tool_call_ok",
+            "native_provider_responses_message_content_function_call_alias_ok",
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",

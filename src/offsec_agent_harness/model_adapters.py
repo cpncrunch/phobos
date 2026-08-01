@@ -1083,7 +1083,7 @@ def _native_call_id(*items: Any) -> str:
     return ""
 
 
-_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call"}
+_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES = {"tool_use", "tool_call", "function_call", "functionCall"}
 _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
     "tool_result",
     "function_result",

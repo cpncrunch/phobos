@@ -4084,7 +4084,22 @@ class AgentRuntimeTests(unittest.TestCase):
                                         "name": "list_tasks",
                                         "input": {"status": "all", "limit": 1},
                                     },
+                                    {
+                                        "type": "functionCall",
+                                        "callId": "resp_message_content_function_alias",
+                                        "functionCall": {
+                                            "name": "remember",
+                                            "argumentsJson": {"key": "native-responses-message-content-functioncall", "value": "Responses message content functionCall accepted"},
+                                        },
+                                    },
                                     {"type": "function_call_output", "call_id": "resp_message_content_result", "output": provider_result_marker + " token=responses-message-secret"},
+                                    {
+                                        "type": "functionResponse",
+                                        "functionResponse": {
+                                            "name": "remember",
+                                            "response": {"content": provider_result_marker + " token=responses-message-secret"},
+                                        },
+                                    },
                                 ],
                             }
                         ],
@@ -4108,28 +4123,33 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native responses message content token=responses-message-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks"])
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember"])
                     self.assertIn("native provider responses message content function_call", payload["tool_calls"][0]["reason"])
                     self.assertIn("native provider responses message content tool_use", payload["tool_calls"][1]["reason"])
+                    self.assertIn("native provider responses message content functionCall", payload["tool_calls"][2]["reason"])
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_content_memory", "resp_message_content_tasks"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses message content function_call", "native provider responses message content tool_use"])
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_content_memory", "resp_message_content_tasks", "resp_message_content_function_alias"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider responses message content function_call", "native provider responses message content tool_use", "native provider responses message content functionCall"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
                     self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
                     self.assertNotIn("responses-message-secret", planned + json.dumps(payload))
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native responses message content token=responses-message-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_content_memory", "resp_message_content_tasks"])
-                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider responses message content function_call", "native provider responses message content tool_use"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_content_memory", "resp_message_content_tasks", "resp_message_content_function_alias"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider responses message content function_call", "native provider responses message content tool_use", "native provider responses message content functionCall"])
                 recall = runtime.handle_message('/recall query=native-responses-message-content')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("Responses message content function_call accepted", recall)
+                self.assertIn("Responses message content functionCall accepted", recall)
                 self.assertTrue(status.get("milestone_contract", {}).get("responses_message_content_tool_call_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_content_function_call_alias_translation"), status)
                 self.assertIn("responses_message_content_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_content_functionCall", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_content_tool_use", status.get("provider_native_tool_call_variants", []))
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
