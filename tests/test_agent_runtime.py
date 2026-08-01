@@ -3026,6 +3026,99 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_model_plan_rejects_duplicate_provider_call_ids_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Provider Call ID Uniqueness",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            marker = tmp_path / "duplicate-provider-call-id-should-not-run.txt"
+            raw_call_id = "duplicate-native-id token=duplicate-provider-secret\n" + ("D" * 260)
+
+            class FakeDuplicateProviderCallIdAdapter(BaseModelAdapter):
+                provider = "fake-duplicate-provider-call-id"
+
+                def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+                    command = f"python -c \"from pathlib import Path; Path({str(marker)!r}).write_text('should-not-run', encoding='utf-8')\""
+                    return ModelResponse(
+                        provider=self.provider,
+                        role="impact",
+                        content=json.dumps({
+                            "summary": "fake native planner reused a provider call id",
+                            "tool_calls": [
+                                {
+                                    "tool": "remember",
+                                    "args": {"key": "duplicate-call-id", "value": "first duplicate id call accepted"},
+                                    "reason": "first use of a provider call id is allowed",
+                                    "metadata": {"provider_tool_call_id": raw_call_id, "native_tool_call_source": "fake native metadata"},
+                                },
+                                {
+                                    "tool": "run_command",
+                                    "args": {"target": "app.example.test", "purpose": "duplicate provider call id boundary", "command": command, "execute": True},
+                                    "reason": "duplicate provider call id must be rejected before dispatch",
+                                    "metadata": {"provider_tool_call_id": raw_call_id, "native_tool_call_source": "fake native metadata"},
+                                },
+                                {
+                                    "tool": "list_tasks",
+                                    "args": {"status": "all", "limit": "1"},
+                                    "reason": "unique call id should still be accepted",
+                                    "metadata": {"provider_tool_call_id": "unique-native-id", "native_tool_call_source": "fake native metadata"},
+                                },
+                            ],
+                            "warnings": [],
+                        }),
+                        raw={"model": "fake-duplicate-provider-call-id", "native_tool_calls": True, "native_tool_call_count": 3, "rejected_native_tool_call_count": 0},
+                    )
+
+                def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+                    return ModelResponse(provider=self.provider, role=role, content=f"fake {role} response")
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-provider-call-id-uniqueness",
+                    auto_model_planning=True,
+                ),
+                adapter=FakeDuplicateProviderCallIdAdapter(),
+            )
+            try:
+                planned = runtime.handle_message('/auto model=true prompt="native duplicate provider call id boundary"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                self.assertEqual(payload.get("mode"), "plan_only")
+                self.assertEqual([call["tool"] for call in payload.get("tool_calls", [])], ["remember", "list_tasks"])
+                call_metadata = [call.get("metadata", {}) for call in payload.get("tool_calls", [])]
+                provider_call_id = call_metadata[0].get("provider_tool_call_id", "")
+                self.assertLessEqual(len(provider_call_id), 200)
+                self.assertNotIn("\n", provider_call_id)
+                self.assertIn("token=<REDACTED>", provider_call_id)
+                self.assertIn("...[truncated]", provider_call_id)
+                self.assertEqual(call_metadata[1].get("provider_tool_call_id"), "unique-native-id")
+                rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
+                self.assertIn("Duplicate provider tool call id skipped before dispatch", rejected_blob)
+                self.assertEqual(payload.get("metadata", {}).get("duplicate_provider_tool_call_id_count"), 1)
+                self.assertTrue(payload.get("metadata", {}).get("provider_tool_call_id_uniqueness_enforced"))
+
+                applied = runtime.handle_message('/auto apply=true model=true prompt="native duplicate provider call id boundary"')
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual([item["result"]["status"] for item in apply_payload.get("results", [])], ["ok", "ok"])
+                ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual([item.get("provider_tool_call_id") for item in ledger], [provider_call_id, "unique-native-id"])
+                self.assertFalse(marker.exists())
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("provider_call_id_uniqueness_enforced"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_call_id_uniqueness"), status)
+                combined = planned + applied + rejected_blob + json.dumps(payload) + json.dumps(apply_payload) + json.dumps(status)
+                self.assertNotIn("duplicate-provider-secret", combined)
+                self.assertNotIn("D" * 210, combined)
+                self.assertNotIn("\nDDDDDD", combined)
+            finally:
+                runtime.close()
+
     def test_openai_responses_adapter_native_tool_plan_uses_responses_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -847,6 +847,7 @@ native_anthropic_adapter_ok=True
 native_provider_flat_tool_call_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
 native_provider_call_id_redaction_bounds_ok=True
+native_provider_call_id_uniqueness_ok=True
 native_tool_call_transcript_provenance_ok=True
 native_provider_choice_delta_tool_call_ok=True
 native_provider_choice_delta_fragment_merge_ok=True
@@ -990,11 +991,11 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=745
+artifact_count=751
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
-`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct Gemini GenerateContent candidate `functionCall` plans, direct Anthropic Messages `tool_use` plans, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, typed and typeless nested `output[].message` wrappers, Responses typed or typeless direct or nested `output[].message` `tool_calls`/`toolCalls`/`tool_call`/`toolCall` aliases, root-level `message` wrapper alias matrix, root/message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance, per-step model tool-call budget enforcement, result-echo suppression, provider-hosted/freeform tool-call rejection, runtime policy, ROE preview, approval stops, and ledger claim semantics.
+`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct Gemini GenerateContent candidate `functionCall` plans, direct Anthropic Messages `tool_use` plans, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, typed and typeless nested `output[].message` wrappers, Responses typed or typeless direct or nested `output[].message` `tool_calls`/`toolCalls`/`tool_call`/`toolCall` aliases, root-level `message` wrapper alias matrix, root/message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance with duplicate-ID rejection before dispatch, per-step model tool-call budget enforcement, result-echo suppression, provider-hosted/freeform tool-call rejection, runtime policy, ROE preview, approval stops, and ledger claim semantics.
 
 
 

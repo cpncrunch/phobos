@@ -105,6 +105,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "execution_ledger_claim_contract": True,
     "provider_tool_call_id_provenance": True,
     "provider_call_id_redaction_bounds": True,
+    "provider_call_id_uniqueness": True,
     "transcript_provider_call_provenance": True,
     "custom_freeform_tool_calls_rejected": True,
     "provider_hosted_tool_calls_rejected": True,
@@ -871,6 +872,8 @@ class OffSecAgentRuntime:
                         "args": {"value_type": type(item).__name__},
                     })
             raw_tool_calls = raw_tool_calls[:_MAX_NATIVE_MODEL_TOOL_CALLS_PER_STEP]
+        seen_provider_tool_call_ids: set[str] = set()
+        duplicate_provider_tool_call_id_count = 0
         for item in raw_tool_calls:
             if not isinstance(item, dict):
                 warnings.append("Model planner returned a non-object tool call; skipped.")
@@ -891,12 +894,22 @@ class OffSecAgentRuntime:
                 tool_args = dict(tool_args)
                 tool_args["execute"] = False
                 warnings.append(f"{tool} planned with execute=false because command execution was not explicitly enabled.")
+            call_metadata = _model_planned_call_metadata(item)
+            provider_tool_call_id = str(call_metadata.get("provider_tool_call_id") or "").strip()
+            if provider_tool_call_id:
+                if provider_tool_call_id in seen_provider_tool_call_ids:
+                    duplicate_provider_tool_call_id_count += 1
+                    message = "Duplicate provider tool call id skipped before dispatch to preserve unambiguous native tool-call ledgers."
+                    warnings.append(f"Model planner repeated provider tool call id {provider_tool_call_id!r}; skipped before dispatch.")
+                    rejected.append(_redact_runtime_value({"tool": tool or None, "reason": message, "args": tool_args, "metadata": call_metadata}))
+                    continue
+                seen_provider_tool_call_ids.add(provider_tool_call_id)
             calls.append(
                 PlannedToolCall(
                     tool=tool,
                     args=tool_args,
                     reason=str(item.get("reason") or "Model planner selected this tool."),
-                    metadata=_model_planned_call_metadata(item),
+                    metadata=call_metadata,
                 )
             )
         metadata = _model_plan_metadata(response)
@@ -907,6 +920,8 @@ class OffSecAgentRuntime:
             "raw_model_tool_call_count": raw_tool_call_count,
             "tool_call_budget_excess_count": budget_excess_count,
             "tool_call_budget_exhausted": budget_excess_count > 0,
+            "provider_tool_call_id_uniqueness_enforced": True,
+            "duplicate_provider_tool_call_id_count": duplicate_provider_tool_call_id_count,
         })
         return AgentPlan(
             prompt=prompt,
@@ -1303,7 +1318,11 @@ def _model_planned_call_metadata(item: dict[str, Any]) -> dict[str, Any]:
 
 def _bounded_metadata_string(value: Any, limit: int) -> str:
     text = redact_secrets(str(value)) or ""
-    return text[:limit]
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
+    if len(text) > limit:
+        suffix = "...[truncated]"
+        text = text[: max(0, limit - len(suffix))] + suffix
+    return text
 
 
 def _safe_int(value: Any) -> int | None:
@@ -1430,6 +1449,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "execution_summary_contract": True,
             "provider_tool_call_id_provenance": True,
             "provider_call_id_redaction_bounds": True,
+            "provider_call_id_uniqueness_enforced": True,
             "transcript_provider_call_provenance": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,

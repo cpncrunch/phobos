@@ -74,6 +74,49 @@ class SmokeToolCallBudgetAdapter(BaseModelAdapter):
         return ModelResponse(provider=self.provider, role=role, content="smoke response")
 
 
+class SmokeDuplicateProviderCallIdAdapter(BaseModelAdapter):
+    provider = "smoke-duplicate-provider-call-id"
+
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def generate_tool_plan(self, prompt: str, tool_specs: list[dict], *, allow_command_execution: bool = False, context: str = "") -> ModelResponse:
+        raw_call_id = "duplicate-native-id token=duplicate-call-id-smoke-secret\n" + ("J" * 260)
+        command = f"python -c \"from pathlib import Path; Path({str(self.marker)!r}).write_text('should-not-run', encoding='utf-8')\""
+        return ModelResponse(
+            provider=self.provider,
+            role="impact",
+            content=json.dumps({
+                "summary": "smoke native planner repeated a provider call id",
+                "tool_calls": [
+                    {
+                        "tool": "remember",
+                        "args": {"key": "native-duplicate-call-id-smoke", "value": "first duplicate provider call id accepted"},
+                        "reason": "first use of a provider call id is safe provenance",
+                        "metadata": {"provider_tool_call_id": raw_call_id, "native_tool_call_source": "smoke native metadata"},
+                    },
+                    {
+                        "tool": "run_command",
+                        "args": {"target": "app.example.test", "purpose": "duplicate provider call id smoke", "command": command, "execute": True},
+                        "reason": "duplicate provider call id must be rejected before dispatch",
+                        "metadata": {"provider_tool_call_id": raw_call_id, "native_tool_call_source": "smoke native metadata"},
+                    },
+                    {
+                        "tool": "list_tasks",
+                        "args": {"status": "all", "limit": "1"},
+                        "reason": "unique provider call id remains acceptable",
+                        "metadata": {"provider_tool_call_id": "unique-native-id-smoke", "native_tool_call_source": "smoke native metadata"},
+                    },
+                ],
+                "warnings": [],
+            }),
+            raw={"model": "fake-duplicate-provider-call-id-smoke", "native_tool_calls": True, "native_tool_call_count": 3, "rejected_native_tool_call_count": 0},
+        )
+
+    def generate(self, role: str, prompt: str, context: str = "") -> ModelResponse:
+        return ModelResponse(provider=self.provider, role=role, content="smoke response")
+
+
 class SmokeWrappedJsonToolPlanAdapter(BaseModelAdapter):
     provider = "smoke-wrapped-json-tool-plan"
 
@@ -2068,6 +2111,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
             and native_status_milestone_contract.get("provider_tool_call_id_provenance") is True
             and native_status_milestone_contract.get("provider_call_id_redaction_bounds") is True
+            and native_status_milestone_contract.get("provider_call_id_uniqueness") is True
             and native_status_milestone_contract.get("transcript_provider_call_provenance") is True
             and native_status_milestone_contract.get("single_top_level_tool_call_translation") is True
             and native_status_milestone_contract.get("singular_tool_call_alias_translation") is True
@@ -2563,6 +2607,56 @@ def main(argv: list[str] | None = None) -> int:
             and native_call_id_status_data.get("milestone_contract", {}).get("provider_call_id_redaction_bounds") is True
             and "native-call-id-smoke-secret" not in native_call_id_blob
             and ("I" * 210) not in native_call_id_blob
+        )
+
+        native_duplicate_call_id_marker = root / "native-duplicate-call-id-should-not-run.txt"
+        native_duplicate_call_id_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-call-id-uniqueness.db"),
+                session_name="native-provider-call-id-uniqueness-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=SmokeDuplicateProviderCallIdAdapter(native_duplicate_call_id_marker),
+        )
+        try:
+            native_duplicate_call_id_plan = native_duplicate_call_id_runtime.handle_message('/auto model=true prompt="native duplicate provider call id smoke"')
+            native_duplicate_call_id_payload = json.loads(native_duplicate_call_id_plan.split("\n", 1)[1])
+            native_duplicate_call_id_apply = native_duplicate_call_id_runtime.handle_message('/auto apply=true model=true prompt="native duplicate provider call id smoke"')
+            native_duplicate_call_id_apply_payload = json.loads(native_duplicate_call_id_apply.split("\n", 1)[1])
+            native_duplicate_call_id_status = native_duplicate_call_id_runtime.registry.run("runtime_status", {}).to_dict()
+            write("native-provider-call-id-uniqueness.json", json.dumps({
+                "payload": native_duplicate_call_id_payload,
+                "apply": native_duplicate_call_id_apply_payload,
+                "status": native_duplicate_call_id_status,
+            }, indent=2, sort_keys=True))
+        finally:
+            native_duplicate_call_id_runtime.close()
+        native_duplicate_call_metadata = native_duplicate_call_id_payload.get("tool_calls", [{}]) if isinstance(native_duplicate_call_id_payload.get("tool_calls"), list) else []
+        native_duplicate_first_call_id = ""
+        if native_duplicate_call_metadata:
+            native_duplicate_first_call_id = str(native_duplicate_call_metadata[0].get("metadata", {}).get("provider_tool_call_id") or "")
+        native_duplicate_call_id_blob = json.dumps({
+            "payload": native_duplicate_call_id_payload,
+            "apply": native_duplicate_call_id_apply_payload,
+            "status": native_duplicate_call_id_status,
+        }, sort_keys=True) + native_duplicate_call_id_plan + native_duplicate_call_id_apply
+        native_duplicate_status_data = native_duplicate_call_id_status.get("data", {}).get("native_tool_calling", {}) if isinstance(native_duplicate_call_id_status.get("data"), dict) else {}
+        checks["native_provider_call_id_uniqueness_ok"] = (
+            [call.get("tool") for call in native_duplicate_call_id_payload.get("tool_calls", [])] == ["remember", "list_tasks"]
+            and [item.get("result", {}).get("status") for item in native_duplicate_call_id_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_duplicate_call_id_payload.get("metadata", {}).get("duplicate_provider_tool_call_id_count") == 1
+            and native_duplicate_call_id_payload.get("metadata", {}).get("provider_tool_call_id_uniqueness_enforced") is True
+            and "Duplicate provider tool call id skipped before dispatch" in json.dumps(native_duplicate_call_id_payload.get("rejected_tool_calls", []))
+            and len(native_duplicate_first_call_id) <= 200
+            and "\n" not in native_duplicate_first_call_id
+            and "token=<REDACTED>" in native_duplicate_first_call_id
+            and "...[truncated]" in native_duplicate_first_call_id
+            and native_duplicate_status_data.get("provider_call_id_uniqueness_enforced") is True
+            and native_duplicate_status_data.get("milestone_contract", {}).get("provider_call_id_uniqueness") is True
+            and not native_duplicate_call_id_marker.exists()
+            and "duplicate-call-id-smoke-secret" not in native_duplicate_call_id_blob
+            and ("J" * 210) not in native_duplicate_call_id_blob
         )
         checks["native_tool_call_transcript_provenance_ok"] = (
             native_flat_transcript_detail.get("status") == "ok"
