@@ -3644,10 +3644,13 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
     ledger: list[Any] = raw_ledger if isinstance(raw_ledger, list) else []
     raw_trace = data.get("planner_trace")
     planner_trace: list[Any] = raw_trace if isinstance(raw_trace, list) else []
+    raw_step_value = data.get("steps")
+    raw_steps: list[Any] = raw_step_value if isinstance(raw_step_value, list) else []
+    no_dispatch_step_count = sum(1 for step in raw_steps if isinstance(step, dict) and step.get("no_tools_executed") is True)
     raw_calls = data.get("tool_calls")
     calls: list[Any] = raw_calls if isinstance(raw_calls, list) else []
-    if not calls and isinstance(data.get("steps"), list):
-        for step in data.get("steps", []):
+    if not calls and raw_steps:
+        for step in raw_steps:
             raw_plan = step.get("plan") if isinstance(step, dict) else None
             plan: dict[str, Any] = raw_plan if isinstance(raw_plan, dict) else {}
             raw_step_calls = plan.get("tool_calls")
@@ -3658,8 +3661,8 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
     raw_results = data.get("results") if isinstance(data.get("results"), list) else []
     if raw_results:
         results.extend(item for item in raw_results if isinstance(item, dict))
-    elif isinstance(data.get("steps"), list):
-        for step in data.get("steps", []):
+    elif raw_steps:
+        for step in raw_steps:
             if isinstance(step, dict) and isinstance(step.get("execution_ledger_delta"), list):
                 for item in step.get("execution_ledger_delta", []):
                     if isinstance(item, dict):
@@ -3729,6 +3732,7 @@ def _auto_transcript_payload_summary(payload: dict[str, Any], *, max_ledger: int
         "execution_ledger": ledger[:max_ledger],
         "step_ledger_deltas": step_ledger_deltas[:max_ledger],
         "step_ledger_delta_count": len(step_ledger_deltas),
+        "no_dispatch_step_count": no_dispatch_step_count,
         "execution_counts": _auto_transcript_ledger_counts(ledger),
         "truncated": len(ledger) > max_ledger or len(calls) > max_ledger or len(results) > max_ledger or len(step_ledger_deltas) > max_ledger,
     })

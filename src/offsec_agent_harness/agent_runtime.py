@@ -822,7 +822,14 @@ class OffSecAgentRuntime:
                     }))
                 else:
                     stop_reason = "no_tool_calls"
-                    loop_results.append(_redact_runtime_value({"step": step, "mode": "no_plan", "plan": plan.to_dict(), "planner_trace": trace_entry}))
+                    loop_results.append(_redact_runtime_value({
+                        "step": step,
+                        "mode": "no_plan",
+                        "plan": plan.to_dict(),
+                        "planner_trace": trace_entry,
+                        "no_tools_executed": True,
+                        "execution_ledger_delta": [],
+                    }))
                 break
             signatures = [_planned_call_duplicate_signature(call) for call in plan.tool_calls]
             same_step_seen: set[str] = set()
@@ -1220,6 +1227,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "same_step_duplicate_plan_stop_enforced": True,
             "model_error_stop_enforced": True,
             "invalid_plan_stop_enforced": True,
+            "terminal_no_tool_no_dispatch_step": True,
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
                 "flat_tool_calls",
@@ -1535,7 +1543,7 @@ def _render_auto_loop_chat(response: str) -> str:
             lines.append(f"- Redacted transcript: `{md_path}`")
     if data.get("artifact_error"):
         lines.append(f"- Transcript artifact warning: {data.get('artifact_error')}")
-    lines.append("No confirm-gated or blocked action is treated as executed unless the registry returned an executed result.")
+    lines.append("No confirm-gated, blocked, dry-run, handler-error, or no-dispatch terminal step is treated as executed unless the registry returned an executed result.")
     return "\n".join(lines)
 
 
@@ -2001,6 +2009,11 @@ def _auto_loop_markdown(payload: dict[str, Any]) -> str:
         if step.get("mode") == "invalid_plan":
             lines.extend([
                 f"Invalid plan stop: {step.get('rejected_tool_call_count', 0)} model-proposed call(s) were rejected before dispatch; no tools were dispatched for this step.",
+                "",
+            ])
+        if step.get("no_tools_executed") is True and step.get("mode") not in {"stopped_duplicate_plan", "invalid_plan"}:
+            lines.extend([
+                "No-dispatch step: no tools were dispatched for this step.",
                 "",
             ])
         raw_calls = plan.get("tool_calls")

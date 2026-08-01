@@ -2774,7 +2774,21 @@ def main(argv: list[str] | None = None) -> int:
             terminal_loop = terminal_runtime.handle_message('/auto-loop model=true steps=4 prompt="remember native-terminal-stop as token=terminal-stop-smoke-secret"')
             terminal_payload = json.loads(terminal_loop.split("\n", 1)[1])
             terminal_recall = terminal_runtime.handle_message('/recall query=native-terminal-stop')
+            terminal_artifacts = terminal_payload.get("artifacts", {}) if isinstance(terminal_payload.get("artifacts"), dict) else {}
+            terminal_json_path = Path(terminal_artifacts.get("json", ""))
+            terminal_md_path = Path(terminal_artifacts.get("markdown", ""))
+            terminal_transcript = ""
+            if terminal_json_path.is_file():
+                terminal_transcript += terminal_json_path.read_text(encoding="utf-8")
+            if terminal_md_path.is_file():
+                terminal_transcript += terminal_md_path.read_text(encoding="utf-8")
+            terminal_rel_json = terminal_json_path.relative_to(terminal_runtime.registry.harness.store.root).as_posix() if terminal_json_path.is_file() else ""
+            terminal_detail = terminal_runtime.registry.run("get_auto_transcript", {"path": terminal_rel_json, "max_ledger": 5}).to_dict() if terminal_rel_json else {}
+            terminal_status = terminal_runtime.registry.run("runtime_status", {}).to_dict()
+            terminal_chat = terminal_runtime.render_chat_response(terminal_loop, message='/auto-loop model=true prompt="native terminal no-tool stop"', platform="discord")
             write("native-tool-terminal-no-tool-loop.txt", terminal_loop)
+            write("native-tool-terminal-no-tool-transcript.txt", terminal_transcript)
+            write("native-tool-terminal-no-tool-chat.txt", terminal_chat)
         finally:
             terminal_runtime.close()
 
@@ -2900,11 +2914,23 @@ def main(argv: list[str] | None = None) -> int:
             and terminal_ledger[0].get("execution_state") == "completed_without_command_execution"
             and terminal_ledger[0].get("actual_command_or_process_activity") is False
             and terminal_no_plan.get("mode") == "no_plan"
+            and terminal_no_plan.get("no_tools_executed") is True
+            and terminal_no_plan.get("execution_ledger_delta") == []
             and terminal_plan.get("summary") == "smoke model stopped after successful native result"
             and terminal_metadata.get("terminal_no_tool_plan_respected") is True
             and terminal_metadata.get("deterministic_fallback_suppressed") is True
             and "native terminal no-tool stop ran once" in terminal_recall
             and "terminal-stop-smoke-secret" not in json.dumps(terminal_payload) + terminal_recall
+        )
+        terminal_detail_summary = terminal_detail.get("data", {}).get("summary", {}) if isinstance(terminal_detail.get("data"), dict) else {}
+        checks["native_tool_call_no_tool_no_dispatch_ok"] = (
+            terminal_no_plan.get("no_tools_executed") is True
+            and terminal_no_plan.get("execution_ledger_delta") == []
+            and terminal_detail_summary.get("no_dispatch_step_count") == 1
+            and "No-dispatch step: no tools were dispatched for this step." in terminal_transcript
+            and "no-dispatch terminal step" in terminal_chat
+            and terminal_status.get("data", {}).get("native_tool_calling", {}).get("terminal_no_tool_no_dispatch_step") is True
+            and "terminal-stop-smoke-secret" not in terminal_transcript + terminal_chat + json.dumps(terminal_detail)
         )
         checks["native_tool_call_duplicate_loop_stop_ok"] = (
             duplicate_payload.get("stop_reason") == "duplicate_plan"
