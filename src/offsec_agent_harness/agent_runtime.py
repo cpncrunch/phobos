@@ -40,6 +40,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "scanner_execute_boundary": True,
     "result_feedback_loop": True,
     "cumulative_redacted_feedback": True,
+    "followup_prompt_secret_redaction": True,
     "terminal_no_dispatch_stops": True,
     "terminal_approval_block_stops": True,
     "duplicate_plan_stops": True,
@@ -989,8 +990,9 @@ def _build_auto_loop_feedback_prompt(original_prompt: str, feedback_history: lis
     """Return the next native-loop prompt with cumulative redacted tool results.
 
     A model planner needs enough history to recover from earlier errors without
-    forgetting later successful local-only actions.  Keep the original operator
-    request intact, but bound the cumulative feedback window and redact result
+    forgetting later successful local-only actions.  Keep a redacted copy of the
+    original operator request in follow-up calls so secret-like prompt fragments
+    are not repeatedly re-exposed, then bound/redact the cumulative result
     leaves before the next model/tool-plan call sees them.
     """
 
@@ -1017,8 +1019,9 @@ def _build_auto_loop_feedback_prompt(original_prompt: str, feedback_history: lis
     if truncated:
         history_label += ", bounded"
     history_label += ")"
+    safe_original_prompt = redact_secrets(original_prompt) or ""
     return (
-        original_prompt
+        safe_original_prompt
         + f"\n\n{history_label}:\n"
         + history_text
         + "\n\nPlan only any genuinely necessary next tool calls; return an empty tool_calls list if done."
@@ -1245,6 +1248,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "per_step_planner_trace": True,
             "one_shot_planner_trace": True,
             "planner_trace_redacted": True,
+            "followup_feedback_prompt_redacted": True,
             "execution_summary_contract": True,
             "max_steps_budget_stop_enforced": True,
             "duplicate_plan_stop_enforced": True,

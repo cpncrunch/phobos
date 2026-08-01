@@ -1883,6 +1883,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_data.get("per_step_planner_trace") is True
             and native_status_data.get("one_shot_planner_trace") is True
             and native_status_data.get("planner_trace_redacted") is True
+            and native_status_data.get("followup_feedback_prompt_redacted") is True
+            and native_status_milestone_contract.get("followup_prompt_secret_redaction") is True
             and native_status_data.get("execution_summary_contract") is True
             and native_status_data.get("max_steps_budget_stop_enforced") is True
             and native_status_data.get("duplicate_plan_stop_enforced") is True
@@ -3123,6 +3125,16 @@ def main(argv: list[str] | None = None) -> int:
             and "Workspace file not found" in feedback_final_prompt
             and "Stored memory" in feedback_final_prompt
         )
+        feedback_followup_prompt_blob = "\n".join(feedback_adapter.prompts[1:]) if len(feedback_adapter.prompts) > 1 else ""
+        checks["native_tool_call_feedback_prompt_redaction_ok"] = (
+            len(feedback_adapter.prompts) >= 3
+            and "Previous Phobos tool results (cumulative, redacted" in feedback_followup_prompt_blob
+            and "Workspace file not found" in feedback_followup_prompt_blob
+            and "token=<REDACTED>" in feedback_followup_prompt_blob
+            and "feedback-smoke-secret" not in feedback_followup_prompt_blob
+            and native_status_data.get("followup_feedback_prompt_redacted") is True
+            and native_status_milestone_contract.get("followup_prompt_secret_redaction") is True
+        )
         feedback_transcript_rows = feedback_transcript_list.get("data", {}).get("transcripts", []) if isinstance(feedback_transcript_list.get("data"), dict) else []
         feedback_transcript_blob = json.dumps({
             "list": feedback_transcript_list,
@@ -3239,6 +3251,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_step_ledger_delta_ok",
             "native_tool_call_planner_trace_ok",
             "native_tool_call_cumulative_feedback_ok",
+            "native_tool_call_feedback_prompt_redaction_ok",
             "native_tool_call_transcript_index_detail_ok",
             "native_tool_call_execution_ledger_ok",
             "native_tool_call_execution_summary_ok",
