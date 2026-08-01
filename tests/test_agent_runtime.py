@@ -3584,6 +3584,122 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_choice_delta_fragmented_tool_use_aliases_are_assembled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Choice Delta ToolUse Fragment Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "choice-delta-tooluse-fragment-should-not-run.txt"
+
+            class FakeChoiceDeltaToolUseFragmentHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    memory_args = json.dumps({"key": "native-choice-delta-tooluse-fragment", "value": "fragmented choice delta toolUse native call assembled"})
+                    run_args = json.dumps({
+                        "target": "app.example.test",
+                        "purpose": "fragmented choice delta toolUse dry-run validation",
+                        "command": f"printf choice-delta-tooluse-fragment > {dry_run_marker}",
+                        "execute": True,
+                    })
+                    memory_chunks = [memory_args[:20], memory_args[20:71], memory_args[71:]]
+                    run_chunks = [run_args[:35], run_args[35:110], run_args[110:]]
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "native choice delta toolUse fragment plan token=choice-tooluse-fragment-secret",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "type": "toolUse",
+                                            "toolUse": {"toolName": "remember", "toolUseId": "choice_delta_tooluse_fragment_memory", "inputJson": memory_chunks[0]},
+                                        },
+                                        {
+                                            "index": 1,
+                                            "type": "tool_use",
+                                            "tool_use": {"functionName": "run_command", "tool_use_id": "choice_delta_tooluse_fragment_dry", "argsJson": run_chunks[0]},
+                                        },
+                                    ],
+                                }
+                            },
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {"index": 0, "toolUse": {"inputJson": memory_chunks[1]}},
+                                        {"index": 1, "tool_use": {"argsJson": run_chunks[1]}},
+                                    ]
+                                }
+                            },
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {"index": 0, "toolUse": {"inputJson": memory_chunks[2]}},
+                                        {"index": 1, "tool_use": {"argsJson": run_chunks[2]}},
+                                    ],
+                                    "content": [{"type": "tool_result", "content": "PROVIDER_RESULT_SHOULD_NOT_SURFACE"}],
+                                }
+                            },
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeChoiceDeltaToolUseFragmentHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-choice-delta-tooluse-fragment-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-choice-delta-tooluse-fragment", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native choice delta toolUse fragment token=choice-tooluse-fragment-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-choice-delta-tooluse-fragment")
+                    self.assertEqual(payload["tool_calls"][0]["args"]["value"], "fragmented choice delta toolUse native call assembled")
+                    self.assertEqual(payload["tool_calls"][1]["args"]["purpose"], "fragmented choice delta toolUse dry-run validation")
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["choice_delta_tooluse_fragment_memory", "choice_delta_tooluse_fragment_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider choice delta tool_calls nested toolUse", "native provider choice delta tool_calls nested tool_use"])
+                    self.assertNotIn("PROVIDER_RESULT_SHOULD_NOT_SURFACE", planned)
+                    self.assertNotIn("choice-tooluse-fragment-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native choice delta toolUse fragment token=choice-tooluse-fragment-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["choice_delta_tooluse_fragment_memory", "choice_delta_tooluse_fragment_dry"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-choice-delta-tooluse-fragment')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("fragmented choice delta toolUse native call assembled", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("choice_delta_tool_use_fragment_assembly"), status)
+                self.assertIn("choice_delta_tool_use_fragments", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn("choice-tooluse-fragment-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_content_block_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

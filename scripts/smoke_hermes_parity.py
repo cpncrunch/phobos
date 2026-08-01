@@ -1988,6 +1988,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
             and native_status_milestone_contract.get("choice_delta_tool_call_translation") is True
             and native_status_milestone_contract.get("choice_delta_fragment_assembly") is True
+            and native_status_milestone_contract.get("choice_delta_tool_use_fragment_assembly") is True
             and native_status_milestone_contract.get("tool_calls_nested_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
@@ -2050,6 +2051,7 @@ def main(argv: list[str] | None = None) -> int:
             and "camel_case_tool_call_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "choice_delta_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "choice_delta_tool_call_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice_delta_tool_use_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2516,6 +2518,111 @@ def main(argv: list[str] | None = None) -> int:
             and native_choice_delta_calls[1].get("args", {}).get("purpose") == "choice delta native dry-run smoke"
             and native_status_milestone_contract.get("choice_delta_fragment_assembly") is True
             and "choice_delta_tool_call_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
+        )
+
+        native_choice_delta_tooluse_marker = root / "native-choice-delta-tooluse-should-not-run.txt"
+        native_choice_delta_tooluse_captured: dict[str, object] = {}
+
+        class NativeOpenAIChoiceDeltaToolUseFragmentSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                memory_args = json.dumps({"key": "native-choice-delta-tooluse-smoke", "value": "choice delta toolUse fragments translated"})
+                run_args = json.dumps({
+                    "target": "app.example.test",
+                    "purpose": "choice delta toolUse fragment dry-run smoke",
+                    "command": f"printf native-choice-delta-tooluse > {native_choice_delta_tooluse_marker}",
+                    "execute": True,
+                })
+                memory_chunks = [memory_args[:20], memory_args[20:66], memory_args[66:]]
+                run_chunks = [run_args[:35], run_args[35:111], run_args[111:]]
+                return json.dumps({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "native choice delta toolUse smoke token=native-choice-delta-tooluse-secret",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "type": "toolUse",
+                                        "toolUse": {"toolName": "remember", "toolUseId": "choice_delta_tooluse_memory", "inputJson": memory_chunks[0]},
+                                    },
+                                    {
+                                        "index": 1,
+                                        "type": "tool_use",
+                                        "tool_use": {"functionName": "run_command", "tool_use_id": "choice_delta_tooluse_dry", "argsJson": run_chunks[0]},
+                                    },
+                                ],
+                            }
+                        },
+                        {"delta": {"tool_calls": [{"index": 0, "toolUse": {"inputJson": memory_chunks[1]}}, {"index": 1, "tool_use": {"argsJson": run_chunks[1]}}]}},
+                        {"delta": {"tool_calls": [{"index": 0, "toolUse": {"inputJson": memory_chunks[2]}}, {"index": 1, "tool_use": {"argsJson": run_chunks[2]}}], "content": [{"type": "tool_result", "content": "TOOLUSE_RESULT_SHOULD_NOT_SURFACE"}]}},
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_choice_delta_tooluse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_choice_delta_tooluse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_choice_delta_tooluse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIChoiceDeltaToolUseFragmentSmokeResponse()
+
+        native_choice_delta_tooluse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-choice-delta-tooluse.db"),
+                session_name="native-provider-choice-delta-tooluse-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-choice-delta-tooluse-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_choice_delta_tooluse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_choice_delta_tooluse_urlopen
+            native_choice_delta_tooluse_plan = native_choice_delta_tooluse_runtime.handle_message('/auto model=true prompt="native choice delta toolUse smoke token=native-choice-delta-tooluse-secret"')
+            native_choice_delta_tooluse_plan_payload = json.loads(native_choice_delta_tooluse_plan.split("\n", 1)[1])
+            native_choice_delta_tooluse_apply = native_choice_delta_tooluse_runtime.handle_message('/auto apply=true model=true prompt="native choice delta toolUse smoke token=native-choice-delta-tooluse-secret"')
+            native_choice_delta_tooluse_apply_payload = json.loads(native_choice_delta_tooluse_apply.split("\n", 1)[1])
+            native_choice_delta_tooluse_recall = native_choice_delta_tooluse_runtime.handle_message('/recall query=native-choice-delta-tooluse-smoke')
+            write("native-provider-choice-delta-tooluse-fragments.json", json.dumps({
+                "plan": native_choice_delta_tooluse_plan_payload,
+                "apply": native_choice_delta_tooluse_apply_payload,
+                "captured": native_choice_delta_tooluse_captured,
+                "recall": native_choice_delta_tooluse_recall,
+                "marker_exists": native_choice_delta_tooluse_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_choice_delta_tooluse_original_urlopen
+            native_choice_delta_tooluse_runtime.close()
+        native_choice_delta_tooluse_calls = native_choice_delta_tooluse_plan_payload.get("tool_calls", []) if isinstance(native_choice_delta_tooluse_plan_payload.get("tool_calls"), list) else []
+        native_choice_delta_tooluse_metadata = native_choice_delta_tooluse_plan_payload.get("metadata", {}) if isinstance(native_choice_delta_tooluse_plan_payload.get("metadata"), dict) else {}
+        native_choice_delta_tooluse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_choice_delta_tooluse_calls]
+        native_choice_delta_tooluse_ledger = native_choice_delta_tooluse_apply_payload.get("execution_ledger", []) if isinstance(native_choice_delta_tooluse_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_choice_delta_tool_use_fragment_ok"] = (
+            native_choice_delta_tooluse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_choice_delta_tooluse_calls] == ["remember", "run_command"]
+            and native_choice_delta_tooluse_calls[0].get("args", {}).get("key") == "native-choice-delta-tooluse-smoke"
+            and native_choice_delta_tooluse_calls[0].get("args", {}).get("value") == "choice delta toolUse fragments translated"
+            and native_choice_delta_tooluse_calls[1].get("args", {}).get("purpose") == "choice delta toolUse fragment dry-run smoke"
+            and native_choice_delta_tooluse_calls[1].get("args", {}).get("execute") is False
+            and native_choice_delta_tooluse_metadata.get("native_tool_calls") is True
+            and native_choice_delta_tooluse_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_choice_delta_tooluse_call_metadata] == ["choice_delta_tooluse_memory", "choice_delta_tooluse_dry"]
+            and [item.get("native_tool_call_source") for item in native_choice_delta_tooluse_call_metadata] == ["native provider choice delta tool_calls nested toolUse", "native provider choice delta tool_calls nested tool_use"]
+            and [item.get("result", {}).get("status") for item in native_choice_delta_tooluse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_choice_delta_tooluse_ledger] == ["choice_delta_tooluse_memory", "choice_delta_tooluse_dry"]
+            and native_choice_delta_tooluse_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("choice_delta_tool_use_fragment_assembly") is True
+            and "choice_delta_tool_use_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice delta toolUse fragments translated" in native_choice_delta_tooluse_recall
+            and native_choice_delta_tooluse_captured.get("tool_choice") == "auto"
+            and int(native_choice_delta_tooluse_captured.get("tool_count", 0) or 0) > 0
+            and not native_choice_delta_tooluse_marker.exists()
+            and "TOOLUSE_RESULT_SHOULD_NOT_SURFACE" not in native_choice_delta_tooluse_plan + native_choice_delta_tooluse_apply
+            and "native-choice-delta-tooluse-secret" not in native_choice_delta_tooluse_plan + native_choice_delta_tooluse_apply + native_choice_delta_tooluse_recall + json.dumps(native_choice_delta_tooluse_plan_payload) + json.dumps(native_choice_delta_tooluse_apply_payload)
         )
 
         native_nested_marker = root / "native-nested-tool-calls-should-not-run.txt"
@@ -6962,6 +7069,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",
+            "native_provider_choice_delta_tool_use_fragment_ok",
             "native_provider_tool_calls_nested_aliases_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_tool_call_transcript_provenance_ok",

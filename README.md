@@ -599,7 +599,7 @@ See `docs/full-agent-runtime.md` for the full command list, scheduler pattern, a
 python -m compileall -q src tests examples/plugins scripts
 python -m unittest discover -s tests -v
 
-Ran 115 tests
+Ran 117 tests
 OK
 ```
 
@@ -655,6 +655,7 @@ native_openai_tool_call_adapter_ok=True
 native_provider_flat_tool_call_ok=True
 native_provider_choice_delta_tool_call_ok=True
 native_provider_choice_delta_fragment_merge_ok=True
+native_provider_choice_delta_tool_use_fragment_ok=True
 native_provider_tool_calls_nested_aliases_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
 native_tool_call_transcript_provenance_ok=True
@@ -795,11 +796,11 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=705
+artifact_count=711
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
-`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/nested/message-level/message-content/parts Responses output calls, typed and typeless nested `output[].message` wrappers, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, provider call-ID provenance, result-echo suppression, provider-hosted/freeform tool-call rejection, runtime policy, ROE preview, approval stops, and ledger claim semantics.
+`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, typed and typeless nested `output[].message` wrappers, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, provider call-ID provenance, result-echo suppression, provider-hosted/freeform tool-call rejection, runtime policy, ROE preview, approval stops, and ledger claim semantics.
 
 Live local integration smoke is available as `scripts/smoke_live_integrations.py`. It verifies scanner binary resolution and real wrapper execution against only a temporary `127.0.0.1` HTTP server; it uses a generated one-request Nuclei template and never sends chat messages. Current local run with scanner execution required produced:
 
