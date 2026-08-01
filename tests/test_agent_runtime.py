@@ -3498,6 +3498,88 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_singular_tool_call_alias_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Singular Tool Call Alias",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeSingularToolCallHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "singular native tool_call alias token=singular-secret",
+                                    "tool_call": {
+                                        "id": "singular_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-singular-tool-call", "value": "singular tool_call alias accepted"}),
+                                        },
+                                    },
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeSingularToolCallHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-singular-tool-call-alias",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-singular-tool-call", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native singular tool call token=singular-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertIn("native provider singular tool_call", payload["tool_calls"][0]["reason"])
+                    call_metadata = payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(call_metadata.get("provider_tool_call_id"), "singular_memory")
+                    self.assertEqual(call_metadata.get("native_tool_call_source"), "native provider singular tool_call")
+                    self.assertEqual(call_metadata.get("native_tool_call_index"), 1)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertNotIn("singular-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native singular tool call token=singular-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual(ledger[0].get("provider_tool_call_id"), "singular_memory")
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native provider singular tool_call")
+                recall = runtime.handle_message('/recall query=native-singular-tool-call')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("singular tool_call alias accepted", recall)
+                self.assertIn("singular_tool_call_alias", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("singular_tool_call_alias_translation"))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("singular-secret", applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_responses_output_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

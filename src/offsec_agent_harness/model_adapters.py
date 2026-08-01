@@ -587,6 +587,12 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
             message["content"] = content
     if "tool_calls" in raw:
         message["tool_calls"] = raw.get("tool_calls")
+    if "tool_call" in raw:
+        # Some OpenAI-compatible shims collapse a one-call response into a
+        # singular ``tool_call`` field rather than the standard ``tool_calls``
+        # array.  Preserve that as planner input only; the runtime still handles
+        # schema, runtime-policy, ROE, and approval gating before dispatch.
+        message["tool_call"] = raw.get("tool_call")
     if isinstance(raw.get("function_call"), dict):
         message["function_call"] = raw.get("function_call")
     return message if message else {}
@@ -599,6 +605,10 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
     rejected: list[dict[str, Any]] = []
     warnings: list[str] = []
     raw_calls = message.get("tool_calls")
+    if raw_calls is None and "tool_call" in message:
+        raw_calls = message.get("tool_call")
+        if isinstance(raw_calls, dict):
+            raw_calls = dict(raw_calls, _provider_shape="singular.tool_call")
     raw_call_items: list[Any] = []
     if isinstance(raw_calls, list):
         raw_call_items = raw_calls
@@ -607,7 +617,8 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
         # ``tool_calls`` array into a single object.  Normalize it at the
         # adapter boundary so the runtime can still apply the exact same
         # schema/ROE/runtime-policy validation before any dispatch.
-        raw_call_items = [dict(raw_calls, _provider_shape="single_top_level.tool_calls")]
+        provider_shape = str(raw_calls.get("_provider_shape") or "single_top_level.tool_calls")
+        raw_call_items = [dict(raw_calls, _provider_shape=provider_shape)]
     for index, item in enumerate(raw_call_items, start=1):
         parsed, rejected_item, warning = _parse_native_tool_call(item, index=index)
         if warning:
@@ -746,7 +757,12 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
     provider_shape = str(item.get("_provider_shape") or "")
     function = item.get("function")
     if isinstance(function, dict):
-        label = "native provider single top-level tool_call" if provider_shape == "single_top_level.tool_calls" else None
+        if provider_shape == "single_top_level.tool_calls":
+            label = "native provider single top-level tool_call"
+        elif provider_shape == "singular.tool_call":
+            label = "native provider singular tool_call"
+        else:
+            label = None
         return _parse_native_function_call(
             function,
             index=index,
@@ -770,6 +786,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider candidate functionCall"
         elif provider_shape == "single_top_level.tool_calls":
             label = "native provider single top-level tool_call"
+        elif provider_shape == "singular.tool_call":
+            label = "native provider singular tool_call"
         else:
             label = "native provider flat tool_call"
         return _parse_native_function_call(
