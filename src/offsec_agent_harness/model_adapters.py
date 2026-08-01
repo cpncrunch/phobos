@@ -406,7 +406,14 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
         return {}
     content = first.get("content") if isinstance(first.get("content"), dict) else {}
     parts = content.get("parts") if isinstance(content, dict) else None
-    if not isinstance(parts, list):
+    if isinstance(parts, dict):
+        # Some Gemini/OpenAI-compatible shims collapse a one-part candidate
+        # response into a single object instead of candidates[].content.parts[].
+        # Normalize at the adapter boundary so the runtime can still enforce the
+        # exact same schema, runtime-policy, ROE, and transcript provenance rules
+        # before anything can dispatch.
+        parts = [parts]
+    elif not isinstance(parts, list):
         return {}
     content_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []

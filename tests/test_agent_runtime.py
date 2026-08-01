@@ -3537,6 +3537,86 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_candidate_single_part_function_call_is_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Single Candidate Function Call",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeSingleCandidateHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": {
+                                        "functionCall": {
+                                            "tool_use_id": "candidate_single_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-single-candidate", "value": "single candidate functionCall accepted"},
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeSingleCandidateHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-single-candidate-function-call",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-single-candidate", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native single candidate function call token=single-candidate-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertIn("native provider candidate functionCall", payload["tool_calls"][0].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-single-candidate")
+                    call_metadata = payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(call_metadata.get("provider_tool_call_id"), "candidate_single_memory")
+                    self.assertEqual(call_metadata.get("native_tool_call_source"), "native provider candidate functionCall")
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertNotIn("single-candidate-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native single candidate function call token=single-candidate-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["candidate_single_memory"])
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native provider candidate functionCall")
+                recall = runtime.handle_message('/recall query=native-single-candidate')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("single candidate functionCall accepted", recall)
+                self.assertIn("single_candidate_part_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("single_candidate_part_function_call_translation"))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("single-candidate-secret", applied + recall)
+            finally:
+                runtime.close()
+
     def test_model_tool_call_planning_uses_provider_fallback_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
