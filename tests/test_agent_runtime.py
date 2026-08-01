@@ -2969,6 +2969,102 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_hosted_tool_calls_are_rejected_without_leaking_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Hosted Tool Call Rejection",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            hosted_input_marker = "HOSTED_NATIVE_TOOL_INPUT_SHOULD_NOT_SURFACE"
+
+            class FakeHostedHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": [
+                                        {"type": "text", "text": "native hosted tool plan token=hosted-secret"},
+                                        {
+                                            "type": "server_tool_use",
+                                            "tool_use_id": "hosted_search",
+                                            "name": "web_search",
+                                            "input": hosted_input_marker + " token=hosted-secret",
+                                        },
+                                        {
+                                            "type": "mcp_tool_use",
+                                            "tool_use_id": "hosted_mcp",
+                                            "name": "mcp_browser",
+                                            "input": {"query": hosted_input_marker + " nested token=hosted-secret"},
+                                        },
+                                        {
+                                            "type": "tool_use",
+                                            "tool_call_id": "hosted_valid_memory",
+                                            "name": "remember",
+                                            "input": {"key": "native-hosted-reject", "value": "hosted rejection boundary kept valid registered calls"},
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeHostedHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-hosted-rejection",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-hosted", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native hosted tool calls token=hosted-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-hosted-reject")
+                    rejected_blob = json.dumps(payload.get("rejected_tool_calls", []))
+                    warning_blob = json.dumps(payload.get("warnings", []))
+                    self.assertIn("provider-hosted tools must be exposed", rejected_blob)
+                    self.assertIn("server_tool_use", rejected_blob)
+                    self.assertIn("mcp_tool_use", rejected_blob)
+                    self.assertIn("custom/freeform/hosted", warning_blob)
+                    self.assertNotIn(hosted_input_marker, planned + rejected_blob + json.dumps(payload))
+                    self.assertNotIn("hosted-secret", planned)
+                    self.assertEqual(payload.get("metadata", {}).get("rejected_native_tool_call_count"), 2)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native hosted tool calls token=hosted-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                recall = runtime.handle_message('/recall query=native-hosted-reject')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("hosted rejection boundary kept valid registered calls", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_hosted_tool_calls_rejected"), status)
+                self.assertIn("server_tool_use", status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("mcp_tool_use", status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("hosted-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_flat_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7000,6 +7096,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("tool_use_id", native_status.get("provider_tool_call_id_aliases", []))
                 self.assertIn("function_result", native_status.get("provider_tool_result_block_types_ignored", []))
                 self.assertIn("custom_tool_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("server_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("mcp_tool_use", native_status.get("provider_unsupported_tool_call_types_rejected", []))
+                self.assertIn("computer_call", native_status.get("provider_unsupported_tool_call_types_rejected", []))
                 self.assertIn("approve", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("deny", native_status.get("approval_control_tools_hidden_from_model", []))
                 self.assertIn("run_command", native_status.get("execution_capable_tools", []))

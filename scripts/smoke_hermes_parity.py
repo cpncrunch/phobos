@@ -1988,6 +1988,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("camel_case_tool_call_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
+            and native_status_milestone_contract.get("provider_hosted_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
@@ -2090,6 +2091,9 @@ def main(argv: list[str] | None = None) -> int:
             and "function_call_output" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "functionResponse" in native_status_data.get("provider_tool_result_block_types_ignored", [])
             and "custom_tool_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "server_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "mcp_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "computer_call" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
             and "approve" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "deny" in native_status_data.get("approval_control_tools_hidden_from_model", [])
             and "run_command" in native_status_data.get("execution_capable_tools", [])
@@ -4925,6 +4929,102 @@ def main(argv: list[str] | None = None) -> int:
             and native_single_candidate_captured.get("tool_count", 0) > 0
             and "native-single-candidate-secret" not in native_single_candidate_plan + native_single_candidate_apply + native_single_candidate_recall + json.dumps(native_single_candidate_plan_payload) + json.dumps(native_single_candidate_apply_payload)
         )
+        native_hosted_marker = "NATIVE_HOSTED_TOOL_INPUT_SHOULD_NOT_SURFACE_SMOKE"
+        native_hosted_captured = {}
+
+        class NativeProviderHostedRejectSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "native hosted/freeform tool smoke token=native-hosted-secret"},
+                                    {
+                                        "type": "server_tool_use",
+                                        "tool_use_id": "hosted_server_tool",
+                                        "name": "web_search",
+                                        "input": native_hosted_marker + " token=native-hosted-secret",
+                                    },
+                                    {
+                                        "type": "mcp_tool_use",
+                                        "tool_use_id": "hosted_mcp_tool",
+                                        "name": "mcp_browser",
+                                        "input": {"query": native_hosted_marker + " nested token=native-hosted-secret"},
+                                    },
+                                    {
+                                        "type": "tool_use",
+                                        "tool_call_id": "hosted_valid_memory",
+                                        "name": "remember",
+                                        "input": {"key": "native-hosted-reject-smoke", "value": "hosted provider tools rejected while registered calls still apply"},
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_hosted_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_hosted_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_hosted_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeProviderHostedRejectSmokeResponse()
+
+        native_hosted_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-hosted-reject.db"),
+                session_name="native-provider-hosted-reject-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-hosted-reject-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_hosted_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_hosted_urlopen
+            native_hosted_plan = native_hosted_runtime.handle_message('/auto model=true prompt="native hosted tool reject smoke token=native-hosted-secret"')
+            native_hosted_plan_payload = json.loads(native_hosted_plan.split("\n", 1)[1])
+            native_hosted_apply = native_hosted_runtime.handle_message('/auto apply=true model=true prompt="native hosted tool reject smoke token=native-hosted-secret"')
+            native_hosted_apply_payload = json.loads(native_hosted_apply.split("\n", 1)[1])
+            native_hosted_recall = native_hosted_runtime.handle_message('/recall query=native-hosted-reject-smoke')
+            write("native-provider-hosted-tool-call-reject.json", json.dumps({
+                "plan": native_hosted_plan_payload,
+                "apply": native_hosted_apply_payload,
+                "captured": native_hosted_captured,
+                "recall": native_hosted_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_hosted_original_urlopen
+            native_hosted_runtime.close()
+        native_hosted_calls = native_hosted_plan_payload.get("tool_calls", []) if isinstance(native_hosted_plan_payload.get("tool_calls"), list) else []
+        native_hosted_rejected = json.dumps(native_hosted_plan_payload.get("rejected_tool_calls", []))
+        native_hosted_warnings = json.dumps(native_hosted_plan_payload.get("warnings", []))
+        native_hosted_metadata = native_hosted_plan_payload.get("metadata", {}) if isinstance(native_hosted_plan_payload.get("metadata"), dict) else {}
+        checks["native_provider_hosted_tool_call_reject_ok"] = (
+            native_hosted_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_hosted_calls] == ["remember"]
+            and native_hosted_calls[0].get("args", {}).get("key") == "native-hosted-reject-smoke"
+            and "provider-hosted tools must be exposed" in native_hosted_rejected
+            and "server_tool_use" in native_hosted_rejected
+            and "mcp_tool_use" in native_hosted_rejected
+            and "custom/freeform/hosted" in native_hosted_warnings.lower()
+            and int(native_hosted_metadata.get("rejected_native_tool_call_count", 0) or 0) == 2
+            and [item.get("result", {}).get("status") for item in native_hosted_apply_payload.get("results", [])] == ["ok"]
+            and "hosted provider tools rejected while registered calls still apply" in native_hosted_recall
+            and native_hosted_captured.get("tool_choice") == "auto"
+            and native_hosted_captured.get("tool_count", 0) > 0
+            and native_status_milestone_contract.get("provider_hosted_tool_calls_rejected") is True
+            and "server_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and "mcp_tool_use" in native_status_data.get("provider_unsupported_tool_call_types_rejected", [])
+            and native_hosted_marker not in native_hosted_plan + native_hosted_apply + native_hosted_recall + json.dumps(native_hosted_plan_payload) + json.dumps(native_hosted_apply_payload)
+            and "native-hosted-secret" not in native_hosted_plan + native_hosted_apply + native_hosted_recall + json.dumps(native_hosted_plan_payload) + json.dumps(native_hosted_apply_payload)
+        )
         checks["native_provider_custom_tool_call_reject_ok"] = (
             "Custom/freeform native tool calls are not supported" in native_edge_rejected
             and "Custom/freeform native tool calls are not supported" in native_responses_rejected
@@ -5890,6 +5990,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
+            "native_provider_hosted_tool_call_reject_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",
             "native_tool_call_guardrail_approval_ok",

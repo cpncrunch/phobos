@@ -1372,7 +1372,14 @@ _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
     "functionResponse",
     "function_response",
 }
-_NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {"custom_tool_call"}
+_NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES = {
+    "custom_tool_call",
+    "computer_call",
+    "web_search_call",
+    "code_interpreter_call",
+    "server_tool_use",
+    "mcp_tool_use",
+}
 
 
 def _reject_unsupported_native_tool_call(
@@ -1395,8 +1402,8 @@ def _reject_unsupported_native_tool_call(
     args: dict[str, Any] = {"native_type": str(native_type or "custom_tool_call"), "native_tool_call_index": index}
     if call_id:
         args["provider_tool_call_id"] = redact_secrets(call_id[:200]) or ""
-    reason = "Custom/freeform native tool calls are not supported; use registered JSON-schema function calls."
-    warning = "Native custom/freeform tool call skipped; Phobos only accepts registered JSON-schema function calls."
+    reason = "Custom/freeform native tool calls are not supported; provider-hosted tools must be exposed as registered JSON-schema function calls."
+    warning = "Native custom/freeform/hosted tool call skipped; Phobos only accepts registered JSON-schema function calls."
     return None, {"tool": tool_name, "reason": reason, "args": args}, warning
 
 
