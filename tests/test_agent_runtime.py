@@ -4267,6 +4267,123 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_message_level_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Responses Message Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+
+            class FakeResponsesMessageToolCallHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_text": "responses message tool calls token=responses-message-tool-secret",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [{"type": "output_text", "text": "responses message tool calls token=responses-message-tool-secret"}],
+                                "tool_calls": [
+                                    {
+                                        "id": "resp_message_tool_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-responses-message-tool-calls", "value": "Responses message-level tool_calls accepted"}),
+                                        },
+                                    },
+                                    {
+                                        "id": "resp_message_tool_tasks",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_tasks",
+                                            "argumentsJson": {"status": "all", "limit": 1},
+                                        },
+                                    },
+                                ],
+                                "toolCall": {
+                                    "toolCallId": "resp_message_tool_camel",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-responses-message-tool-camel", "value": "Responses message-level toolCall accepted"}),
+                                    },
+                                },
+                                "functionCall": {
+                                    "callId": "resp_message_function_alias",
+                                    "name": "remember",
+                                    "parameters": {"key": "native-responses-message-functioncall", "value": "Responses message-level functionCall accepted"},
+                                },
+                            }
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesMessageToolCallHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-responses-message-tool-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-responses-message-tool-calls", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native responses message tool calls token=responses-message-tool-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "remember", "remember"])
+                    self.assertIn("native provider responses message tool_calls", payload["tool_calls"][0]["reason"])
+                    self.assertIn("native provider responses message toolCall", payload["tool_calls"][2]["reason"])
+                    self.assertIn("native provider responses message functionCall", payload["tool_calls"][3]["reason"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias"])
+                    self.assertEqual(
+                        [item.get("native_tool_call_source") for item in call_metadata],
+                        [
+                            "native provider responses message tool_calls",
+                            "native provider responses message tool_calls",
+                            "native provider responses message toolCall",
+                            "native provider responses message functionCall",
+                        ],
+                    )
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertNotIn("responses-message-tool-secret", planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native responses message tool calls token=responses-message-tool-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "ok", "ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["resp_message_tool_memory", "resp_message_tool_tasks", "resp_message_tool_camel", "resp_message_function_alias"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], [item.get("native_tool_call_source") for item in call_metadata])
+                recall = runtime.handle_message('/recall query=native-responses-message')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses message-level tool_calls accepted", recall)
+                self.assertIn("Responses message-level toolCall accepted", recall)
+                self.assertIn("Responses message-level functionCall accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_message_tool_call_alias_translation"), status)
+                self.assertIn("responses_message_tool_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_toolCall", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_functionCall", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("responses-message-tool-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_responses_message_content_parts_function_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6337,6 +6454,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("top_level_content_block_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("content_parts_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("single_responses_output_tool_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("responses_message_tool_call_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("root_function_calls_snake_alias_translation"), native_status)
@@ -6370,6 +6488,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("top_level_content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_parts_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_tool_calls", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_toolCall", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_message_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCalls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("root_functionCalls_nested_functionCall", native_status.get("provider_native_tool_call_variants", []))
