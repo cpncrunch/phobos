@@ -7789,6 +7789,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_calls_nested_aliases_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_call_id_redaction_bounds_ok",
+            "native_provider_call_id_uniqueness_ok",
             "native_tool_call_transcript_provenance_ok",
             "native_provider_single_top_level_tool_call_ok",
             "native_provider_singular_tool_call_alias_ok",
@@ -7808,10 +7809,14 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_output_nested_function_call_ok",
+            "native_provider_responses_output_message_aliases_ok",
+            "native_provider_responses_output_message_typeless_wrapper_ok",
             "native_provider_responses_output_message_typeless_direct_ok",
             "native_provider_responses_output_message_typeless_direct_aliases_ok",
             "native_provider_responses_message_tool_call_alias_ok",
             "native_provider_responses_message_function_calls_alias_ok",
+            "native_provider_responses_message_toolcalls_plural_alias_ok",
+            "native_provider_responses_message_tool_call_singular_alias_ok",
             "native_provider_responses_message_content_tool_call_ok",
             "native_provider_responses_message_content_function_call_alias_ok",
             "native_provider_responses_message_content_parts_function_call_ok",
@@ -7855,8 +7860,20 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_gateway_chat_ok",
             "native_tool_call_cli_entrypoints_ok",
         ]
+        native_milestone_missing_required_checks = sorted(
+            name
+            for name in checks
+            if name.startswith("native_")
+            and name != "native_tool_call_milestone_contract_ok"
+            and name not in native_milestone_required_checks
+        )
+        native_milestone_stale_required_checks = sorted(
+            name for name in native_milestone_required_checks if name not in checks
+        )
         checks["native_tool_call_milestone_contract_ok"] = (
-            all(checks.get(name) is True for name in native_milestone_required_checks)
+            not native_milestone_missing_required_checks
+            and not native_milestone_stale_required_checks
+            and all(checks.get(name) is True for name in native_milestone_required_checks)
             and native_status_data.get("milestone") == "native_model_tool_calling_loop"
             and native_status_data.get("milestone_contract_complete") is True
             and bool(native_status_milestone_contract)
