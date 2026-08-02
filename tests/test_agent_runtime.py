@@ -8545,6 +8545,111 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_response_envelope_wrapper_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Response Envelope Wrapper",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-response-envelope-should-not-run.txt"
+            provider_result_marker = "RESPONSE_ENVELOPE_TOOL_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponseEnvelopeHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "response": {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "response envelope wrapper token=response-envelope-secret"},
+                                    {"type": "tool_result", "content": provider_result_marker + " token=response-envelope-secret"},
+                                ],
+                                "tool_calls": [
+                                    {
+                                        "id": "response_envelope_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-response-envelope", "value": "response envelope wrapper accepted"}),
+                                        },
+                                    },
+                                    {
+                                        "toolCallId": "response_envelope_dry",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "run_command",
+                                            "arguments": json.dumps({
+                                                "target": "app.example.test",
+                                                "purpose": "response envelope native dry-run boundary",
+                                                "command": f"printf native-response-envelope > {dry_run_marker}",
+                                                "execute": True,
+                                            }),
+                                        },
+                                    },
+                                ],
+                            }
+                        },
+                        "metadata": {"note": "outer envelope token=response-envelope-secret should not surface"},
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponseEnvelopeHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-response-envelope-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-response-envelope", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native response envelope wrapper token=response-envelope-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider root message tool_calls" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-response-envelope")
+                    self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["response_envelope_memory", "response_envelope_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root message tool_calls", "native provider root message tool_calls"])
+                    self.assertNotIn("response-envelope-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native response envelope wrapper token=response-envelope-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["response_envelope_memory", "response_envelope_dry"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-response-envelope')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("response envelope wrapper accepted", recall)
+                self.assertIn("provider_response_envelope_wrapper", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_response_envelope_wrapper_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("response-envelope-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_root_messages_wrapper_uses_latest_assistant_and_ignores_tool_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

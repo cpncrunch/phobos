@@ -659,7 +659,7 @@ def _tool_plan_prompt(prompt: str, tool_specs: list[dict[str, Any]], *, allow_co
     )
 
 
-def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
+def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> dict[str, Any]:
     chat_stream_message = _chat_completion_stream_events_to_message(raw)
     if chat_stream_message:
         return chat_stream_message
@@ -711,7 +711,31 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     top_level_message = _top_level_content_message(raw)
     if top_level_message:
         return top_level_message
+    envelope_message = _provider_response_envelope_to_message(raw, depth=_wrapper_depth)
+    if envelope_message:
+        return envelope_message
     return {}
+
+
+def _provider_response_envelope_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
+    """Unwrap one provider ``response`` envelope before native-call parsing.
+
+    A few local/OpenAI-compatible gateways return the actual model payload under
+    a root ``response`` object, for example ``{"response": {"message": ...}}``
+    or ``{"response": {"choices": [...]}}``.  Treat that envelope as an adapter
+    translation concern only: recurse into the nested provider payload, then let
+    the existing Phobos runtime boundary validate schemas, runtime policy, ROE,
+    approvals, execution intent, and transcript redaction before any tool can
+    run.  Limit recursion so malformed nested envelopes fail closed as no-tool
+    responses instead of causing unbounded parsing.
+    """
+
+    if depth >= 3 or not isinstance(raw, dict):
+        return {}
+    wrapped = raw.get("response")
+    if not isinstance(wrapped, dict):
+        return {}
+    return _first_choice_message(wrapped, _wrapper_depth=depth + 1)
 
 
 def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
