@@ -5366,8 +5366,12 @@ def main(argv: list[str] | None = None) -> int:
                             "content": {
                                 "parts": [
                                     {"text": "native Gemini smoke token=native-gemini-secret"},
-                                    {"functionCall": {"name": "remember", "args": {"key": "native-gemini-smoke", "value": "Gemini GenerateContent native tool call translated"}}},
                                     {
+                                        "functionCallId": "gemini_smoke_memory",
+                                        "functionCall": {"name": "remember", "args": {"key": "native-gemini-smoke", "value": "Gemini GenerateContent native tool call translated"}},
+                                    },
+                                    {
+                                        "toolCallId": "gemini_smoke_dry",
                                         "functionCall": {
                                             "name": "run_command",
                                             "args": {
@@ -5421,6 +5425,7 @@ def main(argv: list[str] | None = None) -> int:
             model_adapters.urllib.request.urlopen = native_gemini_original_urlopen
             native_gemini_runtime.close()
         native_gemini_calls = native_gemini_plan_payload.get("tool_calls", []) if isinstance(native_gemini_plan_payload.get("tool_calls"), list) else []
+        native_gemini_call_metadata = [call.get("metadata", {}) for call in native_gemini_calls if isinstance(call, dict)]
         native_gemini_metadata = native_gemini_plan_payload.get("metadata", {}) if isinstance(native_gemini_plan_payload.get("metadata"), dict) else {}
         native_gemini_ledger = native_gemini_apply_payload.get("execution_ledger", []) if isinstance(native_gemini_apply_payload.get("execution_ledger"), list) else []
         native_gemini_first = native_gemini_captured[0] if native_gemini_captured else {"url": "", "payload": {}, "headers": {}}
@@ -5446,6 +5451,8 @@ def main(argv: list[str] | None = None) -> int:
             and "approve" not in native_gemini_declaration_names
             and "deny" not in native_gemini_declaration_names
             and "Authorization" not in native_gemini_first.get("headers", {})
+            and [item.get("provider_tool_call_id") for item in native_gemini_call_metadata] == ["gemini_smoke_memory", "gemini_smoke_dry"]
+            and [item.get("provider_tool_call_id") for item in native_gemini_ledger] == ["gemini_smoke_memory", "gemini_smoke_dry"]
             and [item.get("native_tool_call_source") for item in native_gemini_ledger] == ["native provider candidate functionCall", "native provider candidate functionCall"]
             and [item.get("result", {}).get("status") for item in native_gemini_apply_payload.get("results", [])] == ["ok", "dry_run"]
             and native_gemini_ledger[1].get("execution_state") == "dry_run_not_executed"
@@ -5456,6 +5463,13 @@ def main(argv: list[str] | None = None) -> int:
             and not native_gemini_marker.exists()
             and native_gemini_result_marker not in native_gemini_outputs
             and "native-gemini-secret" not in native_gemini_outputs
+        )
+        checks["native_provider_candidate_part_call_id_ok"] = (
+            checks["native_gemini_adapter_ok"]
+            and native_status_milestone_contract.get("candidate_part_call_id_alias_translation") is True
+            and "candidate_part_call_id_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and [item.get("provider_tool_call_id") for item in native_gemini_call_metadata] == ["gemini_smoke_memory", "gemini_smoke_dry"]
+            and [item.get("provider_tool_call_id") for item in native_gemini_ledger] == ["gemini_smoke_memory", "gemini_smoke_dry"]
         )
 
         native_anthropic_marker = root / "native-anthropic-should-not-run.txt"
@@ -8368,6 +8382,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_responses_output_tool_call_ok",
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
+            "native_provider_candidate_part_call_id_ok",
             "native_provider_hosted_tool_call_reject_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",

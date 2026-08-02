@@ -3794,12 +3794,14 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "parts": [
                                         {"text": "native Gemini plan token=gemini-endpoint-secret"},
                                         {
+                                            "functionCallId": "gemini_part_memory",
                                             "functionCall": {
                                                 "name": "remember",
                                                 "args": {"key": "native-gemini", "value": "Gemini GenerateContent native functionCall translated"},
                                             },
                                         },
                                         {
+                                            "toolCallId": "gemini_part_dry",
                                             "functionCall": {
                                                 "name": "run_command",
                                                 "args": {
@@ -3868,10 +3870,13 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertNotIn("deny", declaration_names)
                 self.assertEqual(first["payload"].get("toolConfig", {}).get("functionCallingConfig", {}).get("mode"), "AUTO")
                 self.assertNotIn("Authorization", first["headers"])
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["gemini_part_memory", "gemini_part_dry"])
                 self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider candidate functionCall", "native provider candidate functionCall"])
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertTrue(status.get("milestone_contract", {}).get("gemini_generate_content_planning"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("candidate_part_call_id_alias_translation"), status)
                 self.assertIn("gemini_generate_content", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("candidate_part_call_id_alias", status.get("provider_native_tool_call_variants", []))
                 self.assertFalse(dry_run_marker.exists())
                 self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
                 self.assertNotIn("gemini-endpoint-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))

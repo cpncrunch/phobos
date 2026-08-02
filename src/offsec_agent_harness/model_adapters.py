@@ -1363,7 +1363,11 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
             content_blocks.append({"type": "text", "text": text})
         function_call = part.get("functionCall") or part.get("function_call")
         if isinstance(function_call, dict):
-            call_id = _native_call_id(function_call)
+            # Gemini-compatible candidate parts may put the correlation id on the
+            # part wrapper rather than inside functionCall itself. Preserve both
+            # as bounded provenance while leaving schema/ROE validation in the
+            # runtime boundary.
+            call_id = _native_call_id(part, function_call)
             tool_calls.append({
                 "type": "tool_call",
                 "name": _native_tool_name(function_call),
