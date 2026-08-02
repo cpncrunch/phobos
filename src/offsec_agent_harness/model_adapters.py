@@ -696,6 +696,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     root_message = _root_message_to_message(raw)
     if root_message:
         return root_message
+    root_messages = _root_messages_to_message(raw)
+    if root_messages:
+        return root_messages
     candidate_message = _candidate_content_to_message(raw)
     if candidate_message:
         return candidate_message
@@ -1777,6 +1780,42 @@ def _root_message_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return message if message else {}
 
 
+def _root_messages_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize root-level ``messages[]`` transcript wrappers into one assistant message.
+
+    A few local/OpenAI-compatible shims return a bounded chat transcript as
+    ``{"messages": [...]}`` rather than a final ``choices[0].message``.  Select
+    the latest non-result assistant/model message and translate only its native
+    tool-call fields into the existing planner boundary.  Prior ``tool`` or
+    ``function`` role result messages are ignored so upstream tool output cannot
+    become Phobos summary text or dispatch input.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    root_messages = raw.get("messages")
+    if not isinstance(root_messages, list) or not root_messages:
+        return {}
+    for item in reversed(root_messages):
+        if not isinstance(item, dict):
+            continue
+        if _native_provider_result_role_message(item, provider_shape="root.messages"):
+            continue
+        role_value = item.get("role")
+        author = item.get("author")
+        if role_value in (None, "") and isinstance(author, dict):
+            role_value = author.get("role")
+        role = str(role_value or "").strip().lower()
+        if role and role not in {"assistant", "model"}:
+            continue
+        if not _responses_output_item_looks_like_message(item):
+            continue
+        message = _provider_message_wrapper_to_message(item, provider_shape_prefix="root.messages")
+        if message:
+            return message
+    return {}
+
+
 def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = "gemini.candidate") -> dict[str, Any]:
     """Normalize candidate/part native function calls into the common shape.
 
@@ -2586,6 +2625,10 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root message content {native_kind}"
     if provider_shape == "root.message.content.parts":
         return f"native provider root message content parts {native_kind}"
+    if provider_shape == "root.messages.content":
+        return f"native provider root messages content {native_kind}"
+    if provider_shape == "root.messages.content.parts":
+        return f"native provider root messages content parts {native_kind}"
     if provider_shape == "bedrock.converse.message.content":
         return f"native provider bedrock converse message content {native_kind}"
     if provider_shape == "bedrock.converse.message.content.parts":
@@ -2686,6 +2729,10 @@ def _parse_native_content_function_call_block(
         label = "native provider root message content functionCall"
     elif provider_shape == "root.message.content.parts":
         label = "native provider root message content parts functionCall"
+    elif provider_shape == "root.messages.content":
+        label = "native provider root messages content functionCall"
+    elif provider_shape == "root.messages.content.parts":
+        label = "native provider root messages content parts functionCall"
     elif provider_shape == "bedrock.converse.message.content":
         label = "native provider bedrock converse message content functionCall"
     elif provider_shape == "bedrock.converse.message.content.parts":
@@ -2837,6 +2884,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.messages."):
+            label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
@@ -2946,6 +2995,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.messages."):
+            label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":

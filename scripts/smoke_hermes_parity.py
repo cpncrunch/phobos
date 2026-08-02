@@ -2146,6 +2146,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
             and native_status_milestone_contract.get("root_message_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
@@ -2229,6 +2230,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_message_typeless_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_message_typeless_direct" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_messages_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -4017,6 +4019,129 @@ def main(argv: list[str] | None = None) -> int:
             and not native_root_message_marker.exists()
             and native_root_message_result_marker not in native_root_message_plan + native_root_message_apply + native_root_message_recall + json.dumps(native_root_message_plan_payload) + json.dumps(native_root_message_apply_payload)
             and "native-root-message-secret" not in native_root_message_plan + native_root_message_apply + native_root_message_recall + json.dumps(native_root_message_plan_payload) + json.dumps(native_root_message_apply_payload)
+        )
+
+        native_root_messages_captured = {}
+        native_root_messages_marker = root / "native-root-messages-should-not-run.txt"
+        native_root_messages_result_marker = "ROOT_MESSAGES_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootMessagesSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "messages": [
+                        {"role": "system", "content": "native root messages system token=native-root-messages-secret"},
+                        {
+                            "role": "assistant",
+                            "content": "stale root messages plan should not be selected",
+                            "tool_calls": [
+                                {
+                                    "id": "root_messages_old_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-messages-old-smoke", "value": "old root messages call should not dispatch"}),
+                                    },
+                                }
+                            ],
+                        },
+                        {"role": "tool", "content": native_root_messages_result_marker + " token=native-root-messages-secret"},
+                        {
+                            "role": "assistant",
+                            "content": "native root messages smoke token=native-root-messages-secret",
+                            "tool_calls": [
+                                {
+                                    "id": "root_messages_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-messages-smoke", "value": "root messages wrapper native tool call translated"}),
+                                    },
+                                },
+                                {
+                                    "toolCallId": "root_messages_dry",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": json.dumps({
+                                            "target": "app.example.test",
+                                            "purpose": "root messages native dry-run smoke",
+                                            "command": f"printf native-root-messages > {native_root_messages_marker}",
+                                            "execute": True,
+                                        }),
+                                    },
+                                },
+                            ],
+                        },
+                        {"role": "tool", "content": native_root_messages_result_marker + " trailing token=native-root-messages-secret"},
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_root_messages_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_messages_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_messages_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootMessagesSmokeResponse()
+
+        native_root_messages_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-messages.db"),
+                session_name="native-provider-root-messages-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-messages-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_messages_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_messages_urlopen
+            native_root_messages_plan = native_root_messages_runtime.handle_message('/auto model=true prompt="native root messages smoke token=native-root-messages-secret"')
+            native_root_messages_plan_payload = json.loads(native_root_messages_plan.split("\n", 1)[1])
+            native_root_messages_apply = native_root_messages_runtime.handle_message('/auto apply=true model=true prompt="native root messages smoke token=native-root-messages-secret"')
+            native_root_messages_apply_payload = json.loads(native_root_messages_apply.split("\n", 1)[1])
+            native_root_messages_recall = native_root_messages_runtime.handle_message('/recall query=native-root-messages-smoke')
+            write("native-provider-root-messages-tool-calls.json", json.dumps({
+                "plan": native_root_messages_plan_payload,
+                "apply": native_root_messages_apply_payload,
+                "captured": native_root_messages_captured,
+                "recall": native_root_messages_recall,
+                "marker_exists": native_root_messages_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_messages_original_urlopen
+            native_root_messages_runtime.close()
+        native_root_messages_calls = native_root_messages_plan_payload.get("tool_calls", []) if isinstance(native_root_messages_plan_payload.get("tool_calls"), list) else []
+        native_root_messages_metadata = native_root_messages_plan_payload.get("metadata", {}) if isinstance(native_root_messages_plan_payload.get("metadata"), dict) else {}
+        native_root_messages_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_messages_calls]
+        native_root_messages_ledger = native_root_messages_apply_payload.get("execution_ledger", []) if isinstance(native_root_messages_apply_payload.get("execution_ledger"), list) else []
+        native_root_messages_blob = native_root_messages_plan + native_root_messages_apply + native_root_messages_recall + json.dumps(native_root_messages_plan_payload) + json.dumps(native_root_messages_apply_payload)
+        checks["native_provider_root_messages_wrapper_ok"] = (
+            native_root_messages_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_messages_calls] == ["remember", "run_command"]
+            and all("native provider root messages tool_calls" in call.get("reason", "") for call in native_root_messages_calls)
+            and native_root_messages_calls[0].get("args", {}).get("key") == "native-root-messages-smoke"
+            and native_root_messages_calls[1].get("args", {}).get("execute") is False
+            and native_root_messages_metadata.get("native_tool_calls") is True
+            and native_root_messages_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_root_messages_call_metadata] == ["root_messages_memory", "root_messages_dry"]
+            and [item.get("native_tool_call_source") for item in native_root_messages_call_metadata] == ["native provider root messages tool_calls", "native provider root messages tool_calls"]
+            and [item.get("result", {}).get("status") for item in native_root_messages_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_messages_ledger] == ["root_messages_memory", "root_messages_dry"]
+            and native_root_messages_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
+            and "root_messages_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root messages wrapper native tool call translated" in native_root_messages_recall
+            and "old root messages call should not dispatch" not in native_root_messages_recall
+            and native_root_messages_captured.get("tool_choice") == "auto"
+            and native_root_messages_captured.get("tool_count", 0) > 0
+            and not native_root_messages_marker.exists()
+            and native_root_messages_result_marker not in native_root_messages_blob
+            and "native-root-messages-secret" not in native_root_messages_blob
         )
 
         native_root_message_alias_captured = {}
@@ -9206,6 +9331,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_singular_tool_call_alias_ok",
             "native_provider_camel_case_tool_call_alias_ok",
             "native_provider_root_message_wrapper_ok",
+            "native_provider_root_messages_wrapper_ok",
             "native_provider_root_message_alias_matrix_ok",
             "native_provider_root_function_call_ok",
             "native_provider_tool_call_edge_cases_ok",
