@@ -1731,6 +1731,26 @@ def _native_tool_call_has_id(value: dict[str, Any]) -> bool:
     return any(value.get(key) not in (None, "") for key in _NATIVE_CALL_ID_ALIAS_KEYS)
 
 
+def _native_neutral_tool_call(provider_shape: str, item: dict[str, Any], tool: dict[str, Any]) -> dict[str, Any]:
+    """Return an inert call object for neutral nested ``tool`` wrappers.
+
+    Most providers use ``function`` / ``functionCall`` / ``toolUse``.  A few
+    OpenAI-compatible routers expose a registered function proposal as a neutral
+    ``tool`` object at the response root or message level.  Flatten only the
+    name/JSON arguments into Phobos' common native-call shape; schema checks,
+    runtime policy, ROE preview, approval queues, and execution controls remain
+    runtime boundaries.
+    """
+
+    return {
+        "type": "tool_call",
+        "name": _native_tool_name(tool),
+        "arguments": _native_argument_value(tool, preferred=("input", "arguments", "args", "parameters", "params")),
+        "call_id": str(_native_call_id(item, tool)),
+        "_provider_shape": provider_shape,
+    }
+
+
 def _native_provider_result_role_message(raw: Any, *, provider_shape: str) -> dict[str, Any]:
     """Return an inert message for provider role=tool/function result echoes.
 
@@ -2334,6 +2354,7 @@ def _responses_output_item_looks_like_message(item: dict[str, Any]) -> bool:
             "toolCalls",
             "tool_call",
             "toolCall",
+            "tool",
             *_NATIVE_TOOL_USE_ALIAS_KEYS,
             "function_call",
             "functionCall",
@@ -2452,6 +2473,10 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
     append_raw(item.get("tool_call"), provider_shape=f"{provider_shape_prefix}.tool_call")
     append_raw(item.get("toolCall"), provider_shape=f"{provider_shape_prefix}.toolCall")
 
+    neutral_tool = item.get("tool")
+    if isinstance(neutral_tool, dict):
+        tool_calls.append(_native_neutral_tool_call(f"{provider_shape_prefix}.tool", item, neutral_tool))
+
     function_call = item.get("functionCall")
     if isinstance(function_call, dict):
         tool_calls.append({
@@ -2553,6 +2578,9 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
     for provider_shape, root_tool_uses in root_tool_use_batches:
         for call in _native_tool_use_batch_items(provider_shape, root_tool_uses):
             _append_message_tool_call(message, call)
+    root_tool = raw.get("tool")
+    if isinstance(root_tool, dict):
+        _append_message_tool_call(message, _native_neutral_tool_call("root.tool", raw, root_tool))
     root_function_response = _native_provider_result_alias_value(raw)
     if isinstance(root_function_response, dict):
         _append_message_content_block(
@@ -2702,6 +2730,9 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
         raw_tool_uses = message.get(alias)
         if isinstance(raw_tool_uses, (list, dict)):
             raw_call_items.extend(_native_tool_use_batch_items(f"message.{alias}", raw_tool_uses))
+    message_tool = message.get("tool")
+    if isinstance(message_tool, dict):
+        raw_call_items.append(_native_neutral_tool_call("message.tool", message, message_tool))
     for index, item in enumerate(raw_call_items, start=1):
         parsed, rejected_item, warning = _parse_native_tool_call(item, index=index)
         if warning:
@@ -3280,13 +3311,15 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider message functionCall"
         elif item.get("_provider_shape") == "message.function_calls":
             label = "native provider message function_calls"
+        elif provider_shape in {"root.tool", "message.tool"}:
+            label = "native provider " + provider_shape.replace(".", " ")
         elif provider_shape in {"root.tool_use", "root.toolUse", "root.tool_uses", "root.toolUses", "message.tool_use", "message.toolUse", "message.tool_uses", "message.toolUses"}:
             label = "native provider " + provider_shape.replace(".", " ")
-        elif provider_shape.startswith("responses.message.") and provider_shape.rsplit(".", 1)[-1] in _NATIVE_TOOL_USE_ALIAS_KEYS:
+        elif provider_shape.startswith("responses.message.") and provider_shape.rsplit(".", 1)[-1] in (*_NATIVE_TOOL_USE_ALIAS_KEYS, "tool"):
             label = "native provider responses message " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith("responses.output.message_typeless.") and provider_shape.rsplit(".", 1)[-1] in _NATIVE_TOOL_USE_ALIAS_KEYS:
+        elif provider_shape.startswith("responses.output.message_typeless.") and provider_shape.rsplit(".", 1)[-1] in (*_NATIVE_TOOL_USE_ALIAS_KEYS, "tool"):
             label = "native provider typeless responses output message " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith("responses.output.message.") and provider_shape.rsplit(".", 1)[-1] in _NATIVE_TOOL_USE_ALIAS_KEYS:
+        elif provider_shape.startswith("responses.output.message.") and provider_shape.rsplit(".", 1)[-1] in (*_NATIVE_TOOL_USE_ALIAS_KEYS, "tool"):
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]

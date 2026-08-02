@@ -9933,6 +9933,11 @@ class AgentRuntimeTests(unittest.TestCase):
                             "toolName": "list_tasks",
                             "inputJson": {"status": "all", "limit": "1"},
                         },
+                        "tool": {
+                            "toolCallId": "root_tool_memory",
+                            "toolName": "remember",
+                            "inputJson": {"key": "native-root-tool", "value": "root neutral tool alias accepted"},
+                        },
                         "tool_uses": [
                             {
                                 "tool_call_id": "root_tool_uses_memory",
@@ -9972,7 +9977,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
                     calls = payload.get("tool_calls", [])
-                    self.assertEqual([call["tool"] for call in calls], ["remember", "list_tasks", "remember", "list_tasks"])
+                    self.assertEqual([call["tool"] for call in calls], ["remember", "list_tasks", "remember", "list_tasks", "remember"])
                     sources = [call.get("metadata", {}).get("native_tool_call_source") for call in calls]
                     self.assertEqual(
                         sources,
@@ -9981,13 +9986,14 @@ class AgentRuntimeTests(unittest.TestCase):
                             "native provider root toolUse",
                             "native provider root tool_uses",
                             "native provider root toolUses",
+                            "native provider root tool",
                         ],
                     )
                     self.assertEqual(
                         [call.get("metadata", {}).get("provider_tool_call_id") for call in calls],
-                        ["root_tool_use_memory", "root_toolUse_tasks", "root_tool_uses_memory", "root_toolUses_tasks"],
+                        ["root_tool_use_memory", "root_toolUse_tasks", "root_tool_uses_memory", "root_toolUses_tasks", "root_tool_memory"],
                     )
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 5)
                     self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
                     self.assertNotIn("root-tool-use-secret", planned + json.dumps(payload))
@@ -10000,10 +10006,12 @@ class AgentRuntimeTests(unittest.TestCase):
                 recall = runtime.handle_message('/recall query=native-root-tool')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 variants = status.get("provider_native_tool_call_variants", [])
-                for variant in ["root_tool_use", "root_toolUse", "root_tool_uses", "root_toolUses"]:
+                for variant in ["root_tool_use", "root_toolUse", "root_tool", "root_tool_uses", "root_toolUses"]:
                     self.assertIn(variant, variants)
                 self.assertTrue(status.get("milestone_contract", {}).get("root_tool_use_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("root_neutral_tool_alias_translation"), status)
                 self.assertIn("root tool_use alias accepted", recall)
+                self.assertIn("root neutral tool alias accepted", recall)
                 self.assertIn("root tool_uses alias accepted", recall)
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
@@ -10048,6 +10056,11 @@ class AgentRuntimeTests(unittest.TestCase):
                                         "toolName": "list_tasks",
                                         "inputJson": {"status": "all", "limit": "1"},
                                     },
+                                    "tool": {
+                                        "toolCallId": "message_tool_memory",
+                                        "toolName": "remember",
+                                        "inputJson": {"key": "native-message-tool", "value": "message neutral tool alias accepted"},
+                                    },
                                     "tool_uses": [
                                         {
                                             "tool_call_id": "message_tool_uses_memory",
@@ -10090,7 +10103,7 @@ class AgentRuntimeTests(unittest.TestCase):
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
                     calls = payload.get("tool_calls", [])
-                    self.assertEqual([call["tool"] for call in calls], ["remember", "list_tasks", "remember", "list_tasks"])
+                    self.assertEqual([call["tool"] for call in calls], ["remember", "list_tasks", "remember", "list_tasks", "remember"])
                     sources = [call.get("metadata", {}).get("native_tool_call_source") for call in calls]
                     self.assertEqual(
                         sources,
@@ -10099,13 +10112,14 @@ class AgentRuntimeTests(unittest.TestCase):
                             "native provider message toolUse",
                             "native provider message tool_uses",
                             "native provider message toolUses",
+                            "native provider message tool",
                         ],
                     )
                     self.assertEqual(
                         [call.get("metadata", {}).get("provider_tool_call_id") for call in calls],
-                        ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks"],
+                        ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks", "message_tool_memory"],
                     )
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 5)
                     self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
                     self.assertNotIn("message-tool-use-secret", planned + json.dumps(payload))
 
@@ -10117,10 +10131,12 @@ class AgentRuntimeTests(unittest.TestCase):
                 recall = runtime.handle_message('/recall query=native-message-tool')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 variants = status.get("provider_native_tool_call_variants", [])
-                for variant in ["message_tool_use", "message_toolUse", "message_tool_uses", "message_toolUses"]:
+                for variant in ["message_tool_use", "message_toolUse", "message_tool", "message_tool_uses", "message_toolUses"]:
                     self.assertIn(variant, variants)
                 self.assertTrue(status.get("milestone_contract", {}).get("message_tool_use_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("message_neutral_tool_alias_translation"), status)
                 self.assertIn("message tool_use alias accepted", recall)
+                self.assertIn("message neutral tool alias accepted", recall)
                 self.assertIn("message tool_uses alias accepted", recall)
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")

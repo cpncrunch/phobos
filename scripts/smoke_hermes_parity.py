@@ -2163,7 +2163,9 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_function_calls_nested_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_nested_function_call_translation") is True
             and native_status_milestone_contract.get("root_tool_use_alias_translation") is True
+            and native_status_milestone_contract.get("root_neutral_tool_alias_translation") is True
             and native_status_milestone_contract.get("message_tool_use_alias_translation") is True
+            and native_status_milestone_contract.get("message_neutral_tool_alias_translation") is True
             and native_status_milestone_contract.get("message_function_call_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("message_function_calls_nested_function_call_translation") is True
@@ -2268,10 +2270,12 @@ def main(argv: list[str] | None = None) -> int:
             and "root_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_tool" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_tool_uses" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_toolUses" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "message_tool" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_tool_uses" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_toolUses" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -5175,6 +5179,11 @@ def main(argv: list[str] | None = None) -> int:
                         "toolName": "list_tasks",
                         "inputJson": {"status": "all", "limit": "1"},
                     },
+                    "tool": {
+                        "toolCallId": "root_tool_memory",
+                        "toolName": "remember",
+                        "inputJson": {"key": "native-root-tool-smoke", "value": "root neutral tool native tool call translated"},
+                    },
                     "tool_uses": [
                         {
                             "tool_call_id": "root_tool_uses_memory",
@@ -5219,7 +5228,8 @@ def main(argv: list[str] | None = None) -> int:
             native_root_tool_use_apply_payload = json.loads(native_root_tool_use_apply.split("\n", 1)[1])
             native_root_tool_use_recall_one = native_root_tool_use_runtime.handle_message('/recall query=native-root-tool-use-smoke')
             native_root_tool_use_recall_two = native_root_tool_use_runtime.handle_message('/recall query=native-root-tool-uses-smoke')
-            native_root_tool_use_recall = native_root_tool_use_recall_one + "\n" + native_root_tool_use_recall_two
+            native_root_tool_use_recall_three = native_root_tool_use_runtime.handle_message('/recall query=native-root-tool-smoke')
+            native_root_tool_use_recall = native_root_tool_use_recall_one + "\n" + native_root_tool_use_recall_two + "\n" + native_root_tool_use_recall_three
             write("native-provider-root-tool-use-aliases.json", json.dumps({
                 "plan": native_root_tool_use_plan_payload,
                 "apply": native_root_tool_use_apply_payload,
@@ -5238,17 +5248,19 @@ def main(argv: list[str] | None = None) -> int:
         native_root_tool_use_variants = native_status_data.get("provider_native_tool_call_variants", [])
         checks["native_provider_root_tool_use_aliases_ok"] = (
             native_root_tool_use_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_root_tool_use_calls] == ["remember", "list_tasks", "remember", "list_tasks"]
+            and [call.get("tool") for call in native_root_tool_use_calls] == ["remember", "list_tasks", "remember", "list_tasks", "remember"]
             and native_root_tool_use_metadata.get("native_tool_calls") is True
-            and native_root_tool_use_metadata.get("native_tool_call_count") == 4
-            and native_root_tool_use_sources == ["native provider root tool_use", "native provider root toolUse", "native provider root tool_uses", "native provider root toolUses"]
-            and native_root_tool_use_ids == ["root_tool_use_memory", "root_toolUse_tasks", "root_tool_uses_memory", "root_toolUses_tasks"]
-            and [item.get("result", {}).get("status") for item in native_root_tool_use_apply_payload.get("results", [])] == ["ok"] * 4
+            and native_root_tool_use_metadata.get("native_tool_call_count") == 5
+            and native_root_tool_use_sources == ["native provider root tool_use", "native provider root toolUse", "native provider root tool_uses", "native provider root toolUses", "native provider root tool"]
+            and native_root_tool_use_ids == ["root_tool_use_memory", "root_toolUse_tasks", "root_tool_uses_memory", "root_toolUses_tasks", "root_tool_memory"]
+            and [item.get("result", {}).get("status") for item in native_root_tool_use_apply_payload.get("results", [])] == ["ok"] * 5
             and [item.get("native_tool_call_source") for item in native_root_tool_use_ledger] == native_root_tool_use_sources
             and native_status_milestone_contract.get("root_tool_use_alias_translation") is True
-            and all(variant in native_root_tool_use_variants for variant in ["root_tool_use", "root_toolUse", "root_tool_uses", "root_toolUses"])
+            and native_status_milestone_contract.get("root_neutral_tool_alias_translation") is True
+            and all(variant in native_root_tool_use_variants for variant in ["root_tool_use", "root_toolUse", "root_tool", "root_tool_uses", "root_toolUses"])
             and "tool_result" in json.dumps(native_root_tool_use_plan_payload.get("warnings", [])).lower()
             and "root tool_use native tool call translated" in native_root_tool_use_recall
+            and "root neutral tool native tool call translated" in native_root_tool_use_recall
             and "root tool_uses native tool call translated" in native_root_tool_use_recall
             and native_root_tool_use_captured.get("tool_choice") == "auto"
             and native_root_tool_use_captured.get("tool_count", 0) > 0
@@ -5281,6 +5293,11 @@ def main(argv: list[str] | None = None) -> int:
                                     "toolUseId": "message_toolUse_tasks",
                                     "toolName": "list_tasks",
                                     "inputJson": {"status": "all", "limit": "1"},
+                                },
+                                "tool": {
+                                    "toolCallId": "message_tool_memory",
+                                    "toolName": "remember",
+                                    "inputJson": {"key": "native-message-tool-smoke", "value": "message neutral tool native tool call translated"},
                                 },
                                 "tool_uses": [
                                     {
@@ -5329,7 +5346,8 @@ def main(argv: list[str] | None = None) -> int:
             native_message_tool_use_apply_payload = json.loads(native_message_tool_use_apply.split("\n", 1)[1])
             native_message_tool_use_recall_one = native_message_tool_use_runtime.handle_message('/recall query=native-message-tool-use-smoke')
             native_message_tool_use_recall_two = native_message_tool_use_runtime.handle_message('/recall query=native-message-tool-uses-smoke')
-            native_message_tool_use_recall = native_message_tool_use_recall_one + "\n" + native_message_tool_use_recall_two
+            native_message_tool_use_recall_three = native_message_tool_use_runtime.handle_message('/recall query=native-message-tool-smoke')
+            native_message_tool_use_recall = native_message_tool_use_recall_one + "\n" + native_message_tool_use_recall_two + "\n" + native_message_tool_use_recall_three
             write("native-provider-message-tool-use-aliases.json", json.dumps({
                 "plan": native_message_tool_use_plan_payload,
                 "apply": native_message_tool_use_apply_payload,
@@ -5348,21 +5366,33 @@ def main(argv: list[str] | None = None) -> int:
         native_message_tool_use_variants = native_status_data.get("provider_native_tool_call_variants", [])
         checks["native_provider_message_tool_use_aliases_ok"] = (
             native_message_tool_use_plan_payload.get("mode") == "plan_only"
-            and [call.get("tool") for call in native_message_tool_use_calls] == ["remember", "list_tasks", "remember", "list_tasks"]
+            and [call.get("tool") for call in native_message_tool_use_calls] == ["remember", "list_tasks", "remember", "list_tasks", "remember"]
             and native_message_tool_use_metadata.get("native_tool_calls") is True
-            and native_message_tool_use_metadata.get("native_tool_call_count") == 4
-            and native_message_tool_use_sources == ["native provider message tool_use", "native provider message toolUse", "native provider message tool_uses", "native provider message toolUses"]
-            and native_message_tool_use_ids == ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks"]
-            and [item.get("result", {}).get("status") for item in native_message_tool_use_apply_payload.get("results", [])] == ["ok"] * 4
+            and native_message_tool_use_metadata.get("native_tool_call_count") == 5
+            and native_message_tool_use_sources == ["native provider message tool_use", "native provider message toolUse", "native provider message tool_uses", "native provider message toolUses", "native provider message tool"]
+            and native_message_tool_use_ids == ["message_tool_use_memory", "message_toolUse_tasks", "message_tool_uses_memory", "message_toolUses_tasks", "message_tool_memory"]
+            and [item.get("result", {}).get("status") for item in native_message_tool_use_apply_payload.get("results", [])] == ["ok"] * 5
             and [item.get("native_tool_call_source") for item in native_message_tool_use_ledger] == native_message_tool_use_sources
             and native_status_milestone_contract.get("message_tool_use_alias_translation") is True
-            and all(variant in native_message_tool_use_variants for variant in ["message_tool_use", "message_toolUse", "message_tool_uses", "message_toolUses"])
+            and native_status_milestone_contract.get("message_neutral_tool_alias_translation") is True
+            and all(variant in native_message_tool_use_variants for variant in ["message_tool_use", "message_toolUse", "message_tool", "message_tool_uses", "message_toolUses"])
             and "message tool_use native tool call translated" in native_message_tool_use_recall
+            and "message neutral tool native tool call translated" in native_message_tool_use_recall
             and "message tool_uses native tool call translated" in native_message_tool_use_recall
             and native_message_tool_use_captured.get("tool_choice") == "auto"
             and native_message_tool_use_captured.get("tool_count", 0) > 0
             and native_message_tool_use_result_marker not in native_message_tool_use_plan + native_message_tool_use_apply + native_message_tool_use_recall + json.dumps(native_message_tool_use_plan_payload) + json.dumps(native_message_tool_use_apply_payload)
             and "native-message-tool-use-secret" not in native_message_tool_use_plan + native_message_tool_use_apply + native_message_tool_use_recall + json.dumps(native_message_tool_use_plan_payload) + json.dumps(native_message_tool_use_apply_payload)
+        )
+        checks["native_provider_neutral_tool_aliases_ok"] = (
+            checks.get("native_provider_root_tool_use_aliases_ok") is True
+            and checks.get("native_provider_message_tool_use_aliases_ok") is True
+            and native_root_tool_use_calls[-1].get("tool") == "remember"
+            and native_root_tool_use_calls[-1].get("args", {}).get("key") == "native-root-tool-smoke"
+            and native_root_tool_use_call_metadata[-1].get("native_tool_call_source") == "native provider root tool"
+            and native_message_tool_use_calls[-1].get("tool") == "remember"
+            and native_message_tool_use_calls[-1].get("args", {}).get("key") == "native-message-tool-smoke"
+            and native_message_tool_use_call_metadata[-1].get("native_tool_call_source") == "native provider message tool"
         )
 
         native_message_function_captured = {}
@@ -10287,6 +10317,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_root_function_calls_snake_nested_function_call_alias_ok",
             "native_provider_root_tool_use_aliases_ok",
             "native_provider_message_tool_use_aliases_ok",
+            "native_provider_neutral_tool_aliases_ok",
             "native_provider_message_function_call_alias_ok",
             "native_provider_message_function_calls_alias_ok",
             "native_provider_message_function_calls_nested_function_call_alias_ok",
