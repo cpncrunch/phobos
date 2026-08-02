@@ -649,6 +649,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     responses_stream_message = _responses_stream_events_to_message(raw)
     if responses_stream_message:
         return responses_stream_message
+    bedrock_converse_stream_message = _bedrock_converse_stream_events_to_message(raw)
+    if bedrock_converse_stream_message:
+        return bedrock_converse_stream_message
     anthropic_stream_message = _anthropic_stream_events_to_message(raw)
     if anthropic_stream_message:
         return anthropic_stream_message
@@ -976,6 +979,26 @@ _ANTHROPIC_STREAM_EVENT_ALIASES = {
 _ANTHROPIC_STREAM_WRAPPER_KEYS = tuple(_ANTHROPIC_STREAM_EVENT_ALIASES)
 
 
+def _bedrock_converse_stream_events_to_message(raw: Any) -> dict[str, Any]:
+    """Normalize Bedrock ConverseStream frames into an inert message shape.
+
+    Bedrock's ConverseStream iterator yields camelCase wrapper events such as
+    ``messageStart``, ``contentBlockStart`` and ``contentBlockDelta``.  The
+    content blocks are structurally the same as Anthropic-style stream wrappers,
+    but keeping a Bedrock-specific provider shape preserves source provenance in
+    plan transcripts and execution ledgers.  This remains a translation-only
+    adapter boundary; schema validation, runtime policy, ROE previews, approval
+    queueing, and explicit execution gating happen later in the Phobos runtime.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    response_format = str(raw.get("_response_format") or "").strip().lower()
+    if not isinstance(raw.get("stream"), list) and response_format not in {"bedrock_converse_stream", "bedrock-converse-stream"}:
+        return {}
+    return _anthropic_stream_events_to_message(raw, provider_shape="bedrock.converse.stream.content")
+
+
 def _is_anthropic_stream_wrapper_event(value: Any) -> bool:
     return isinstance(value, dict) and any(key in value for key in _ANTHROPIC_STREAM_WRAPPER_KEYS)
 
@@ -993,7 +1016,7 @@ def _anthropic_stream_event_type_and_payload(event: dict[str, Any]) -> tuple[str
     return _ANTHROPIC_STREAM_EVENT_ALIASES.get(raw_event_type, raw_event_type), payload if isinstance(payload, dict) else event
 
 
-def _anthropic_stream_start_block(event: dict[str, Any]) -> dict[str, Any] | None:
+def _anthropic_stream_start_block(event: dict[str, Any], *, provider_shape: str = "anthropic.messages.stream.content") -> dict[str, Any] | None:
     content_block = _responses_stream_event_value(event, "content_block", "contentBlock", "block")
     if isinstance(content_block, dict):
         return content_block
@@ -1007,7 +1030,7 @@ def _anthropic_stream_start_block(event: dict[str, Any]) -> dict[str, Any] | Non
     if isinstance(function_call, dict):
         return {"type": "functionCall", "functionCall": function_call}
     if _native_provider_result_alias_value(start) is not None:
-        return {"type": "tool_result", "content": "<provider tool result omitted>", "_provider_shape": "anthropic.messages.stream.content"}
+        return {"type": "tool_result", "content": "<provider tool result omitted>", "_provider_shape": provider_shape}
     if any(key in start for key in ("type", "text", "name", "toolName", "functionName", "input", "inputJson", "arguments", "args")):
         return start
     return None
@@ -1030,7 +1053,7 @@ def _merge_anthropic_stream_tool_use_delta(block: dict[str, Any], delta: dict[st
     return True
 
 
-def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
+def _anthropic_stream_events_to_message(raw: Any, *, provider_shape: str = "anthropic.messages.stream.content") -> dict[str, Any]:
     """Assemble Anthropic Messages SSE tool_use fragments into message shape.
 
     Anthropic streaming emits ``content_block_start`` plus
@@ -1058,12 +1081,12 @@ def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
         if key not in blocks:
             block = dict(initial or {})
             block.setdefault("type", "text")
-            block.setdefault("_provider_shape", "anthropic.messages.stream.content")
+            block.setdefault("_provider_shape", provider_shape)
             blocks[key] = block
             order.append(key)
         elif initial:
             _merge_native_tool_call_fragment(blocks[key], initial)
-            blocks[key].setdefault("_provider_shape", "anthropic.messages.stream.content")
+            blocks[key].setdefault("_provider_shape", provider_shape)
         return blocks[key]
 
     for position, event in enumerate(events):
@@ -1080,12 +1103,12 @@ def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
                 if isinstance(content, list):
                     for item in content:
                         if isinstance(item, dict):
-                            ensure_block(f"message:{len(order)}", dict(item, _provider_shape="anthropic.messages.stream.content"))
+                            ensure_block(f"message:{len(order)}", dict(item, _provider_shape=provider_shape))
             continue
         if event_type == "content_block_start":
-            content_block = _anthropic_stream_start_block(event_payload)
+            content_block = _anthropic_stream_start_block(event_payload, provider_shape=provider_shape)
             if isinstance(content_block, dict):
-                ensure_block(block_key(event_payload, position), dict(content_block, _provider_shape="anthropic.messages.stream.content"))
+                ensure_block(block_key(event_payload, position), dict(content_block, _provider_shape=provider_shape))
             continue
         if event_type != "content_block_delta":
             continue
@@ -2387,6 +2410,10 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider bedrock converse message content {native_kind}"
     if provider_shape == "bedrock.converse.message.content.parts":
         return f"native provider bedrock converse message content parts {native_kind}"
+    if provider_shape == "bedrock.converse.stream.content":
+        return f"native provider bedrock converse stream content {native_kind}"
+    if provider_shape == "bedrock.converse.stream.content.parts":
+        return f"native provider bedrock converse stream content parts {native_kind}"
     if provider_shape == "content.parts":
         return f"native provider content parts {native_kind}"
     if provider_shape == "anthropic.messages.content":
@@ -2481,6 +2508,10 @@ def _parse_native_content_function_call_block(
         label = "native provider bedrock converse message content functionCall"
     elif provider_shape == "bedrock.converse.message.content.parts":
         label = "native provider bedrock converse message content parts functionCall"
+    elif provider_shape == "bedrock.converse.stream.content":
+        label = "native provider bedrock converse stream content functionCall"
+    elif provider_shape == "bedrock.converse.stream.content.parts":
+        label = "native provider bedrock converse stream content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
     elif provider_shape == "anthropic.messages.content":

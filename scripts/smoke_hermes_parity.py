@@ -2161,6 +2161,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("anthropic_messages_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("anthropic_messages_sse_tool_use_stream_translation") is True
             and native_status_milestone_contract.get("bedrock_converse_message_tool_use_translation") is True
+            and native_status_milestone_contract.get("bedrock_converse_stream_tool_use_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
@@ -2256,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "anthropic_messages_sse_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "bedrock_converse_message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "bedrock_converse_stream_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -6073,6 +6075,95 @@ def main(argv: list[str] | None = None) -> int:
             and "native-bedrock-converse-secret" not in native_bedrock_converse_outputs
         )
 
+        native_bedrock_converse_stream_marker = root / "native-bedrock-converse-stream-should-not-run.txt"
+        native_bedrock_converse_stream_captured = {}
+        native_bedrock_converse_stream_result_marker = "BEDROCK_CONVERSE_STREAM_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeBedrockConverseStreamSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "stream": [
+                        {"messageStart": {"message": {"role": "assistant", "content": []}}},
+                        {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "bedrock_converse_stream_smoke_memory", "name": "remember"}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "{\"key\":\"native-bedrock-converse-stream-smoke\","}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "\"value\":\"Bedrock ConverseStream toolUse wrappers translated\"}"}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 0}},
+                        {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "bedrock_converse_stream_smoke_dry", "toolName": "run_command"}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": json.dumps({"target": "app.example.test", "purpose": "Bedrock ConverseStream dry-run smoke", "command": f"printf native-bedrock-converse-stream > {native_bedrock_converse_stream_marker}", "execute": True})}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 1}},
+                        {"contentBlockStart": {"contentBlockIndex": 2, "start": {"toolResult": {"toolUseId": "bedrock_converse_stream_smoke_result", "content": native_bedrock_converse_stream_result_marker + " token=native-bedrock-converse-stream-secret"}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 2}},
+                        {"messageStop": {"stopReason": "tool_use"}},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_bedrock_converse_stream_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_bedrock_converse_stream_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_bedrock_converse_stream_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeBedrockConverseStreamSmokeResponse()
+
+        native_bedrock_converse_stream_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(root / "native-bedrock-converse-stream-agent.db"),
+                session_name="native-bedrock-converse-stream-smoke-runtime",
+                auto_model_planning=True,
+            ),
+            adapter=AnthropicMessagesAdapter(
+                model="fake-bedrock-converse-stream-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_bedrock_converse_stream_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_bedrock_converse_stream_urlopen
+            native_bedrock_converse_stream_plan = native_bedrock_converse_stream_runtime.handle_message('/auto model=true prompt="native Bedrock ConverseStream smoke token=native-bedrock-converse-stream-secret"')
+            native_bedrock_converse_stream_plan_payload = json.loads(native_bedrock_converse_stream_plan.split("\n", 1)[1])
+            native_bedrock_converse_stream_apply = native_bedrock_converse_stream_runtime.handle_message('/auto apply=true model=true prompt="native Bedrock ConverseStream smoke token=native-bedrock-converse-stream-secret"')
+            native_bedrock_converse_stream_apply_payload = json.loads(native_bedrock_converse_stream_apply.split("\n", 1)[1])
+            native_bedrock_converse_stream_recall = native_bedrock_converse_stream_runtime.handle_message('/recall query=native-bedrock-converse-stream-smoke')
+            write("native-bedrock-converse-stream.json", redact_secrets(json.dumps({
+                "plan": native_bedrock_converse_stream_plan_payload,
+                "apply": native_bedrock_converse_stream_apply_payload,
+                "captured": native_bedrock_converse_stream_captured,
+                "recall": native_bedrock_converse_stream_recall,
+                "marker_exists": native_bedrock_converse_stream_marker.exists(),
+            }, indent=2, sort_keys=True)) or "{}")
+        finally:
+            model_adapters.urllib.request.urlopen = native_bedrock_converse_stream_original_urlopen
+            native_bedrock_converse_stream_runtime.close()
+        native_bedrock_converse_stream_calls = native_bedrock_converse_stream_plan_payload.get("tool_calls", []) if isinstance(native_bedrock_converse_stream_plan_payload.get("tool_calls"), list) else []
+        native_bedrock_converse_stream_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_bedrock_converse_stream_calls]
+        native_bedrock_converse_stream_ledger = native_bedrock_converse_stream_apply_payload.get("execution_ledger", []) if isinstance(native_bedrock_converse_stream_apply_payload.get("execution_ledger"), list) else []
+        native_bedrock_converse_stream_outputs = native_bedrock_converse_stream_plan + native_bedrock_converse_stream_apply + native_bedrock_converse_stream_recall + json.dumps(native_bedrock_converse_stream_plan_payload) + json.dumps(native_bedrock_converse_stream_apply_payload)
+        checks["native_bedrock_converse_stream_tool_use_ok"] = (
+            native_bedrock_converse_stream_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_bedrock_converse_stream_calls] == ["remember", "run_command"]
+            and native_bedrock_converse_stream_calls[0].get("args", {}).get("value") == "Bedrock ConverseStream toolUse wrappers translated"
+            and native_bedrock_converse_stream_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_bedrock_converse_stream_call_metadata] == ["bedrock_converse_stream_smoke_memory", "bedrock_converse_stream_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_bedrock_converse_stream_call_metadata] == ["native provider bedrock converse stream content toolUse", "native provider bedrock converse stream content toolUse"]
+            and [item.get("provider_tool_call_id") for item in native_bedrock_converse_stream_ledger] == ["bedrock_converse_stream_smoke_memory", "bedrock_converse_stream_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_bedrock_converse_stream_ledger] == ["native provider bedrock converse stream content toolUse", "native provider bedrock converse stream content toolUse"]
+            and [item.get("result", {}).get("status") for item in native_bedrock_converse_stream_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("bedrock_converse_stream_tool_use_translation") is True
+            and "bedrock_converse_stream_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and native_bedrock_converse_stream_captured.get("tool_choice") == {"type": "auto"}
+            and native_bedrock_converse_stream_captured.get("tool_count", 0) > 0
+            and "Bedrock ConverseStream toolUse wrappers translated" in native_bedrock_converse_stream_recall
+            and not native_bedrock_converse_stream_marker.exists()
+            and native_bedrock_converse_stream_result_marker not in native_bedrock_converse_stream_outputs
+            and "native-bedrock-converse-stream-secret" not in native_bedrock_converse_stream_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -8827,6 +8918,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_anthropic_sse_tool_use_stream_ok",
             "native_anthropic_converse_stream_tool_use_ok",
             "native_bedrock_converse_message_tool_use_ok",
+            "native_bedrock_converse_stream_tool_use_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_tool_call_object_map_ok",
             "native_provider_choice_delta_tool_call_ok",

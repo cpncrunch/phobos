@@ -4364,6 +4364,88 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_bedrock_converse_stream_tool_use_wrappers_preserve_source_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Bedrock Converse Stream ToolUse",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            dry_run_marker = tmp_path / "native-bedrock-converse-stream-should-not-execute.txt"
+            result_marker = "BEDROCK_CONVERSE_STREAM_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeBedrockConverseStreamHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "stream": [
+                            {"messageStart": {"message": {"role": "assistant", "content": []}}},
+                            {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "bedrock_converse_stream_memory", "name": "remember"}}}},
+                            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "{\"key\":\"native-bedrock-converse-stream\","}}}},
+                            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "\"value\":\"Bedrock ConverseStream toolUse wrappers translated\"}"}}}},
+                            {"contentBlockStop": {"contentBlockIndex": 0}},
+                            {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "bedrock_converse_stream_dry", "toolName": "run_command"}}}},
+                            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": json.dumps({"target": "app.example.test", "purpose": "Bedrock ConverseStream dry-run validation", "command": f"printf native-bedrock-converse-stream > {dry_run_marker}", "execute": True})}}}},
+                            {"contentBlockStop": {"contentBlockIndex": 1}},
+                            {"contentBlockStart": {"contentBlockIndex": 2, "start": {"toolResult": {"toolUseId": "bedrock_converse_stream_result", "content": result_marker + " token=bedrock-converse-stream-secret"}}}},
+                            {"contentBlockStop": {"contentBlockIndex": 2}},
+                            {"messageStop": {"stopReason": "tool_use"}},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                return FakeBedrockConverseStreamHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-bedrock-converse-stream-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=AnthropicMessagesAdapter(
+                    model="fake-bedrock-converse-stream-model",
+                    base_url="http://127.0.0.1:9/v1",
+                    key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+                ),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Bedrock Converse stream token=bedrock-converse-stream-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Bedrock Converse stream token=bedrock-converse-stream-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                recall = runtime.handle_message('/recall query=native-bedrock-converse-stream')
+                calls = plan_payload.get("tool_calls", [])
+                call_metadata = [call.get("metadata", {}) for call in calls]
+                apply_ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call.get("tool") for call in calls], ["remember", "run_command"])
+                self.assertEqual(calls[0].get("args", {}).get("value"), "Bedrock ConverseStream toolUse wrappers translated")
+                self.assertFalse(calls[1].get("args", {}).get("execute"))
+                self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["bedrock_converse_stream_memory", "bedrock_converse_stream_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider bedrock converse stream content toolUse", "native provider bedrock converse stream content toolUse"])
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["bedrock_converse_stream_memory", "bedrock_converse_stream_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider bedrock converse stream content toolUse", "native provider bedrock converse stream content toolUse"])
+                self.assertEqual([item.get("result", {}).get("status") for item in apply_payload.get("results", [])], ["ok", "dry_run"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("bedrock_converse_stream_tool_use_translation"), status)
+                self.assertIn("bedrock_converse_stream_toolUse", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("Bedrock ConverseStream toolUse wrappers translated", recall)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("bedrock-converse-stream-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
     def test_openai_native_tool_call_edge_cases_keep_rejected_calls_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
