@@ -2973,9 +2973,10 @@ class AgentRuntimeTests(unittest.TestCase):
                 def read(self) -> bytes:
                     chunks = [
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "native Chat Completions SSE token=chat-sse-secret"}}]},
-                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_memory", "type": "function", "function": {"name": "remember", "arguments": memory_args[:31]}}]}}]},
-                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": memory_args[31:]}}]}}]},
-                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_dry", "type": "function", "function": {"name": "run_command", "arguments": run_args}}]}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_memory", "type": "function", "function": {"name": "reme", "arguments": memory_args[:31]}}]}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "mber", "arguments": memory_args[31:]}}]}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_dry", "type": "function", "function": {"name": "run_", "arguments": run_args[:41]}}]}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "function": {"name": "command", "arguments": run_args[41:]}}]}}]},
                     ]
                     body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
                     body += "data: [DONE]\n\n"
@@ -3014,7 +3015,9 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("Chat Completions SSE tool calls assembled", recall)
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertTrue(status.get("milestone_contract", {}).get("chat_completions_sse_tool_call_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("streamed_tool_name_fragment_assembly"), status)
                 self.assertIn("openai_chat_completions_sse_tool_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("streamed_tool_name_fragments", status.get("provider_native_tool_call_variants", []))
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 combined = planned + applied + recall + json.dumps(plan_payload) + json.dumps(applied_payload)
                 self.assertNotIn("chat-sse-secret", combined)
@@ -3050,8 +3053,8 @@ class AgentRuntimeTests(unittest.TestCase):
                 def read(self) -> bytes:
                     chunks = [
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "legacy chat SSE token=chat-sse-legacy-secret"}}]},
-                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_command", "arguments": run_args[:34]}}}]},
-                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": run_args[34:91]}}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_", "arguments": run_args[:34]}}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "command", "arguments": run_args[34:91]}}}]},
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": run_args[91:]}}}]},
                     ]
                     body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
@@ -3528,22 +3531,22 @@ class AgentRuntimeTests(unittest.TestCase):
                                     "id": "stream_memory_item",
                                     "type": "function_call",
                                     "call_id": "responses_stream_memory",
-                                    "name": "remember",
+                                    "name": "reme",
                                     "arguments": memory_args[:30],
                                 },
                             },
-                            {"type": "response.function_call_arguments.delta", "item_id": "stream_memory_item", "delta": memory_args[30:]},
+                            {"type": "response.function_call_arguments.delta", "item_id": "stream_memory_item", "name": "mber", "delta": memory_args[30:]},
                             {
                                 "type": "response.output_item.added",
                                 "item": {
                                     "id": "stream_dry_item",
                                     "type": "function_call",
                                     "call_id": "responses_stream_dry",
-                                    "name": "run_command",
+                                    "name": "run_",
                                     "arguments": "",
                                 },
                             },
-                            {"type": "response.function_call_arguments.done", "item_id": "stream_dry_item", "arguments": run_args},
+                            {"type": "response.function_call_arguments.done", "item_id": "stream_dry_item", "functionName": "command", "arguments": run_args},
                             {"type": "response.output_item.done", "item": {"id": "stream_result", "type": "function_call_output", "output": result_marker + " token=responses-stream-secret"}},
                         ]
                     }).encode("utf-8")

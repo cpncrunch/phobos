@@ -940,8 +940,8 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
                 buckets[key] = bucket
                 output_items.append(bucket)
             name = _responses_stream_event_value(event, "name", "function_name", "functionName", "toolName")
-            if isinstance(name, str) and name.strip() and not bucket.get("name"):
-                bucket["name"] = name
+            if isinstance(name, str) and name.strip():
+                _merge_native_tool_name_fragment(bucket, "name", name)
             call_id = _responses_stream_event_value(event, "call_id", "tool_call_id", "function_call_id", "toolCallId", "functionCallId", "callId")
             if call_id not in (None, "") and not bucket.get("call_id"):
                 bucket["call_id"] = call_id
@@ -1366,8 +1366,12 @@ def _choice_delta_tool_call_merge_key(item: dict[str, Any], *, fallback_position
     return f"position:{fallback_position}"
 
 
+_NATIVE_TOOL_NAME_ALIAS_KEYS = ("name", "tool", "tool_name", "toolName", "function_name", "functionName")
+
+
 def _merge_native_tool_call_fragment(destination: dict[str, Any], source: dict[str, Any]) -> None:
     argument_keys = set(_native_argument_keys(("arguments", "args", "input", "parameters", "params")))
+    name_keys = set(_NATIVE_TOOL_NAME_ALIAS_KEYS) | {"function"}
     nested_keys = {"function", "functionCall", "function_call", "toolUse", "tool_use"}
     for key, value in source.items():
         if key in nested_keys and isinstance(value, dict):
@@ -1380,8 +1384,49 @@ def _merge_native_tool_call_fragment(destination: dict[str, Any], source: dict[s
         if key in argument_keys and isinstance(value, str) and isinstance(destination.get(key), str):
             destination[key] = str(destination.get(key) or "") + value
             continue
+        if key in name_keys and isinstance(value, str):
+            if _merge_native_tool_name_fragment(destination, key, value):
+                continue
         if key not in destination or destination.get(key) in (None, ""):
             destination[key] = value
+
+
+def _merge_native_tool_name_fragment(destination: dict[str, Any], key: str, value: str) -> bool:
+    """Merge streamed tool/function-name fragments without creating new calls.
+
+    Chat Completions and Responses streams can fragment the tool name just like
+    argument JSON. Keep the fragments inside the same inert provider proposal so
+    the runtime still performs registered-tool/schema/ROE validation before any
+    dispatch. Repeated full-name echoes are ignored; differing same-bucket name
+    fragments are appended and will fail closed later if they do not form a
+    registered tool name.
+    """
+
+    if not isinstance(value, str):
+        return False
+    if isinstance(destination.get(key), dict):
+        return _merge_native_tool_name_fragment(destination[key], "name", value)
+    existing_key = next(
+        (
+            alias
+            for alias in (*_NATIVE_TOOL_NAME_ALIAS_KEYS, "function")
+            if isinstance(destination.get(alias), str) and str(destination.get(alias) or "")
+        ),
+        "",
+    )
+    if existing_key:
+        existing = str(destination.get(existing_key) or "")
+        if value and value != existing and not existing.endswith(value):
+            overlap = 0
+            max_overlap = min(len(existing), len(value))
+            for width in range(max_overlap, 0, -1):
+                if existing.endswith(value[:width]):
+                    overlap = width
+                    break
+            destination[existing_key] = existing + value[overlap:]
+        return True
+    destination[key] = value
+    return True
 
 
 def _provider_message_wrapper_to_message(raw: dict[str, Any], *, provider_shape_prefix: str) -> dict[str, Any]:
@@ -1520,7 +1565,7 @@ def _native_tool_name(mapping: dict[str, Any]) -> str:
 
     if not isinstance(mapping, dict):
         return ""
-    for key in ("name", "tool", "tool_name", "toolName", "function_name", "functionName"):
+    for key in _NATIVE_TOOL_NAME_ALIAS_KEYS:
         value = mapping.get(key)
         if isinstance(value, str) and value.strip():
             return value

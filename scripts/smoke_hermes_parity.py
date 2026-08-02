@@ -2447,9 +2447,10 @@ def main(argv: list[str] | None = None) -> int:
             def read(self) -> bytes:
                 chunks = [
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "native Chat Completions SSE token=native-chat-sse-secret"}}]},
-                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_smoke_memory", "type": "function", "function": {"name": "remember", "arguments": native_chat_sse_memory_args[:35]}}]}}]},
-                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": native_chat_sse_memory_args[35:]}}]}}]},
-                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_smoke_dry", "type": "function", "function": {"name": "run_command", "arguments": native_chat_sse_run_args}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_smoke_memory", "type": "function", "function": {"name": "reme", "arguments": native_chat_sse_memory_args[:35]}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "mber", "arguments": native_chat_sse_memory_args[35:]}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_smoke_dry", "type": "function", "function": {"name": "run_", "arguments": native_chat_sse_run_args[:41]}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "function": {"name": "command", "arguments": native_chat_sse_run_args[41:]}}]}}]},
                 ]
                 body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
                 body += "data: [DONE]\n\n"
@@ -2532,8 +2533,8 @@ def main(argv: list[str] | None = None) -> int:
             def read(self) -> bytes:
                 chunks = [
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "legacy Chat Completions SSE token=native-chat-legacy-sse-secret"}}]},
-                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_command", "arguments": native_chat_legacy_sse_run_args[:37]}}}]},
-                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": native_chat_legacy_sse_run_args[37:94]}}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_", "arguments": native_chat_legacy_sse_run_args[:37]}}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "command", "arguments": native_chat_legacy_sse_run_args[37:94]}}}]},
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": native_chat_legacy_sse_run_args[94:]}}}]},
                 ]
                 body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
@@ -2593,6 +2594,12 @@ def main(argv: list[str] | None = None) -> int:
             and int(native_chat_legacy_sse_captured.get("tool_count", 0) or 0) > 0
             and not native_chat_legacy_sse_marker.exists()
             and "native-chat-legacy-sse-secret" not in native_chat_legacy_sse_outputs
+        )
+        checks["native_provider_streamed_tool_name_fragment_ok"] = (
+            checks.get("native_openai_chat_completions_sse_tool_call_ok") is True
+            and checks.get("native_openai_chat_completions_sse_legacy_function_call_ok") is True
+            and native_status_milestone_contract.get("streamed_tool_name_fragment_assembly") is True
+            and "streamed_tool_name_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
         )
 
         native_flat_marker = root / "native-flat-should-not-run.txt"
@@ -9174,6 +9181,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_choice_delta_fragment_merge_ok",
             "native_provider_choice_delta_function_call_fragment_ok",
             "native_provider_choice_delta_tool_use_fragment_ok",
+            "native_provider_streamed_tool_name_fragment_ok",
             "native_provider_tool_calls_nested_aliases_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_call_id_redaction_bounds_ok",

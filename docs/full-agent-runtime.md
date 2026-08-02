@@ -842,17 +842,11 @@ native_tool_call_status_contract_ok=True
 native_tool_call_natural_auto_provenance_ok=True
 native_openai_tool_call_adapter_ok=True
 native_openai_chat_completions_sse_tool_call_ok=True
-native_openai_responses_adapter_ok=True
-native_gemini_adapter_ok=True
-native_gemini_stream_adapter_ok=True
-native_anthropic_adapter_ok=True
-native_anthropic_tool_use_alias_ok=True
-native_anthropic_sse_tool_use_stream_ok=True
-native_anthropic_converse_stream_tool_use_ok=True
-native_bedrock_converse_message_tool_use_ok=True
-native_bedrock_converse_stream_tool_use_ok=True
+native_openai_chat_completions_sse_legacy_function_call_ok=True
+native_provider_streamed_tool_name_fragment_ok=True
 native_provider_flat_tool_call_ok=True
 native_tool_call_provider_call_id_provenance_ok=True
+native_provider_tool_call_object_map_ok=True
 native_provider_call_id_redaction_bounds_ok=True
 native_provider_function_call_id_alias_ok=True
 native_provider_call_id_uniqueness_ok=True
@@ -888,11 +882,17 @@ native_provider_top_level_content_block_tool_call_ok=True
 native_provider_argument_aliases_ok=True
 native_provider_tool_name_aliases_ok=True
 native_provider_single_content_block_tool_call_ok=True
+native_openai_responses_adapter_ok=True
+native_gemini_adapter_ok=True
+native_provider_candidate_part_call_id_ok=True
+native_gemini_stream_adapter_ok=True
+native_anthropic_adapter_ok=True
+native_anthropic_tool_use_alias_ok=True
+native_anthropic_sse_tool_use_stream_ok=True
+native_anthropic_converse_stream_tool_use_ok=True
+native_bedrock_converse_message_tool_use_ok=True
+native_bedrock_converse_stream_tool_use_ok=True
 native_provider_responses_output_tool_call_ok=True
-native_provider_responses_stream_event_ok=True
-native_provider_responses_sse_stream_event_ok=True
-native_provider_responses_sse_call_id_delta_alias_ok=True
-native_provider_responses_sse_argument_json_alias_ok=True
 native_provider_responses_output_nested_function_call_ok=True
 native_provider_responses_output_message_aliases_ok=True
 native_provider_responses_output_message_typeless_wrapper_ok=True
@@ -908,11 +908,10 @@ native_provider_responses_message_content_parts_function_call_ok=True
 native_provider_single_responses_output_tool_call_ok=True
 native_provider_candidate_function_call_ok=True
 native_provider_single_candidate_part_function_call_ok=True
-native_provider_candidate_part_call_id_ok=True
 native_provider_hosted_tool_call_reject_ok=True
 native_provider_custom_tool_call_reject_ok=True
-native_provider_tool_result_ignore_ok=True
 native_provider_result_role_message_ignore_ok=True
+native_provider_tool_result_ignore_ok=True
 native_tool_call_guardrail_approval_ok=True
 native_tool_call_loop_approval_stop_ok=True
 native_tool_call_operator_approval_replay_ok=True
@@ -935,6 +934,10 @@ native_tool_call_transcript_index_detail_ok=True
 native_tool_call_execution_ledger_ok=True
 native_tool_call_execution_summary_ok=True
 native_tool_call_gateway_chat_ok=True
+native_provider_responses_stream_event_ok=True
+native_provider_responses_sse_stream_event_ok=True
+native_provider_responses_sse_call_id_delta_alias_ok=True
+native_provider_responses_sse_argument_json_alias_ok=True
 native_tool_call_milestone_contract_ok=True
 memory_hygiene_forget_ok=True
 message_memory_context_media_storage_redaction_ok=True
@@ -1005,11 +1008,12 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=829
+artifact_count=835
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
+
 ```
 
-`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct OpenAI Chat Completions `tool_calls` plus captured Chat Completions SSE `choices[].delta.tool_calls` with argument-fragment assembly, direct Gemini GenerateContent plus Gemini SSE stream-captured candidate `functionCall` plans with preserved part-level `functionCallId`/`toolCallId` provenance, direct Anthropic Messages `tool_use`/`toolUse` alias plans plus Anthropic Messages SSE `tool_use`, Bedrock Converse `output.message` `toolUse`, Bedrock ConverseStream `toolUse`, and Converse-style stream `toolUse` assembly, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, captured Responses streaming function-call events and raw SSE frames with argument-delta assembly (including `call_id`-only delta frames that merge back to added output items, plus `argumentsJson`/`argsJson` event aliases), typed and typeless nested `output[].message` wrappers, Responses typed or typeless direct or nested `output[].message` `tool_calls`/`toolCalls`/`tool_call`/`toolCall` aliases, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance (including `function_call_id`/`functionCallId` aliases) with duplicate-ID rejection before dispatch, per-step model tool-call budget enforcement, result-echo suppression (including camelCase result aliases and role=`tool`/`function` result messages), provider-hosted/freeform tool-call rejection (including Responses file-search, image-generation, local-shell, and MCP hosted calls), runtime policy, ROE preview, approval stops, and ledger claim semantics. The smoke gate also compares the aggregate list against every `native_*` smoke boolean so new native coverage cannot be left out silently.
+`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct OpenAI Chat Completions `tool_calls` plus captured Chat Completions SSE `choices[].delta.tool_calls` with argument-fragment assembly, direct Gemini GenerateContent plus Gemini SSE stream-captured candidate `functionCall` plans with preserved part-level `functionCallId`/`toolCallId` provenance, direct Anthropic Messages `tool_use`/`toolUse` alias plans plus Anthropic Messages SSE `tool_use`, Bedrock Converse `output.message` `toolUse`, Bedrock ConverseStream `toolUse`, and Converse-style stream `toolUse` assembly, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/streamed-tool-name-fragment/nested/message-level/message-content/parts Responses output calls, captured Responses streaming function-call events and raw SSE frames with argument-delta assembly (including `call_id`-only delta frames that merge back to added output items, plus `argumentsJson`/`argsJson` event aliases), typed and typeless nested `output[].message` wrappers, Responses typed or typeless direct or nested `output[].message` `tool_calls`/`toolCalls`/`tool_call`/`toolCall` aliases, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance (including `function_call_id`/`functionCallId` aliases) with duplicate-ID rejection before dispatch, per-step model tool-call budget enforcement, result-echo suppression (including camelCase result aliases and role=`tool`/`function` result messages), provider-hosted/freeform tool-call rejection (including Responses file-search, image-generation, local-shell, and MCP hosted calls), runtime policy, ROE preview, approval stops, and ledger claim semantics. The smoke gate also compares the aggregate list against every `native_*` smoke boolean so new native coverage cannot be left out silently.
 
 
 
