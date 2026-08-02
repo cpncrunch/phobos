@@ -2124,6 +2124,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("choice_delta_fragment_assembly") is True
             and native_status_milestone_contract.get("choice_delta_function_call_fragment_assembly") is True
             and native_status_milestone_contract.get("choice_delta_tool_use_fragment_assembly") is True
+            and native_status_milestone_contract.get("choice_delta_choice_index_isolation") is True
             and native_status_milestone_contract.get("tool_calls_nested_alias_translation") is True
             and native_status_milestone_contract.get("legacy_function_call_translation") is True
             and native_status_milestone_contract.get("custom_freeform_tool_calls_rejected") is True
@@ -2198,6 +2199,7 @@ def main(argv: list[str] | None = None) -> int:
             and "choice_delta_tool_call_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
             and "choice_delta_function_call_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
             and "choice_delta_tool_use_fragments" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice_delta_choice_index_isolation" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_calls_nested_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "flat_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -2436,6 +2438,7 @@ def main(argv: list[str] | None = None) -> int:
             "command": f"printf native-openai-chat-sse > {native_chat_sse_marker}",
             "execute": True,
         })
+        native_chat_sse_alt_args = json.dumps({"key": "native-openai-chat-sse-alt-smoke", "value": "CHAT_SSE_ALT_CHOICE_SHOULD_NOT_SURFACE token=native-chat-sse-choice-secret"})
 
         class NativeOpenAIChatSSESmokeResponse:
             def __enter__(self):
@@ -2447,6 +2450,8 @@ def main(argv: list[str] | None = None) -> int:
             def read(self) -> bytes:
                 chunks = [
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "native Chat Completions SSE token=native-chat-sse-secret"}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 1, "delta": {"content": "alternate Chat Completions SSE token=native-chat-sse-choice-secret"}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 1, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_alt_choice_smoke", "type": "function", "function": {"name": "remember", "arguments": native_chat_sse_alt_args}}]}}]},
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_smoke_memory", "type": "function", "function": {"name": "reme", "arguments": native_chat_sse_memory_args[:35]}}]}}]},
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "mber", "arguments": native_chat_sse_memory_args[35:]}}]}}]},
                     {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_smoke_dry", "type": "function", "function": {"name": "run_", "arguments": native_chat_sse_run_args[:41]}}]}}]},
@@ -2512,6 +2517,14 @@ def main(argv: list[str] | None = None) -> int:
             and int(native_chat_sse_captured.get("tool_count", 0) or 0) > 0
             and not native_chat_sse_marker.exists()
             and "native-chat-sse-secret" not in native_chat_sse_outputs
+        )
+        checks["native_openai_chat_completions_sse_choice_index_isolation_ok"] = (
+            checks.get("native_openai_chat_completions_sse_tool_call_ok") is True
+            and native_status_milestone_contract.get("choice_delta_choice_index_isolation") is True
+            and "choice_delta_choice_index_isolation" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "CHAT_SSE_ALT_CHOICE_SHOULD_NOT_SURFACE" not in native_chat_sse_outputs
+            and "native-openai-chat-sse-alt-smoke" not in native_chat_sse_outputs
+            and "native-chat-sse-choice-secret" not in native_chat_sse_outputs
         )
 
         native_chat_legacy_sse_marker = root / "native-openai-chat-sse-legacy-should-not-run.txt"
@@ -9165,6 +9178,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_openai_chat_completions_sse_tool_call_ok",
+            "native_openai_chat_completions_sse_choice_index_isolation_ok",
             "native_openai_chat_completions_sse_legacy_function_call_ok",
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",

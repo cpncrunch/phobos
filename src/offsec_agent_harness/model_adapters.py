@@ -737,16 +737,28 @@ def _choice_delta_sequence_to_message(choices: list[Any], *, provider_shape_pref
     Some OpenAI-compatible shims return a captured stream as multiple choice
     delta chunks instead of a single final ``message``.  Tool-call arguments may
     be split across those chunks, so validate only after assembling same-index or
-    same-id fragments into one provider-native proposal.  This remains a planner
-    translation boundary: no handler dispatch, approval queueing, evidence write,
-    or target activity happens here.
+    same-id fragments into one provider-native proposal.  If a stream contains
+    multiple provider alternatives (``choice.index`` 0, 1, ...), assemble only the
+    first observed choice index and ignore the others; combining alternatives can
+    corrupt inert proposals before the runtime's schema/ROE boundary.  This
+    remains a planner translation boundary: no handler dispatch, approval
+    queueing, evidence write, or target activity happens here.
     """
 
     content_blocks: list[dict[str, Any]] = []
     tool_call_chunks: list[Any] = []
     saw_delta = False
+    selected_choice_key: str | None = None
     for choice in choices:
         if not isinstance(choice, dict):
+            continue
+        choice_key = _choice_stream_choice_key(choice)
+        if choice_key is not None:
+            if selected_choice_key is None:
+                selected_choice_key = choice_key
+            elif choice_key != selected_choice_key:
+                continue
+        elif selected_choice_key is not None:
             continue
         delta = choice.get("delta")
         if not isinstance(delta, dict):
@@ -774,6 +786,15 @@ def _choice_delta_sequence_to_message(choices: list[Any], *, provider_shape_pref
     if merged_tool_calls:
         message["tool_calls"] = merged_tool_calls
     return message
+
+
+def _choice_stream_choice_key(choice: dict[str, Any]) -> str | None:
+    for key in ("index", "choice_index", "choiceIndex"):
+        value = choice.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        return f"index:{value}"
+    return None
 
 
 def _chat_completion_stream_events_to_message(raw: Any) -> dict[str, Any]:

@@ -2962,6 +2962,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 "command": f"printf native-openai-chat-sse > {dry_run_marker}",
                 "execute": True,
             })
+            alternate_args = json.dumps({"key": "native-openai-chat-sse-alt", "value": "ALTERNATE_CHOICE_TOOL_SHOULD_NOT_SURFACE token=chat-sse-choice-secret"})
 
             class FakeChatSSEHTTPResponse:
                 def __enter__(self):
@@ -2973,6 +2974,8 @@ class AgentRuntimeTests(unittest.TestCase):
                 def read(self) -> bytes:
                     chunks = [
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "native Chat Completions SSE token=chat-sse-secret"}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 1, "delta": {"content": "alternate Chat Completions SSE token=chat-sse-choice-secret"}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 1, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_alt_choice", "type": "function", "function": {"name": "remember", "arguments": alternate_args}}]}}]},
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_memory", "type": "function", "function": {"name": "reme", "arguments": memory_args[:31]}}]}}]},
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "mber", "arguments": memory_args[31:]}}]}}]},
                         {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_dry", "type": "function", "function": {"name": "run_", "arguments": run_args[:41]}}]}}]},
@@ -3016,11 +3019,16 @@ class AgentRuntimeTests(unittest.TestCase):
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertTrue(status.get("milestone_contract", {}).get("chat_completions_sse_tool_call_translation"), status)
                 self.assertTrue(status.get("milestone_contract", {}).get("streamed_tool_name_fragment_assembly"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("choice_delta_choice_index_isolation"), status)
                 self.assertIn("openai_chat_completions_sse_tool_calls", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("streamed_tool_name_fragments", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("choice_delta_choice_index_isolation", status.get("provider_native_tool_call_variants", []))
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
                 combined = planned + applied + recall + json.dumps(plan_payload) + json.dumps(applied_payload)
                 self.assertNotIn("chat-sse-secret", combined)
+                self.assertNotIn("chat-sse-choice-secret", combined)
+                self.assertNotIn("ALTERNATE_CHOICE_TOOL_SHOULD_NOT_SURFACE", combined)
+                self.assertNotIn("native-openai-chat-sse-alt", combined)
             finally:
                 runtime.close()
 
