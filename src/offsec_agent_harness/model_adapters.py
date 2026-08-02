@@ -659,6 +659,29 @@ def _tool_plan_prompt(prompt: str, tool_specs: list[dict[str, Any]], *, allow_co
     )
 
 
+def _choice_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return Chat-Completions choice objects from plural or collapsed wrappers.
+
+    OpenAI-compatible routers normally return ``choices: [...]``. Some local or
+    AI-gateway shims collapse a one-choice response into ``choices: {...}`` or a
+    singular ``choice`` object. Normalize those shapes at the adapter boundary so
+    provider-native tool-call proposals still enter the usual inert Phobos plan
+    path before schema, runtime-policy, ROE, approval, and execute gates run.
+    """
+
+    if not isinstance(raw, dict):
+        return []
+    choices = raw.get("choices")
+    if isinstance(choices, dict):
+        return [choices]
+    if isinstance(choices, list):
+        return [choice for choice in choices if isinstance(choice, dict)]
+    choice = raw.get("choice")
+    if isinstance(choice, dict):
+        return [choice]
+    return []
+
+
 def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> dict[str, Any]:
     chat_stream_message = _chat_completion_stream_events_to_message(raw)
     if chat_stream_message:
@@ -678,8 +701,8 @@ def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> di
     bedrock_converse_message = _bedrock_converse_output_to_message(raw)
     if bedrock_converse_message:
         return bedrock_converse_message
-    choices = raw.get("choices") if isinstance(raw, dict) else []
-    if isinstance(choices, list) and choices:
+    choices = _choice_items(raw) if isinstance(raw, dict) else []
+    if choices:
         first = choices[0]
         if isinstance(first, dict):
             if isinstance(first.get("message"), dict):

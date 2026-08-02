@@ -2178,6 +2178,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("anthropic_messages_sse_tool_use_stream_translation") is True
             and native_status_milestone_contract.get("bedrock_converse_message_tool_use_translation") is True
             and native_status_milestone_contract.get("bedrock_converse_stream_tool_use_translation") is True
+            and native_status_milestone_contract.get("choice_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
@@ -2289,6 +2290,8 @@ def main(argv: list[str] | None = None) -> int:
             and "anthropic_messages_sse_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "bedrock_converse_message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "bedrock_converse_stream_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choice_singular_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choices_collapsed_object" in native_status_data.get("provider_native_tool_call_variants", [])
             and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -4997,6 +5000,122 @@ def main(argv: list[str] | None = None) -> int:
             and not native_root_outputs_marker.exists()
             and native_root_outputs_result_marker not in native_root_outputs_blob
             and "native-root-outputs-secret" not in native_root_outputs_blob
+        )
+
+        native_collapsed_choice_captured = {"wrappers": []}
+        native_collapsed_choice_marker = root / "native-collapsed-choice-should-not-run.txt"
+        native_collapsed_choice_result_marker = "COLLAPSED_CHOICE_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        def native_collapsed_choice_payload(wrapper_key: str) -> dict:
+            message = {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "native collapsed choice smoke token=native-collapsed-choice-secret"},
+                    {"type": "tool_result", "content": native_collapsed_choice_result_marker + " token=native-collapsed-choice-secret"},
+                ],
+                "tool_calls": [
+                    {
+                        "id": "collapsed_choice_memory",
+                        "type": "function",
+                        "function": {
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-collapsed-choice-smoke", "value": f"{wrapper_key} collapsed choice wrapper native tool call translated"}),
+                        },
+                    },
+                    {
+                        "toolCallId": "collapsed_choice_dry",
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({
+                                "target": "app.example.test",
+                                "purpose": "collapsed choice native dry-run smoke",
+                                "command": f"printf native-collapsed-choice > {native_collapsed_choice_marker}",
+                                "execute": True,
+                            }),
+                        },
+                    },
+                ],
+            }
+            return {wrapper_key: {"message": message}}
+
+        class NativeOpenAICollapsedChoiceSmokeResponse:
+            def __init__(self, wrapper_key: str):
+                self.wrapper_key = wrapper_key
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(native_collapsed_choice_payload(self.wrapper_key)).encode("utf-8")
+
+        def fake_native_collapsed_choice_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_collapsed_choice_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_collapsed_choice_captured["tool_choice"] = payload.get("tool_choice")
+            wrapper_key = "choices" if len(native_collapsed_choice_captured["wrappers"]) == 0 else "choice"
+            native_collapsed_choice_captured["wrappers"].append(wrapper_key)
+            return NativeOpenAICollapsedChoiceSmokeResponse(wrapper_key)
+
+        native_collapsed_choice_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-collapsed-choice.db"),
+                session_name="native-provider-collapsed-choice-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-collapsed-choice-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_collapsed_choice_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_collapsed_choice_urlopen
+            native_collapsed_choice_plan = native_collapsed_choice_runtime.handle_message('/auto model=true prompt="native collapsed choice smoke token=native-collapsed-choice-secret"')
+            native_collapsed_choice_plan_payload = json.loads(native_collapsed_choice_plan.split("\n", 1)[1])
+            native_collapsed_choice_apply = native_collapsed_choice_runtime.handle_message('/auto apply=true model=true prompt="native collapsed choice smoke token=native-collapsed-choice-secret"')
+            native_collapsed_choice_apply_payload = json.loads(native_collapsed_choice_apply.split("\n", 1)[1])
+            native_collapsed_choice_recall = native_collapsed_choice_runtime.handle_message('/recall query=native-collapsed-choice-smoke')
+            write("native-provider-collapsed-choice-wrapper.json", json.dumps({
+                "plan": native_collapsed_choice_plan_payload,
+                "apply": native_collapsed_choice_apply_payload,
+                "captured": native_collapsed_choice_captured,
+                "recall": native_collapsed_choice_recall,
+                "marker_exists": native_collapsed_choice_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_collapsed_choice_original_urlopen
+            native_collapsed_choice_runtime.close()
+        native_collapsed_choice_calls = native_collapsed_choice_plan_payload.get("tool_calls", []) if isinstance(native_collapsed_choice_plan_payload.get("tool_calls"), list) else []
+        native_collapsed_choice_metadata = native_collapsed_choice_plan_payload.get("metadata", {}) if isinstance(native_collapsed_choice_plan_payload.get("metadata"), dict) else {}
+        native_collapsed_choice_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_collapsed_choice_calls]
+        native_collapsed_choice_ledger = native_collapsed_choice_apply_payload.get("execution_ledger", []) if isinstance(native_collapsed_choice_apply_payload.get("execution_ledger"), list) else []
+        native_collapsed_choice_blob = native_collapsed_choice_plan + native_collapsed_choice_apply + native_collapsed_choice_recall + json.dumps(native_collapsed_choice_plan_payload) + json.dumps(native_collapsed_choice_apply_payload)
+        checks["native_provider_collapsed_choice_wrapper_ok"] = (
+            native_collapsed_choice_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_collapsed_choice_calls] == ["remember", "run_command"]
+            and all("native provider tool_call" in call.get("reason", "") for call in native_collapsed_choice_calls)
+            and native_collapsed_choice_calls[0].get("args", {}).get("key") == "native-collapsed-choice-smoke"
+            and native_collapsed_choice_calls[1].get("args", {}).get("execute") is False
+            and native_collapsed_choice_metadata.get("native_tool_calls") is True
+            and native_collapsed_choice_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_collapsed_choice_call_metadata] == ["collapsed_choice_memory", "collapsed_choice_dry"]
+            and [item.get("native_tool_call_source") for item in native_collapsed_choice_call_metadata] == ["native provider tool_call", "native provider tool_call"]
+            and [item.get("result", {}).get("status") for item in native_collapsed_choice_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_collapsed_choice_ledger] == ["collapsed_choice_memory", "collapsed_choice_dry"]
+            and native_collapsed_choice_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("choice_singular_wrapper_translation") is True
+            and "choice_singular_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "choices_collapsed_object" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_result" in json.dumps(native_collapsed_choice_plan_payload.get("warnings", [])).lower()
+            and "choice collapsed choice wrapper native tool call translated" in native_collapsed_choice_recall
+            and native_collapsed_choice_captured.get("wrappers") == ["choices", "choice"]
+            and native_collapsed_choice_captured.get("tool_choice") == "auto"
+            and native_collapsed_choice_captured.get("tool_count", 0) > 0
+            and not native_collapsed_choice_marker.exists()
+            and native_collapsed_choice_result_marker not in native_collapsed_choice_blob
+            and "native-collapsed-choice-secret" not in native_collapsed_choice_blob
         )
 
         native_root_message_alias_captured = {}
@@ -10391,6 +10510,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_anthropic_converse_stream_tool_use_ok",
             "native_bedrock_converse_message_tool_use_ok",
             "native_bedrock_converse_stream_tool_use_ok",
+            "native_provider_collapsed_choice_wrapper_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_tool_call_object_map_ok",
             "native_provider_choice_delta_tool_call_ok",

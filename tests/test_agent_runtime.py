@@ -9561,6 +9561,117 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_collapsed_choice_wrapper_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Collapsed Choice Wrapper",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-collapsed-choice-should-not-run.txt"
+            provider_result_marker = "COLLAPSED_CHOICE_TOOL_RESULT_SHOULD_NOT_SURFACE"
+
+            def collapsed_choice_payload(wrapper_key: str) -> dict:
+                message = {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "collapsed choice wrapper token=collapsed-choice-secret"},
+                        {"type": "tool_result", "content": provider_result_marker + " token=collapsed-choice-secret"},
+                    ],
+                    "tool_calls": [
+                        {
+                            "id": "collapsed_choice_memory",
+                            "type": "function",
+                            "function": {
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-collapsed-choice", "value": f"{wrapper_key} collapsed choice wrapper accepted"}),
+                            },
+                        },
+                        {
+                            "toolCallId": "collapsed_choice_dry",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "collapsed choice native dry-run boundary",
+                                    "command": f"printf native-collapsed-choice > {dry_run_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                        },
+                    ],
+                }
+                return {wrapper_key: {"message": message}}
+
+            class FakeCollapsedChoiceHTTPResponse:
+                def __init__(self, wrapper_key: str):
+                    self.wrapper_key = wrapper_key
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(collapsed_choice_payload(self.wrapper_key)).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                wrapper_key = "choices" if len(captured_payloads) == 1 else "choice"
+                return FakeCollapsedChoiceHTTPResponse(wrapper_key)
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-collapsed-choice-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-collapsed-choice", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native collapsed choice wrapper token=collapsed-choice-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider tool_call" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-collapsed-choice")
+                    self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["collapsed_choice_memory", "collapsed_choice_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider tool_call", "native provider tool_call"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn("collapsed-choice-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native collapsed choice wrapper token=collapsed-choice-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["collapsed_choice_memory", "collapsed_choice_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider tool_call", "native provider tool_call"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-collapsed-choice')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("collapsed choice wrapper accepted", recall)
+                self.assertIn("choice_singular_wrapper", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("choices_collapsed_object", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("choice_singular_wrapper_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertEqual([item.get("tool_choice") for item in captured_payloads], ["auto", "auto"])
+                self.assertNotIn("collapsed-choice-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_root_message_wrapper_alias_matrix_is_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
