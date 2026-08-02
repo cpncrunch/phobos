@@ -9694,6 +9694,117 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_root_outputs_direct_function_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root Outputs Direct Function Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-root-outputs-direct-should-not-run.txt"
+            provider_result_marker = "ROOT_OUTPUTS_DIRECT_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeRootOutputsDirectHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "outputs": [
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "root_outputs_direct_old_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-root-outputs-direct-old", "value": "old direct root outputs call should not dispatch"}),
+                                        },
+                                    }
+                                ],
+                            },
+                            {"role": "tool", "content": provider_result_marker + " token=root-outputs-direct-secret"},
+                            {
+                                "type": "function_call",
+                                "call_id": "root_outputs_direct_memory",
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-root-outputs-direct", "value": "root outputs direct function_call accepted"}),
+                            },
+                            {
+                                "type": "function",
+                                "id": "root_outputs_direct_dry",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": json.dumps({
+                                        "target": "app.example.test",
+                                        "purpose": "root outputs direct native dry-run boundary",
+                                        "command": f"printf native-root-outputs-direct > {dry_run_marker}",
+                                        "execute": True,
+                                    }),
+                                },
+                            },
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeRootOutputsDirectHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-outputs-direct-function-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-outputs-direct", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root outputs direct token=root-outputs-direct-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertIn("native provider root outputs function_call", payload["tool_calls"][0].get("reason", ""))
+                    self.assertIn("native provider root outputs function", payload["tool_calls"][1].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-root-outputs-direct")
+                    self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_outputs_direct_memory", "root_outputs_direct_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root outputs function_call", "native provider root outputs function"])
+                    self.assertNotIn("root-outputs-direct-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root outputs direct token=root-outputs-direct-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_outputs_direct_memory", "root_outputs_direct_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root outputs function_call", "native provider root outputs function"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-root-outputs-direct')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("root outputs direct function_call accepted", recall)
+                self.assertNotIn("old direct root outputs call should not dispatch", recall)
+                self.assertIn("root_outputs_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("root_outputs_function", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("root_outputs_direct_tool_call_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("root-outputs-direct-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_collapsed_choice_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

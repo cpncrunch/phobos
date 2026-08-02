@@ -2089,6 +2089,46 @@ def _root_output_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _root_output_item_is_direct_tool_call(item: dict[str, Any]) -> bool:
+    """Return True for raw Responses-style tool-call items inside ``outputs[]``."""
+
+    if not isinstance(item, dict):
+        return False
+    if isinstance(item.get("message"), dict):
+        return False
+    block_type = str(item.get("type") or "").strip()
+    if block_type in {"function", "function_call", "tool_call", "tool_use"}:
+        return True
+    if isinstance(item.get("function"), dict):
+        return True
+    if isinstance(item.get("functionCall") or item.get("function_call"), dict):
+        return True
+    if isinstance(item.get("tool"), dict):
+        return True
+    return any(isinstance(item.get(alias), dict) for alias in _NATIVE_TOOL_USE_ALIAS_KEYS)
+
+
+def _root_outputs_direct_tool_calls_to_message(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Normalize contiguous direct ``outputs[]`` tool-call blocks as one response.
+
+    Some OpenAI-compatible routers pluralize Responses API ``output[]`` as
+    ``outputs[]`` and place flat ``function_call``/``function`` items there
+    directly instead of wrapping them in an assistant ``message``.  Keep this as
+    an adapter-only translation boundary: collect only the latest contiguous
+    direct-call block, preserve root-outputs provenance, and let runtime schema,
+    policy, ROE, approval, explicit execution, and transcript checks decide what
+    can run.
+    """
+
+    output_items: list[dict[str, Any]] = []
+    for item in items:
+        entry = dict(item)
+        block_type = str(entry.get("type") or "").strip() or "tool_call"
+        entry.setdefault("_provider_shape", f"root.outputs.{block_type}")
+        output_items.append(entry)
+    return _responses_output_to_message({"output": output_items}) if output_items else {}
+
+
 def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
     """Normalize root-level ``outputs[]`` wrappers from provider gateways.
 
@@ -2106,9 +2146,17 @@ def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str
     items = _root_output_items(raw)
     if not items:
         return {}
+    direct_items: list[dict[str, Any]] = []
     for item in reversed(items):
         if _native_provider_result_role_message(item, provider_shape="root.outputs"):
+            if direct_items:
+                break
             continue
+        if _root_output_item_is_direct_tool_call(item):
+            direct_items.append(item)
+            continue
+        if direct_items:
+            break
         message_obj = item.get("message")
         if isinstance(message_obj, dict):
             result_echo = _native_provider_result_role_message(message_obj, provider_shape="root.outputs")
@@ -2124,6 +2172,8 @@ def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str
         nested = _first_choice_message(item, _wrapper_depth=depth + 1)
         if nested:
             return nested
+    if direct_items:
+        return _root_outputs_direct_tool_calls_to_message(list(reversed(direct_items)))
     return {}
 
 
@@ -2368,7 +2418,7 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 "_provider_shape": provider_shape,
             })
             continue
-        if block_type in {"function_call", "tool_call", "tool_use"}:
+        if block_type in {"function", "function_call", "tool_call", "tool_use"}:
             function = item.get("function")
             if isinstance(function, dict):
                 # Some Responses-compatible shims keep the OpenAI Chat
