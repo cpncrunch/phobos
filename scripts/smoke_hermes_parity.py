@@ -2540,6 +2540,104 @@ def main(argv: list[str] | None = None) -> int:
             and "native-flat-secret" not in json.dumps(native_flat_call_metadata) + json.dumps(native_flat_ledger)
         )
 
+        native_map_marker = root / "native-map-should-not-run.txt"
+        native_map_captured = {}
+
+        class NativeOpenAIMapSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native object-map tool-call smoke token=native-map-secret",
+                                "tool_calls": {
+                                    "map_memory": {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-provider-map", "value": "object-map provider tool call accepted"}),
+                                        },
+                                    },
+                                    "map_dry": {
+                                        "type": "tool_call",
+                                        "name": "run_command",
+                                        "input": {
+                                            "target": "app.example.test",
+                                            "purpose": "native object-map provider dry-run smoke",
+                                            "command": f"printf native-map > {native_map_marker}",
+                                            "execute": True,
+                                        },
+                                    },
+                                },
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_map_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_map_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_map_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIMapSmokeResponse()
+
+        native_map_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-map.db"),
+                session_name="native-provider-map-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-map-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_map_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_map_urlopen
+            native_map_plan = native_map_runtime.handle_message('/auto model=true prompt="native object map smoke token=native-map-secret"')
+            native_map_plan_payload = json.loads(native_map_plan.split("\n", 1)[1])
+            native_map_apply = native_map_runtime.handle_message('/auto apply=true model=true prompt="native object map smoke token=native-map-secret"')
+            native_map_apply_payload = json.loads(native_map_apply.split("\n", 1)[1])
+            native_map_recall = native_map_runtime.handle_message('/recall query=native-provider-map')
+            native_map_status = native_map_runtime.registry.run("runtime_status", {}).to_dict()
+            write("native-provider-tool-call-object-map.json", json.dumps({
+                "plan": native_map_plan_payload,
+                "apply": native_map_apply_payload,
+                "captured": native_map_captured,
+                "status": native_map_status,
+                "recall": native_map_recall,
+                "marker_exists": native_map_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_map_original_urlopen
+            native_map_runtime.close()
+        native_map_calls = native_map_plan_payload.get("tool_calls", []) if isinstance(native_map_plan_payload.get("tool_calls"), list) else []
+        native_map_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_map_calls]
+        native_map_ledger = native_map_apply_payload.get("execution_ledger", []) if isinstance(native_map_apply_payload.get("execution_ledger"), list) else []
+        native_map_status_data = native_map_status.get("data", {}).get("native_tool_calling", {}) if isinstance(native_map_status.get("data"), dict) else {}
+        native_map_contract = native_map_status_data.get("milestone_contract", {}) if isinstance(native_map_status_data, dict) else {}
+        checks["native_provider_tool_call_object_map_ok"] = (
+            native_map_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_map_calls] == ["remember", "run_command"]
+            and all("native provider tool calls object map" in call.get("reason", "") for call in native_map_calls)
+            and native_map_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_map_call_metadata] == ["map_memory", "map_dry"]
+            and all(item.get("native_tool_call_source") == "native provider tool calls object map" for item in native_map_call_metadata)
+            and [item.get("result", {}).get("status") for item in native_map_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_map_ledger] == ["map_memory", "map_dry"]
+            and native_map_ledger[1].get("actual_command_or_process_activity") is False
+            and "object-map provider tool call accepted" in native_map_recall
+            and native_map_captured.get("tool_choice") == "auto"
+            and native_map_contract.get("tool_call_object_map_translation") is True
+            and "tool_calls_object_map" in native_map_status_data.get("provider_native_tool_call_variants", [])
+            and not native_map_marker.exists()
+            and "native-map-secret" not in native_map_plan + native_map_apply + native_map_recall + json.dumps(native_map_plan_payload) + json.dumps(native_map_apply_payload) + json.dumps(native_map_status_data)
+        )
+
         native_call_id_secret = "token=native-call-id-smoke-secret\n" + ("I" * 260)
 
         class NativeCallIdBoundarySmokeResponse:
@@ -8529,6 +8627,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_anthropic_tool_use_alias_ok",
             "native_anthropic_sse_tool_use_stream_ok",
             "native_provider_flat_tool_call_ok",
+            "native_provider_tool_call_object_map_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",
             "native_provider_choice_delta_function_call_fragment_ok",

@@ -1347,6 +1347,81 @@ def _native_content_parts(content: Any) -> list[Any] | None:
     return None
 
 
+_NATIVE_CALL_ID_ALIAS_KEYS = (
+    "id",
+    "call_id",
+    "tool_call_id",
+    "tool_use_id",
+    "function_call_id",
+    "callId",
+    "toolCallId",
+    "toolUseId",
+    "functionCallId",
+)
+
+
+def _native_tool_call_batch_items(raw_calls: Any, *, provider_shape: str) -> list[Any]:
+    """Return provider-native tool-call items from array, single-object, or object-map batches.
+
+    Most providers return ``tool_calls`` as a list, and Phobos already accepts a
+    few single-object shims.  Some lightweight OpenAI-compatible gateways expose
+    a keyed object map instead, e.g. ``{"call_1": {"function": ...}}``.  Expand
+    that map into inert provider-native proposals, preserving the map key as a
+    bounded call id only; schema validation, runtime policy, ROE previews,
+    approval gates, and execution controls still happen in the runtime.
+    """
+
+    if isinstance(raw_calls, list):
+        return [
+            dict(item, _provider_shape=str(item.get("_provider_shape") or provider_shape))
+            if provider_shape and isinstance(item, dict) and "_provider_shape" not in item
+            else item
+            for item in raw_calls
+        ]
+    if not isinstance(raw_calls, dict):
+        return [raw_calls] if raw_calls is not None else []
+    if _native_tool_call_object_looks_like_single(raw_calls):
+        shape = provider_shape or "single_top_level.tool_calls"
+        return [dict(raw_calls, _provider_shape=str(raw_calls.get("_provider_shape") or shape))]
+
+    shape = f"{provider_shape}.object_map" if provider_shape else "tool_calls.object_map"
+    items: list[Any] = []
+    for map_key, value in raw_calls.items():
+        if not isinstance(value, dict):
+            items.append(value)
+            continue
+        entry = dict(value)
+        entry.setdefault("_provider_shape", shape)
+        if not _native_tool_call_has_id(entry):
+            entry["call_id"] = str(map_key)
+        items.append(entry)
+    return items
+
+
+def _native_tool_call_object_looks_like_single(value: dict[str, Any]) -> bool:
+    single_markers = {
+        "function",
+        "functionCall",
+        "function_call",
+        "toolUse",
+        "tool_use",
+        "tool",
+        "name",
+        "tool_name",
+        "toolName",
+        "function_name",
+        "functionName",
+        "type",
+        *_NATIVE_CALL_ID_ALIAS_KEYS,
+        *_native_argument_keys(("arguments", "args", "input", "parameters", "params")),
+    }
+    return any(key in value for key in single_markers)
+
+
+def _native_tool_call_has_id(value: dict[str, Any]) -> bool:
+    return any(value.get(key) not in (None, "") for key in _NATIVE_CALL_ID_ALIAS_KEYS)
+
+
 def _native_provider_result_role_message(raw: Any, *, provider_shape: str) -> dict[str, Any]:
     """Return an inert message for provider role=tool/function result echoes.
 
@@ -1763,16 +1838,7 @@ def _extend_responses_message_tool_calls(tool_calls: list[dict[str, Any]], item:
     """
 
     def append_raw(raw: Any, *, provider_shape: str) -> None:
-        if isinstance(raw, list):
-            for entry in raw:
-                if isinstance(entry, dict):
-                    shape = str(entry.get("_provider_shape") or provider_shape)
-                    tool_calls.append(dict(entry, _provider_shape=shape))
-                else:
-                    tool_calls.append(entry)
-        elif isinstance(raw, dict):
-            shape = str(raw.get("_provider_shape") or provider_shape)
-            tool_calls.append(dict(raw, _provider_shape=shape))
+        tool_calls.extend(_native_tool_call_batch_items(raw, provider_shape=provider_shape))
 
     append_raw(item.get("tool_calls"), provider_shape=f"{provider_shape_prefix}.tool_calls")
     append_raw(item.get("toolCalls"), provider_shape=f"{provider_shape_prefix}.toolCalls")
@@ -1930,12 +1996,7 @@ def _native_function_call_batch_items(provider_shape: str, raw_function_calls: A
     checks, and execution gating before anything can dispatch.
     """
 
-    if isinstance(raw_function_calls, dict):
-        items: list[Any] = [raw_function_calls]
-    elif isinstance(raw_function_calls, list):
-        items = raw_function_calls
-    else:
-        return []
+    items = _native_tool_call_batch_items(raw_function_calls, provider_shape=provider_shape)
     calls: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -1979,12 +2040,7 @@ def _native_tool_use_batch_items(provider_shape: str, raw_tool_uses: Any) -> lis
     execution boundaries remain authoritative.
     """
 
-    if isinstance(raw_tool_uses, dict):
-        items: list[Any] = [raw_tool_uses]
-    elif isinstance(raw_tool_uses, list):
-        items = raw_tool_uses
-    else:
-        return []
+    items = _native_tool_call_batch_items(raw_tool_uses, provider_shape=provider_shape)
     calls: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -2018,19 +2074,10 @@ def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, di
         raw_calls = message.get("toolCall")
         if isinstance(raw_calls, dict):
             raw_calls = dict(raw_calls, _provider_shape="singular.toolCall")
-    raw_call_items: list[Any] = []
-    if isinstance(raw_calls, list):
-        raw_call_items = [
-            dict(item, _provider_shape=raw_calls_shape) if raw_calls_shape and isinstance(item, dict) and "_provider_shape" not in item else item
-            for item in raw_calls
-        ]
-    elif isinstance(raw_calls, dict):
-        # A few OpenAI-compatible shims collapse a one-call top-level
-        # ``tool_calls`` array into a single object.  Normalize it at the
-        # adapter boundary so the runtime can still apply the exact same
-        # schema/ROE/runtime-policy validation before any dispatch.
-        provider_shape = str(raw_calls.get("_provider_shape") or raw_calls_shape or "single_top_level.tool_calls")
-        raw_call_items = [dict(raw_calls, _provider_shape=provider_shape)]
+    raw_call_items = _native_tool_call_batch_items(
+        raw_calls,
+        provider_shape=raw_calls_shape,
+    )
     message_function_call = message.get("functionCall")
     if isinstance(message_function_call, dict):
         raw_call_items.append({
@@ -2453,6 +2500,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
+            label = "native provider " + provider_shape.replace("_", " ").replace(".", " ")
         elif provider_shape.startswith("choice."):
             label = "native provider " + provider_shape.replace(".", " ")
         else:
@@ -2560,6 +2609,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider singular tool_call"
         elif provider_shape in {"camelCase.toolCalls", "singular.toolCall"}:
             label = "native provider camelCase toolCall"
+        elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
+            label = "native provider " + provider_shape.replace("_", " ").replace(".", " ")
         elif provider_shape.startswith("choice."):
             label = "native provider " + provider_shape.replace(".", " ")
         else:

@@ -4653,6 +4653,101 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_native_tool_call_object_maps_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Tool Call Object Maps",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-map-should-not-run.txt"
+
+            class FakeMapHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native keyed tool-call map token=map-secret",
+                                    "tool_calls": {
+                                        "map_memory": {
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-map", "value": "object-map native tool call accepted"}),
+                                            },
+                                        },
+                                        "map_dry": {
+                                            "type": "tool_call",
+                                            "name": "run_command",
+                                            "input": {
+                                                "target": "app.example.test",
+                                                "purpose": "object-map dry-run boundary",
+                                                "command": f"printf native-map > {dry_run_marker}",
+                                                "execute": True,
+                                            },
+                                        },
+                                    },
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeMapHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-map-tool-calls",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-map", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native map tool call token=map-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider tool calls object map" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertFalse(payload["tool_calls"][1]["args"]["execute"])
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["map_memory", "map_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider tool calls object map", "native provider tool calls object map"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn("map-secret", planned)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native map tool call token=map-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["map_memory", "map_dry"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-map')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("object-map native tool call accepted", recall)
+                self.assertTrue(status.get("milestone_contract", {}).get("tool_call_object_map_translation"), status)
+                self.assertIn("tool_calls_object_map", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("map-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_native_tool_calls_nested_functioncall_and_tooluse_aliases_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
