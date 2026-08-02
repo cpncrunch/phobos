@@ -2105,6 +2105,7 @@ def main(argv: list[str] | None = None) -> int:
             and all(native_status_milestone_contract.values())
             and native_status_milestone_contract.get("schema_validation_before_dispatch") is True
             and native_status_milestone_contract.get("wrapped_json_plan_extraction") is True
+            and native_status_milestone_contract.get("chat_completions_sse_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_api_endpoint_planning") is True
             and native_status_milestone_contract.get("responses_stream_sse_capture_translation") is True
             and native_status_milestone_contract.get("responses_stream_call_id_delta_alias_translation") is True
@@ -2424,6 +2425,92 @@ def main(argv: list[str] | None = None) -> int:
             and native_openai_payload.get("tool_calls", [{}])[0].get("args", {}).get("key") == "native-openai-smoke"
             and native_openai_response.raw.get("native_tool_calls") is True
             and "api_key" not in json.dumps(native_openai_response.raw).lower()
+        )
+
+        native_chat_sse_marker = root / "native-openai-chat-sse-should-not-run.txt"
+        native_chat_sse_captured: dict[str, object] = {}
+        native_chat_sse_memory_args = json.dumps({"key": "native-openai-chat-sse-smoke", "value": "Chat Completions SSE tool calls assembled in smoke"})
+        native_chat_sse_run_args = json.dumps({
+            "target": "app.example.test",
+            "purpose": "Chat Completions SSE dry-run smoke",
+            "command": f"printf native-openai-chat-sse > {native_chat_sse_marker}",
+            "execute": True,
+        })
+
+        class NativeOpenAIChatSSESmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                chunks = [
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "native Chat Completions SSE token=native-chat-sse-secret"}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "chat_sse_smoke_memory", "type": "function", "function": {"name": "remember", "arguments": native_chat_sse_memory_args[:35]}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": native_chat_sse_memory_args[35:]}}]}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "chat_sse_smoke_dry", "type": "function", "function": {"name": "run_command", "arguments": native_chat_sse_run_args}}]}}]},
+                ]
+                body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+                body += "data: [DONE]\n\n"
+                return body.encode("utf-8")
+
+        def fake_native_chat_sse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_chat_sse_captured["url"] = request.full_url
+            native_chat_sse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_chat_sse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIChatSSESmokeResponse()
+
+        native_chat_sse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-openai-chat-sse.db"),
+                session_name="native-openai-chat-sse-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-chat-sse-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_chat_sse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_chat_sse_urlopen
+            native_chat_sse_plan = native_chat_sse_runtime.handle_message('/auto model=true prompt="native Chat Completions SSE token=native-chat-sse-secret"')
+            native_chat_sse_plan_payload = json.loads(native_chat_sse_plan.split("\n", 1)[1])
+            native_chat_sse_apply = native_chat_sse_runtime.handle_message('/auto apply=true model=true prompt="native Chat Completions SSE token=native-chat-sse-secret"')
+            native_chat_sse_apply_payload = json.loads(native_chat_sse_apply.split("\n", 1)[1])
+            native_chat_sse_recall = native_chat_sse_runtime.handle_message('/recall query=native-openai-chat-sse-smoke')
+            write("native-openai-chat-completions-sse.json", json.dumps({
+                "plan": native_chat_sse_plan_payload,
+                "apply": native_chat_sse_apply_payload,
+                "captured": native_chat_sse_captured,
+                "recall": native_chat_sse_recall,
+                "marker_exists": native_chat_sse_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_chat_sse_original_urlopen
+            native_chat_sse_runtime.close()
+        native_chat_sse_calls = native_chat_sse_plan_payload.get("tool_calls", []) if isinstance(native_chat_sse_plan_payload.get("tool_calls"), list) else []
+        native_chat_sse_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_chat_sse_calls]
+        native_chat_sse_ledger = native_chat_sse_apply_payload.get("execution_ledger", []) if isinstance(native_chat_sse_apply_payload.get("execution_ledger"), list) else []
+        native_chat_sse_outputs = native_chat_sse_plan + native_chat_sse_apply + native_chat_sse_recall + json.dumps(native_chat_sse_plan_payload) + json.dumps(native_chat_sse_apply_payload)
+        checks["native_openai_chat_completions_sse_tool_call_ok"] = (
+            native_chat_sse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_chat_sse_calls] == ["remember", "run_command"]
+            and native_chat_sse_calls[0].get("args", {}).get("value") == "Chat Completions SSE tool calls assembled in smoke"
+            and native_chat_sse_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_chat_sse_metadata] == ["chat_sse_smoke_memory", "chat_sse_smoke_dry"]
+            and all("native provider chat completions sse delta tool_calls" in item.get("native_tool_call_source", "") for item in native_chat_sse_metadata)
+            and [item.get("result", {}).get("status") for item in native_chat_sse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_chat_sse_ledger] == ["chat_sse_smoke_memory", "chat_sse_smoke_dry"]
+            and native_chat_sse_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("chat_completions_sse_tool_call_translation") is True
+            and "openai_chat_completions_sse_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Chat Completions SSE tool calls assembled in smoke" in native_chat_sse_recall
+            and str(native_chat_sse_captured.get("url", "")).endswith("/chat/completions")
+            and native_chat_sse_captured.get("tool_choice") == "auto"
+            and int(native_chat_sse_captured.get("tool_count", 0) or 0) > 0
+            and not native_chat_sse_marker.exists()
+            and "native-chat-sse-secret" not in native_chat_sse_outputs
         )
 
         native_flat_marker = root / "native-flat-should-not-run.txt"
@@ -8911,6 +8998,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_slash_flag_safety_ok",
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
+            "native_openai_chat_completions_sse_tool_call_ok",
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",
             "native_anthropic_adapter_ok",

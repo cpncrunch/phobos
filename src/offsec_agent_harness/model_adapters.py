@@ -176,7 +176,14 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         req = urllib.request.Request(self.base_url + "/chat/completions", data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8", errors="replace"))
+                body = response.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as exc:
+                    events = _parse_responses_sse_events(body)
+                    if events:
+                        return {"events": events, "_response_format": "chat_completions_sse"}
+                    raise RuntimeError("OpenAI-compatible endpoint returned neither JSON nor parseable SSE event data") from exc
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Model endpoint HTTP {exc.code}: {body[:500]}") from exc
@@ -646,6 +653,9 @@ def _tool_plan_prompt(prompt: str, tool_specs: list[dict[str, Any]], *, allow_co
 
 
 def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
+    chat_stream_message = _chat_completion_stream_events_to_message(raw)
+    if chat_stream_message:
+        return chat_stream_message
     responses_stream_message = _responses_stream_events_to_message(raw)
     if responses_stream_message:
         return responses_stream_message
@@ -711,7 +721,7 @@ def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _choice_delta_sequence_to_message(choices: list[Any]) -> dict[str, Any]:
+def _choice_delta_sequence_to_message(choices: list[Any], *, provider_shape_prefix: str = "choice.delta") -> dict[str, Any]:
     """Assemble streaming-style ``choices[].delta`` tool-call fragments.
 
     Some OpenAI-compatible shims return a captured stream as multiple choice
@@ -732,7 +742,7 @@ def _choice_delta_sequence_to_message(choices: list[Any]) -> dict[str, Any]:
         if not isinstance(delta, dict):
             continue
         saw_delta = True
-        chunk_message = _provider_message_wrapper_to_message(delta, provider_shape_prefix="choice.delta")
+        chunk_message = _provider_message_wrapper_to_message(delta, provider_shape_prefix=provider_shape_prefix)
         content = chunk_message.get("content")
         if isinstance(content, list):
             content_blocks.extend([item for item in content if isinstance(item, dict)])
@@ -754,6 +764,39 @@ def _choice_delta_sequence_to_message(choices: list[Any]) -> dict[str, Any]:
     if merged_tool_calls:
         message["tool_calls"] = merged_tool_calls
     return message
+
+
+def _chat_completion_stream_events_to_message(raw: Any) -> dict[str, Any]:
+    """Normalize OpenAI Chat Completions SSE chunks into a final message shape.
+
+    OpenAI-compatible gateways may return captured ``chat.completion.chunk`` SSE
+    frames instead of a final JSON response. Assemble only provider-native
+    ``choices[].delta.tool_calls`` and content fragments into an inert proposal;
+    schema validation, runtime policy, ROE previews, approvals, explicit execute
+    intent, and transcript redaction remain Phobos runtime boundaries.
+    """
+
+    events = _responses_stream_event_items(raw)
+    if not events:
+        return {}
+    choices: list[Any] = []
+    saw_chat_stream = False
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(_responses_stream_event_value(event, "type", "event") or "").strip()
+        if event_type.startswith("response."):
+            continue
+        raw_choices = _responses_stream_event_value(event, "choices")
+        if not isinstance(raw_choices, list):
+            continue
+        if event_type and not event_type.startswith("chat.completion"):
+            continue
+        saw_chat_stream = True
+        choices.extend([choice for choice in raw_choices if isinstance(choice, dict)])
+    if not saw_chat_stream or not choices:
+        return {}
+    return _choice_delta_sequence_to_message(choices, provider_shape_prefix="chat.completions.sse.delta")
 
 
 def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
@@ -2422,6 +2465,8 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider anthropic messages stream content {native_kind}"
     if provider_shape.startswith("choice."):
         return f"native provider {provider_shape.replace('.', ' ')} {native_kind}"
+    if provider_shape.startswith("chat.completions.sse."):
+        return f"native provider {provider_shape.replace('.', ' ')} {native_kind}"
     return f"native content-block {native_kind}"
 
 
@@ -2517,6 +2562,8 @@ def _parse_native_content_function_call_block(
     elif provider_shape == "anthropic.messages.content":
         label = "native provider anthropic messages content functionCall"
     elif provider_shape.startswith("choice."):
+        label = f"native provider {provider_shape.replace('.', ' ')} functionCall"
+    elif provider_shape.startswith("chat.completions.sse."):
         label = f"native provider {provider_shape.replace('.', ' ')} functionCall"
     else:
         label = "native content-block functionCall"
@@ -2659,6 +2706,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider " + provider_shape.replace("_", " ").replace(".", " ")
         elif provider_shape.startswith("choice."):
             label = "native provider " + provider_shape.replace(".", " ")
+        elif provider_shape.startswith("chat.completions.sse."):
+            label = "native provider " + provider_shape.replace(".", " ")
         else:
             label = None
         return _parse_native_function_call(
@@ -2769,6 +2818,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
             label = "native provider " + provider_shape.replace("_", " ").replace(".", " ")
         elif provider_shape.startswith("choice."):
+            label = "native provider " + provider_shape.replace(".", " ")
+        elif provider_shape.startswith("chat.completions.sse."):
             label = "native provider " + provider_shape.replace(".", " ")
         else:
             label = "native provider flat tool_call"
