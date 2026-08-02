@@ -385,7 +385,14 @@ class GeminiAdapter(BaseModelAdapter):
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8", errors="replace"))
+                body = response.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as exc:
+                    events = _parse_responses_sse_events(body)
+                    if events:
+                        return {"events": events, "_response_format": "gemini_sse"}
+                    raise RuntimeError("Gemini endpoint returned neither JSON nor parseable SSE event data") from exc
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Gemini endpoint HTTP {exc.code}: {body[:500]}") from exc
@@ -665,6 +672,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     anthropic_stream_message = _anthropic_stream_events_to_message(raw)
     if anthropic_stream_message:
         return anthropic_stream_message
+    gemini_stream_message = _gemini_stream_events_to_message(raw)
+    if gemini_stream_message:
+        return gemini_stream_message
     bedrock_converse_message = _bedrock_converse_output_to_message(raw)
     if bedrock_converse_message:
         return bedrock_converse_message
@@ -797,6 +807,55 @@ def _chat_completion_stream_events_to_message(raw: Any) -> dict[str, Any]:
     if not saw_chat_stream or not choices:
         return {}
     return _choice_delta_sequence_to_message(choices, provider_shape_prefix="chat.completions.sse.delta")
+
+
+def _gemini_stream_events_to_message(raw: Any) -> dict[str, Any]:
+    """Normalize Gemini GenerateContent SSE chunks into a message shape.
+
+    Some Gemini-compatible endpoints and proxies return captured
+    ``streamGenerateContent``/SSE frames as ``data: {"candidates": ...}``
+    records rather than one final JSON body.  Accumulate first-candidate parts
+    and translate only ``functionCall`` proposals into Phobos' existing native
+    planning boundary; runtime schema validation, ROE previews, approvals,
+    explicit execution intent, and transcript redaction remain authoritative.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    response_format = str(raw.get("_response_format") or "").strip().lower()
+    events = _responses_stream_event_items(raw)
+    if not events:
+        return {}
+    saw_gemini_stream = response_format in {"gemini_sse", "gemini_stream", "gemini-generatecontent-sse"}
+    parts: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_data = event.get("data") if isinstance(event.get("data"), dict) else event
+        if not isinstance(event_data, dict):
+            continue
+        candidates = event_data.get("candidates")
+        if not isinstance(candidates, list):
+            continue
+        saw_gemini_stream = True
+        first = next((candidate for candidate in candidates if isinstance(candidate, dict)), None)
+        if not isinstance(first, dict):
+            continue
+        content = first.get("content") if isinstance(first.get("content"), dict) else {}
+        raw_parts = content.get("parts") if isinstance(content, dict) else None
+        if isinstance(raw_parts, dict):
+            raw_parts = [raw_parts]
+        if not isinstance(raw_parts, list):
+            continue
+        for part in raw_parts:
+            if isinstance(part, dict):
+                parts.append(part)
+    if not saw_gemini_stream or not parts:
+        return {}
+    return _candidate_content_to_message(
+        {"candidates": [{"content": {"parts": parts}}]},
+        provider_shape="gemini.stream.candidate",
+    )
 
 
 def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
@@ -1640,7 +1699,7 @@ def _root_message_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return message if message else {}
 
 
-def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = "gemini.candidate") -> dict[str, Any]:
     """Normalize candidate/part native function calls into the common shape.
 
     Some OpenAI-compatible gateways front providers that expose Gemini-style
@@ -1692,7 +1751,7 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                 "name": _native_tool_name(function_call),
                 "arguments": _native_argument_value(function_call, preferred=("args", "arguments", "parameters", "input", "params")),
                 "call_id": str(call_id),
-                "_provider_shape": "gemini.candidate",
+                "_provider_shape": provider_shape,
             })
         function_response = _native_provider_result_alias_value(part)
         if isinstance(function_response, dict):
@@ -2737,6 +2796,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider single responses output nested functionCall"
         elif item.get("_provider_shape") == "gemini.candidate":
             label = "native provider candidate functionCall"
+        elif item.get("_provider_shape") == "gemini.stream.candidate":
+            label = "native provider Gemini stream candidate functionCall"
         elif item.get("_provider_shape") == "root.functionCall":
             label = "native provider root functionCall"
         elif item.get("_provider_shape") == "responses.message.tool_calls":

@@ -5664,6 +5664,83 @@ def main(argv: list[str] | None = None) -> int:
             and [item.get("provider_tool_call_id") for item in native_gemini_ledger] == ["gemini_smoke_memory", "gemini_smoke_dry"]
         )
 
+        native_gemini_stream_marker = root / "native-gemini-stream-should-not-run.txt"
+        native_gemini_stream_result_marker = "NATIVE_GEMINI_STREAM_RESPONSE_SHOULD_NOT_SURFACE"
+        native_gemini_stream_captured = []
+
+        class NativeGeminiStreamSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                frames = [
+                    {"candidates": [{"content": {"parts": [{"text": "native Gemini stream token=native-gemini-stream-secret"}]}}]},
+                    {"candidates": [{"content": {"parts": [{"functionCallId": "gemini_stream_smoke_memory", "functionCall": {"name": "remember", "args": {"key": "native-gemini-stream-smoke", "value": "Gemini SSE stream native tool call translated"}}}]}}]},
+                    {"candidates": [{"content": {"parts": [{"toolCallId": "gemini_stream_smoke_dry", "functionCall": {"name": "run_command", "args": {"target": "app.example.test", "purpose": "Gemini SSE stream dry-run smoke", "command": f"printf native-gemini-stream > {native_gemini_stream_marker}", "execute": True}}}]}}]},
+                    {"candidates": [{"content": {"parts": [{"functionResponse": {"name": "run_command", "response": {"content": native_gemini_stream_result_marker + " token=native-gemini-stream-secret"}}}]}}]},
+                ]
+                return ("".join("data: " + json.dumps(frame) + "\n\n" for frame in frames) + "data: [DONE]\n\n").encode("utf-8")
+
+        def fake_native_gemini_stream_urlopen(request, timeout=0):
+            native_gemini_stream_captured.append({
+                "url": request.full_url,
+                "payload": json.loads(request.data.decode("utf-8")),
+                "headers": dict(request.header_items()),
+            })
+            return NativeGeminiStreamSmokeResponse()
+
+        native_gemini_stream_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-gemini-stream.db"),
+                session_name="native-gemini-stream-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=GeminiAdapter(model="fake-gemini-stream-smoke-model", base_url="http://127.0.0.1:9/v1beta"),
+        )
+        native_gemini_stream_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_gemini_stream_urlopen
+            native_gemini_stream_plan = native_gemini_stream_runtime.handle_message('/auto model=true prompt="native Gemini stream smoke token=native-gemini-stream-secret"')
+            native_gemini_stream_plan_payload = json.loads(native_gemini_stream_plan.split("\n", 1)[1])
+            native_gemini_stream_apply = native_gemini_stream_runtime.handle_message('/auto apply=true model=true prompt="native Gemini stream smoke token=native-gemini-stream-secret"')
+            native_gemini_stream_apply_payload = json.loads(native_gemini_stream_apply.split("\n", 1)[1])
+            native_gemini_stream_recall = native_gemini_stream_runtime.handle_message('/recall query=native-gemini-stream-smoke')
+            write("native-gemini-stream-tool-calls.json", json.dumps({
+                "plan": native_gemini_stream_plan_payload,
+                "apply": native_gemini_stream_apply_payload,
+                "captured": native_gemini_stream_captured,
+                "recall": native_gemini_stream_recall,
+                "marker_exists": native_gemini_stream_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_gemini_stream_original_urlopen
+            native_gemini_stream_runtime.close()
+        native_gemini_stream_calls = native_gemini_stream_plan_payload.get("tool_calls", []) if isinstance(native_gemini_stream_plan_payload.get("tool_calls"), list) else []
+        native_gemini_stream_metadata = native_gemini_stream_plan_payload.get("metadata", {}) if isinstance(native_gemini_stream_plan_payload.get("metadata"), dict) else {}
+        native_gemini_stream_ledger = native_gemini_stream_apply_payload.get("execution_ledger", []) if isinstance(native_gemini_stream_apply_payload.get("execution_ledger"), list) else []
+        native_gemini_stream_outputs = native_gemini_stream_plan + native_gemini_stream_apply + native_gemini_stream_recall + json.dumps(native_gemini_stream_plan_payload) + json.dumps(native_gemini_stream_apply_payload)
+        checks["native_gemini_stream_adapter_ok"] = (
+            native_gemini_stream_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_gemini_stream_calls] == ["remember", "run_command"]
+            and native_gemini_stream_calls[1].get("args", {}).get("execute") is False
+            and native_gemini_stream_metadata.get("provider") == "gemini"
+            and native_gemini_stream_metadata.get("native_tool_calls") is True
+            and native_gemini_stream_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_gemini_stream_ledger] == ["gemini_stream_smoke_memory", "gemini_stream_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_gemini_stream_ledger] == ["native provider Gemini stream candidate functionCall", "native provider Gemini stream candidate functionCall"]
+            and [item.get("result", {}).get("status") for item in native_gemini_stream_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("gemini_stream_generate_content_translation") is True
+            and "gemini_stream_generate_content" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Gemini SSE stream native tool call translated" in native_gemini_stream_recall
+            and not native_gemini_stream_marker.exists()
+            and native_gemini_stream_result_marker not in native_gemini_stream_outputs
+            and "native-gemini-stream-secret" not in native_gemini_stream_outputs
+        )
+
         native_anthropic_marker = root / "native-anthropic-should-not-run.txt"
         native_anthropic_result_marker = "NATIVE_ANTHROPIC_TOOL_RESULT_SHOULD_NOT_SURFACE"
         native_anthropic_captured = []
@@ -9001,6 +9078,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_openai_chat_completions_sse_tool_call_ok",
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",
+            "native_gemini_stream_adapter_ok",
             "native_anthropic_adapter_ok",
             "native_anthropic_tool_use_alias_ok",
             "native_anthropic_sse_tool_use_stream_ok",

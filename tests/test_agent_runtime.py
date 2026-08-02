@@ -3961,6 +3961,134 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_gemini_sse_generate_content_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Gemini SSE Tool Calls",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-gemini-stream-should-not-execute.txt"
+            result_marker = "GEMINI_STREAM_FUNCTION_RESPONSE_SHOULD_NOT_SURFACE"
+
+            class FakeGeminiSSEHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    frames = [
+                        {"candidates": [{"content": {"parts": [{"text": "native Gemini stream token=gemini-stream-secret"}]}}]},
+                        {
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "parts": [
+                                            {
+                                                "functionCallId": "gemini_stream_memory",
+                                                "functionCall": {
+                                                    "name": "remember",
+                                                    "args": {"key": "native-gemini-stream", "value": "Gemini stream functionCall translated"},
+                                                },
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "parts": [
+                                            {
+                                                "toolCallId": "gemini_stream_dry",
+                                                "functionCall": {
+                                                    "name": "run_command",
+                                                    "args": {
+                                                        "target": "app.example.test",
+                                                        "purpose": "Gemini stream dry-run validation",
+                                                        "command": f"printf native-gemini-stream > {dry_run_marker}",
+                                                        "execute": True,
+                                                    },
+                                                },
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "parts": [
+                                            {
+                                                "functionResponse": {
+                                                    "name": "run_command",
+                                                    "response": {"content": result_marker + " token=gemini-stream-secret"},
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                    ]
+                    body = "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames) + "data: [DONE]\n\n"
+                    return body.encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append({
+                    "url": request.full_url,
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "headers": dict(request.header_items()),
+                })
+                return FakeGeminiSSEHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-gemini-stream-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=GeminiAdapter(model="fake-gemini-stream-model", base_url="http://127.0.0.1:9/v1beta"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Gemini stream token=gemini-stream-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["value"], "Gemini stream functionCall translated")
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"].get("execute"))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Gemini stream token=gemini-stream-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-gemini-stream')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Gemini stream functionCall translated", recall)
+                self.assertTrue(captured_requests)
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["gemini_stream_memory", "gemini_stream_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider Gemini stream candidate functionCall", "native provider Gemini stream candidate functionCall"])
+                self.assertTrue(status.get("milestone_contract", {}).get("gemini_stream_generate_content_translation"), status)
+                self.assertIn("gemini_stream_generate_content", status.get("provider_native_tool_call_variants", []))
+                self.assertFalse(dry_run_marker.exists())
+                combined = planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload) + json.dumps(status)
+                self.assertNotIn(result_marker, combined)
+                self.assertNotIn("gemini-stream-secret", combined)
+            finally:
+                runtime.close()
+
     def test_anthropic_messages_adapter_native_tool_plan_uses_messages_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
