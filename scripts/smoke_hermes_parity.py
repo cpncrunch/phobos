@@ -2150,6 +2150,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_message_wrapper_translation") is True
             and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
             and native_status_milestone_contract.get("root_contents_wrapper_translation") is True
+            and native_status_milestone_contract.get("provider_result_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
@@ -2235,6 +2236,7 @@ def main(argv: list[str] | None = None) -> int:
             and "root_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_messages_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_contents_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "provider_result_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -4134,6 +4136,115 @@ def main(argv: list[str] | None = None) -> int:
             and not native_response_envelope_marker.exists()
             and native_response_envelope_result_marker not in native_response_envelope_blob
             and "native-response-envelope-secret" not in native_response_envelope_blob
+        )
+
+        native_result_envelope_captured = {}
+        native_result_envelope_marker = root / "native-result-envelope-should-not-run.txt"
+        native_result_envelope_result_marker = "RESULT_ENVELOPE_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIResultEnvelopeSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "result": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "native result envelope smoke token=native-result-envelope-secret"},
+                                {"type": "tool_result", "content": native_result_envelope_result_marker + " token=native-result-envelope-secret"},
+                            ],
+                            "tool_calls": [
+                                {
+                                    "id": "result_envelope_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-result-envelope-smoke", "value": "result envelope wrapper native tool call translated"}),
+                                    },
+                                },
+                                {
+                                    "toolCallId": "result_envelope_dry",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": json.dumps({
+                                            "target": "app.example.test",
+                                            "purpose": "result envelope native dry-run smoke",
+                                            "command": f"printf native-result-envelope > {native_result_envelope_marker}",
+                                            "execute": True,
+                                        }),
+                                    },
+                                },
+                            ],
+                        }
+                    },
+                    "metadata": {"note": "outer envelope token=native-result-envelope-secret should not surface"},
+                }).encode("utf-8")
+
+        def fake_native_result_envelope_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_result_envelope_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_result_envelope_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIResultEnvelopeSmokeResponse()
+
+        native_result_envelope_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-result-envelope.db"),
+                session_name="native-provider-result-envelope-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-result-envelope-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_result_envelope_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_result_envelope_urlopen
+            native_result_envelope_plan = native_result_envelope_runtime.handle_message('/auto model=true prompt="native result envelope smoke token=native-result-envelope-secret"')
+            native_result_envelope_plan_payload = json.loads(native_result_envelope_plan.split("\n", 1)[1])
+            native_result_envelope_apply = native_result_envelope_runtime.handle_message('/auto apply=true model=true prompt="native result envelope smoke token=native-result-envelope-secret"')
+            native_result_envelope_apply_payload = json.loads(native_result_envelope_apply.split("\n", 1)[1])
+            native_result_envelope_recall = native_result_envelope_runtime.handle_message('/recall query=native-result-envelope-smoke')
+            write("native-provider-result-envelope-wrapper.json", json.dumps({
+                "plan": native_result_envelope_plan_payload,
+                "apply": native_result_envelope_apply_payload,
+                "captured": native_result_envelope_captured,
+                "recall": native_result_envelope_recall,
+                "marker_exists": native_result_envelope_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_result_envelope_original_urlopen
+            native_result_envelope_runtime.close()
+        native_result_envelope_calls = native_result_envelope_plan_payload.get("tool_calls", []) if isinstance(native_result_envelope_plan_payload.get("tool_calls"), list) else []
+        native_result_envelope_metadata = native_result_envelope_plan_payload.get("metadata", {}) if isinstance(native_result_envelope_plan_payload.get("metadata"), dict) else {}
+        native_result_envelope_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_result_envelope_calls]
+        native_result_envelope_ledger = native_result_envelope_apply_payload.get("execution_ledger", []) if isinstance(native_result_envelope_apply_payload.get("execution_ledger"), list) else []
+        native_result_envelope_blob = native_result_envelope_plan + native_result_envelope_apply + native_result_envelope_recall + json.dumps(native_result_envelope_plan_payload) + json.dumps(native_result_envelope_apply_payload)
+        checks["native_provider_result_envelope_wrapper_ok"] = (
+            native_result_envelope_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_result_envelope_calls] == ["remember", "run_command"]
+            and all("native provider root message tool_calls" in call.get("reason", "") for call in native_result_envelope_calls)
+            and native_result_envelope_calls[1].get("args", {}).get("execute") is False
+            and native_result_envelope_metadata.get("native_tool_calls") is True
+            and native_result_envelope_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_result_envelope_call_metadata] == ["result_envelope_memory", "result_envelope_dry"]
+            and [item.get("native_tool_call_source") for item in native_result_envelope_call_metadata] == ["native provider root message tool_calls", "native provider root message tool_calls"]
+            and [item.get("result", {}).get("status") for item in native_result_envelope_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_result_envelope_ledger] == ["result_envelope_memory", "result_envelope_dry"]
+            and native_result_envelope_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("provider_result_envelope_wrapper_translation") is True
+            and "provider_result_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_result" in json.dumps(native_result_envelope_plan_payload.get("warnings", [])).lower()
+            and "result envelope wrapper native tool call translated" in native_result_envelope_recall
+            and native_result_envelope_captured.get("tool_choice") == "auto"
+            and native_result_envelope_captured.get("tool_count", 0) > 0
+            and not native_result_envelope_marker.exists()
+            and native_result_envelope_result_marker not in native_result_envelope_blob
+            and "native-result-envelope-secret" not in native_result_envelope_blob
         )
 
         native_root_messages_captured = {}
@@ -9643,6 +9754,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_camel_case_tool_call_alias_ok",
             "native_provider_root_message_wrapper_ok",
             "native_provider_response_envelope_wrapper_ok",
+            "native_provider_result_envelope_wrapper_ok",
             "native_provider_root_messages_wrapper_ok",
             "native_provider_root_contents_wrapper_ok",
             "native_provider_root_message_alias_matrix_ok",

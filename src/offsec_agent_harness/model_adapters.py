@@ -718,24 +718,29 @@ def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> di
 
 
 def _provider_response_envelope_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
-    """Unwrap one provider ``response`` envelope before native-call parsing.
+    """Unwrap one provider ``response``/``result`` envelope before native-call parsing.
 
     A few local/OpenAI-compatible gateways return the actual model payload under
     a root ``response`` object, for example ``{"response": {"message": ...}}``
-    or ``{"response": {"choices": [...]}}``.  Treat that envelope as an adapter
-    translation concern only: recurse into the nested provider payload, then let
-    the existing Phobos runtime boundary validate schemas, runtime policy, ROE,
-    approvals, execution intent, and transcript redaction before any tool can
-    run.  Limit recursion so malformed nested envelopes fail closed as no-tool
-    responses instead of causing unbounded parsing.
+    or ``{"response": {"choices": [...]}}``.  Some lightweight gateways use a
+    ``result`` object for the same final provider payload.  Treat those envelopes
+    as an adapter translation concern only: recurse into the nested provider
+    payload, then let the existing Phobos runtime boundary validate schemas,
+    runtime policy, ROE, approvals, execution intent, and transcript redaction
+    before any tool can run.  Limit recursion so malformed nested envelopes fail
+    closed as no-tool responses instead of causing unbounded parsing.
     """
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
-    wrapped = raw.get("response")
-    if not isinstance(wrapped, dict):
-        return {}
-    return _first_choice_message(wrapped, _wrapper_depth=depth + 1)
+    for envelope_key in ("response", "result"):
+        wrapped = raw.get(envelope_key)
+        if not isinstance(wrapped, dict):
+            continue
+        message = _first_choice_message(wrapped, _wrapper_depth=depth + 1)
+        if message:
+            return message
+    return {}
 
 
 def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
