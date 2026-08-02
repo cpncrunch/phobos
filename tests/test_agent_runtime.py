@@ -3354,6 +3354,127 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_raw_sse_stream_events_are_assembled_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Responses Raw SSE Stream Events",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-openai-responses-sse-should-not-execute.txt"
+            result_marker = "RESPONSES_SSE_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesRawSSEHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    memory_args = json.dumps({"key": "native-openai-responses-sse", "value": "Responses raw SSE events assembled"})
+                    run_args = json.dumps({
+                        "target": "app.example.test",
+                        "purpose": "Responses raw SSE dry-run validation",
+                        "command": f"printf native-openai-responses-sse > {dry_run_marker}",
+                        "execute": True,
+                    })
+                    frames = [
+                        ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "native Responses raw SSE plan token=responses-sse-secret"}),
+                        (
+                            "response.output_item.added",
+                            {
+                                "type": "response.output_item.added",
+                                "item": {
+                                    "id": "sse_memory_item",
+                                    "type": "function_call",
+                                    "call_id": "responses_sse_memory",
+                                    "name": "remember",
+                                    "arguments": memory_args[:32],
+                                },
+                            },
+                        ),
+                        ("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "item_id": "sse_memory_item", "delta": memory_args[32:]}),
+                        (
+                            "response.output_item.added",
+                            {
+                                "type": "response.output_item.added",
+                                "item": {
+                                    "id": "sse_dry_item",
+                                    "type": "function_call",
+                                    "call_id": "responses_sse_dry",
+                                    "name": "run_command",
+                                    "arguments": "",
+                                },
+                            },
+                        ),
+                        ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "item_id": "sse_dry_item", "arguments": run_args}),
+                        (
+                            "response.output_item.done",
+                            {
+                                "type": "response.output_item.done",
+                                "item": {
+                                    "id": "sse_result",
+                                    "type": "function_call_output",
+                                    "call_id": "responses_sse_result",
+                                    "output": result_marker + " token=responses-sse-secret",
+                                },
+                            },
+                        ),
+                    ]
+                    body = "".join(
+                        f"event: {event_name}\nid: sse-{index}\ndata: {json.dumps(data)}\n\n"
+                        for index, (event_name, data) in enumerate(frames, start=1)
+                    ) + "data: [DONE]\n\n"
+                    return body.encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesRawSSEHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-responses-sse-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAIResponsesAdapter(model="fake-native-responses-sse-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Responses raw SSE token=responses-sse-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["value"], "Responses raw SSE events assembled")
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    self.assertTrue(all("native provider responses stream function_call" in call.get("reason", "") for call in plan_payload["tool_calls"]))
+                    self.assertIn("tool_result", json.dumps(plan_payload.get("warnings", [])).lower())
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Responses raw SSE token=responses-sse-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-openai-responses-sse')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses raw SSE events assembled", recall)
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["responses_sse_memory", "responses_sse_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider responses stream function_call", "native provider responses stream function_call"])
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_stream_sse_capture_translation"), status)
+                self.assertIn("responses_stream_sse_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_requests)
+                self.assertEqual(captured_requests[0].get("tool_choice"), "auto")
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("responses-sse-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload) + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_gemini_adapter_native_tool_plan_uses_generate_content_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

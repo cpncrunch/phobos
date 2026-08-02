@@ -7992,6 +7992,112 @@ def main(argv: list[str] | None = None) -> int:
             and "native-responses-stream-secret" not in native_responses_stream_outputs
         )
 
+        native_responses_sse_marker = root / "native-responses-sse-should-not-run.txt"
+        native_responses_sse_captured: dict[str, object] = {}
+
+        class NativeOpenAIResponsesSSESmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                memory_args = json.dumps({"key": "native-responses-sse-smoke", "value": "Responses raw SSE stream assembled in smoke"})
+                run_args = json.dumps({
+                    "target": "app.example.test",
+                    "purpose": "Responses raw SSE dry-run smoke",
+                    "command": f"printf native-responses-sse > {native_responses_sse_marker}",
+                    "execute": True,
+                })
+                frames = [
+                    ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "native Responses SSE smoke token=native-responses-sse-secret"}),
+                    (
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "item": {"id": "sse_smoke_memory_item", "type": "function_call", "call_id": "responses_sse_smoke_memory", "name": "remember", "arguments": memory_args[:33]},
+                        },
+                    ),
+                    ("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "item_id": "sse_smoke_memory_item", "delta": memory_args[33:]}),
+                    (
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "item": {"id": "sse_smoke_dry_item", "type": "function_call", "call_id": "responses_sse_smoke_dry", "name": "run_command", "arguments": ""},
+                        },
+                    ),
+                    ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "item_id": "sse_smoke_dry_item", "arguments": run_args}),
+                    ("response.output_item.done", {"type": "response.output_item.done", "item": {"id": "sse_smoke_result", "type": "function_call_output", "output": "RESPONSES_SSE_SMOKE_RESULT_SHOULD_NOT_SURFACE token=native-responses-sse-secret"}}),
+                ]
+                return (
+                    "".join(
+                        f"event: {event_name}\nid: sse-smoke-{index}\ndata: {json.dumps(data)}\n\n"
+                        for index, (event_name, data) in enumerate(frames, start=1)
+                    )
+                    + "data: [DONE]\n\n"
+                ).encode("utf-8")
+
+        def fake_native_responses_sse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_sse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_sse_captured["tool_choice"] = payload.get("tool_choice")
+            native_responses_sse_captured["url"] = request.full_url
+            return NativeOpenAIResponsesSSESmokeResponse()
+
+        native_responses_sse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-sse.db"),
+                session_name="native-provider-responses-sse-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAIResponsesAdapter(model="fake-native-responses-sse-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_sse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_sse_urlopen
+            native_responses_sse_plan = native_responses_sse_runtime.handle_message('/auto model=true prompt="native Responses raw SSE smoke token=native-responses-sse-secret"')
+            native_responses_sse_plan_payload = json.loads(native_responses_sse_plan.split("\n", 1)[1])
+            native_responses_sse_apply = native_responses_sse_runtime.handle_message('/auto apply=true model=true prompt="native Responses raw SSE smoke token=native-responses-sse-secret"')
+            native_responses_sse_apply_payload = json.loads(native_responses_sse_apply.split("\n", 1)[1])
+            native_responses_sse_recall = native_responses_sse_runtime.handle_message('/recall query=native-responses-sse-smoke')
+            write("native-provider-responses-sse-events.json", json.dumps({
+                "plan": native_responses_sse_plan_payload,
+                "apply": native_responses_sse_apply_payload,
+                "captured": native_responses_sse_captured,
+                "recall": native_responses_sse_recall,
+                "marker_exists": native_responses_sse_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_sse_original_urlopen
+            native_responses_sse_runtime.close()
+        native_responses_sse_calls = native_responses_sse_plan_payload.get("tool_calls", []) if isinstance(native_responses_sse_plan_payload.get("tool_calls"), list) else []
+        native_responses_sse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_sse_calls]
+        native_responses_sse_ledger = native_responses_sse_apply_payload.get("execution_ledger", []) if isinstance(native_responses_sse_apply_payload.get("execution_ledger"), list) else []
+        native_responses_sse_outputs = native_responses_sse_plan + native_responses_sse_apply + native_responses_sse_recall + json.dumps(native_responses_sse_plan_payload) + json.dumps(native_responses_sse_apply_payload)
+        checks["native_provider_responses_sse_stream_event_ok"] = (
+            native_responses_sse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_sse_calls] == ["remember", "run_command"]
+            and native_responses_sse_calls[0].get("args", {}).get("value") == "Responses raw SSE stream assembled in smoke"
+            and native_responses_sse_calls[1].get("args", {}).get("execute") is False
+            and all("native provider responses stream function_call" in call.get("reason", "") for call in native_responses_sse_calls)
+            and [item.get("provider_tool_call_id") for item in native_responses_sse_call_metadata] == ["responses_sse_smoke_memory", "responses_sse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_responses_sse_call_metadata] == ["native provider responses stream function_call", "native provider responses stream function_call"]
+            and [item.get("result", {}).get("status") for item in native_responses_sse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_responses_sse_ledger] == ["responses_sse_smoke_memory", "responses_sse_smoke_dry"]
+            and native_responses_sse_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("responses_stream_sse_capture_translation") is True
+            and "responses_stream_sse_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses raw SSE stream assembled in smoke" in native_responses_sse_recall
+            and native_responses_sse_captured.get("tool_choice") == "auto"
+            and str(native_responses_sse_captured.get("url", "")).endswith("/responses")
+            and int(native_responses_sse_captured.get("tool_count", 0) or 0) > 0
+            and not native_responses_sse_marker.exists()
+            and "RESPONSES_SSE_SMOKE_RESULT_SHOULD_NOT_SURFACE" not in native_responses_sse_outputs
+            and "native-responses-sse-secret" not in native_responses_sse_outputs
+        )
+
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
             "native_tool_call_plan_transcript_ok",
@@ -8038,6 +8144,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_stream_event_ok",
+            "native_provider_responses_sse_stream_event_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_output_message_aliases_ok",
             "native_provider_responses_output_message_typeless_wrapper_ok",

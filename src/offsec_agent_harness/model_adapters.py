@@ -276,7 +276,14 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
         req = urllib.request.Request(self.base_url + "/responses", data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8", errors="replace"))
+                body = response.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as exc:
+                    events = _parse_responses_sse_events(body)
+                    if events:
+                        return {"events": events, "_response_format": "sse"}
+                    raise RuntimeError("Responses endpoint returned neither JSON nor parseable SSE event data") from exc
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Responses endpoint HTTP {exc.code}: {body[:500]}") from exc
@@ -829,20 +836,102 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
 
 
 def _responses_stream_event_items(raw: Any) -> list[Any]:
+    if isinstance(raw, (bytes, bytearray)):
+        return _parse_responses_sse_events(raw.decode("utf-8", errors="replace"))
+    if isinstance(raw, str):
+        return _parse_responses_sse_events(raw)
     if isinstance(raw, list):
-        return raw
+        events: list[Any] = []
+        for item in raw:
+            if isinstance(item, (bytes, bytearray)):
+                events.extend(_parse_responses_sse_events(item.decode("utf-8", errors="replace")))
+            elif isinstance(item, str):
+                events.extend(_parse_responses_sse_events(item))
+            else:
+                events.append(item)
+        return events
     if not isinstance(raw, dict):
         return []
     for key in ("events", "stream", "chunks"):
         value = raw.get(key)
         if isinstance(value, list):
-            return value
+            events: list[Any] = []
+            for item in value:
+                if isinstance(item, (bytes, bytearray)):
+                    events.extend(_parse_responses_sse_events(item.decode("utf-8", errors="replace")))
+                elif isinstance(item, str):
+                    events.extend(_parse_responses_sse_events(item))
+                else:
+                    events.append(item)
+            return events
+        if isinstance(value, str):
+            return _parse_responses_sse_events(value)
     data = raw.get("data")
     if isinstance(data, list) and any(isinstance(item, dict) and str(item.get("type") or item.get("event") or "").startswith("response.") for item in data):
         return data
+    if isinstance(data, str):
+        parsed = _parse_responses_sse_events(data)
+        if parsed:
+            return parsed
     if str(raw.get("type") or raw.get("event") or "").startswith("response."):
         return [raw]
     return []
+
+
+def _parse_responses_sse_events(raw: str) -> list[dict[str, Any]]:
+    """Parse raw Responses API SSE captures into bounded event dictionaries.
+
+    Direct Responses streams and some local gateways persist ``event:``/``data:``
+    frames rather than a final JSON object.  Only JSON ``data:`` payloads are
+    accepted here; opaque text frames are ignored so provider output or secrets do
+    not become tool-call summaries.  The caller still performs normal native
+    tool-call translation plus runtime schema/ROE/policy validation before any
+    dispatch can occur.
+    """
+
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    blocks = re.split(r"\r?\n\r?\n", raw.replace("\r\n", "\n"))
+    events: list[dict[str, Any]] = []
+    for block in blocks:
+        event_name = ""
+        sse_id = ""
+        data_lines: list[str] = []
+        for raw_line in block.split("\n"):
+            line = raw_line.rstrip("\r")
+            if not line or line.startswith(":"):
+                continue
+            field, sep, value = line.partition(":")
+            if not sep:
+                continue
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value.strip()
+            elif field == "id":
+                sse_id = value.strip()
+            elif field == "data":
+                data_lines.append(value)
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines).strip()
+        if not data_text or data_text == "[DONE]":
+            continue
+        try:
+            data = json.loads(data_text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        event = dict(data)
+        if event_name and "event" not in event and "type" not in event:
+            event["event"] = event_name
+        elif event_name and "event" not in event:
+            event["event"] = event_name
+        if sse_id and "sse_id" not in event:
+            event["sse_id"] = _sanitize_native_call_id(sse_id)
+        events.append(event)
+    return events
 
 
 def _responses_stream_event_value(event: dict[str, Any], *keys: str) -> Any:
