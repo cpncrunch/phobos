@@ -2145,6 +2145,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
+            and native_status_milestone_contract.get("single_candidate_object_translation") is True
+            and native_status_milestone_contract.get("candidate_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("root_message_wrapper_translation") is True
             and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
@@ -2242,6 +2244,8 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "single_candidate_object" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate_singular_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCalls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCalls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -7832,6 +7836,105 @@ def main(argv: list[str] | None = None) -> int:
             and native_single_candidate_captured.get("tool_count", 0) > 0
             and "native-single-candidate-secret" not in native_single_candidate_plan + native_single_candidate_apply + native_single_candidate_recall + json.dumps(native_single_candidate_plan_payload) + json.dumps(native_single_candidate_apply_payload)
         )
+
+        native_collapsed_candidate_captured = {"count": 0, "tool_choices": []}
+
+        class NativeProviderCollapsedCandidateSmokeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_native_collapsed_candidate_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_collapsed_candidate_captured["count"] += 1
+            native_collapsed_candidate_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_collapsed_candidate_captured["tool_choices"].append(payload.get("tool_choice"))
+            if native_collapsed_candidate_captured["count"] == 1:
+                return NativeProviderCollapsedCandidateSmokeResponse({
+                    "candidates": {
+                        "content": {
+                            "parts": [
+                                {"text": "native collapsed candidate smoke token=native-collapsed-candidate-secret"},
+                                {
+                                    "functionCall": {
+                                        "toolCallId": "collapsed_candidate_object_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-candidate-object-smoke", "value": "single candidate object native tool call translated"},
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                })
+            return NativeProviderCollapsedCandidateSmokeResponse({
+                "candidate": {
+                    "content": {
+                        "parts": {
+                            "functionCall": {
+                                "functionCallId": "collapsed_candidate_singular_memory",
+                                "name": "remember",
+                                "parameters": {"key": "native-candidate-singular-smoke", "value": "candidate singular wrapper native tool call translated"},
+                            }
+                        }
+                    }
+                }
+            })
+
+        native_collapsed_candidate_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-collapsed-candidate.db"),
+                session_name="native-provider-collapsed-candidate-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-collapsed-candidate-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_collapsed_candidate_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_collapsed_candidate_urlopen
+            native_collapsed_candidate_plan = native_collapsed_candidate_runtime.handle_message('/auto model=true prompt="native collapsed candidate smoke token=native-collapsed-candidate-secret"')
+            native_collapsed_candidate_plan_payload = json.loads(native_collapsed_candidate_plan.split("\n", 1)[1])
+            native_collapsed_candidate_apply = native_collapsed_candidate_runtime.handle_message('/auto apply=true model=true prompt="native singular candidate smoke token=native-collapsed-candidate-secret"')
+            native_collapsed_candidate_apply_payload = json.loads(native_collapsed_candidate_apply.split("\n", 1)[1])
+            native_collapsed_candidate_recall = native_collapsed_candidate_runtime.handle_message('/recall query=native-candidate-singular-smoke')
+            write("native-provider-collapsed-candidate-wrappers.json", json.dumps({
+                "plan": native_collapsed_candidate_plan_payload,
+                "apply": native_collapsed_candidate_apply_payload,
+                "captured": native_collapsed_candidate_captured,
+                "recall": native_collapsed_candidate_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_collapsed_candidate_original_urlopen
+            native_collapsed_candidate_runtime.close()
+        native_collapsed_candidate_calls = native_collapsed_candidate_plan_payload.get("tool_calls", []) if isinstance(native_collapsed_candidate_plan_payload.get("tool_calls"), list) else []
+        native_collapsed_candidate_metadata = native_collapsed_candidate_plan_payload.get("metadata", {}) if isinstance(native_collapsed_candidate_plan_payload.get("metadata"), dict) else {}
+        native_collapsed_candidate_ledger = native_collapsed_candidate_apply_payload.get("execution_ledger", []) if isinstance(native_collapsed_candidate_apply_payload.get("execution_ledger"), list) else []
+        checks["native_provider_collapsed_candidate_wrapper_ok"] = (
+            native_collapsed_candidate_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_collapsed_candidate_calls] == ["remember"]
+            and native_collapsed_candidate_calls[0].get("args", {}).get("key") == "native-candidate-object-smoke"
+            and native_collapsed_candidate_calls[0].get("metadata", {}).get("provider_tool_call_id") == "collapsed_candidate_object_memory"
+            and native_collapsed_candidate_metadata.get("native_tool_call_count") == 1
+            and [item.get("result", {}).get("status") for item in native_collapsed_candidate_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("provider_tool_call_id") for item in native_collapsed_candidate_ledger] == ["collapsed_candidate_singular_memory"]
+            and native_collapsed_candidate_ledger[0].get("native_tool_call_source") == "native provider candidate functionCall"
+            and native_status_milestone_contract.get("single_candidate_object_translation") is True
+            and native_status_milestone_contract.get("candidate_singular_wrapper_translation") is True
+            and "single_candidate_object" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate_singular_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate singular wrapper native tool call translated" in native_collapsed_candidate_recall
+            and native_collapsed_candidate_captured.get("tool_choices") == ["auto", "auto"]
+            and native_collapsed_candidate_captured.get("tool_count", 0) > 0
+            and "native-collapsed-candidate-secret" not in native_collapsed_candidate_plan + native_collapsed_candidate_apply + native_collapsed_candidate_recall + json.dumps(native_collapsed_candidate_plan_payload) + json.dumps(native_collapsed_candidate_apply_payload)
+        )
         native_hosted_marker = "NATIVE_HOSTED_TOOL_INPUT_SHOULD_NOT_SURFACE_SMOKE"
         native_hosted_captured = {}
 
@@ -9365,6 +9468,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_candidate_function_call_ok",
             "native_provider_single_candidate_part_function_call_ok",
             "native_provider_candidate_part_call_id_ok",
+            "native_provider_collapsed_candidate_wrapper_ok",
             "native_provider_hosted_tool_call_reject_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",

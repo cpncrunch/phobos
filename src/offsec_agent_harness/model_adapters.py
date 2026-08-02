@@ -858,8 +858,8 @@ def _gemini_stream_events_to_message(raw: Any) -> dict[str, Any]:
         event_data = event.get("data") if isinstance(event.get("data"), dict) else event
         if not isinstance(event_data, dict):
             continue
-        candidates = event_data.get("candidates")
-        if not isinstance(candidates, list):
+        candidates = _candidate_items(event_data)
+        if not candidates:
             continue
         saw_gemini_stream = True
         first = next((candidate for candidate in candidates if isinstance(candidate, dict)), None)
@@ -1816,12 +1816,30 @@ def _root_messages_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _candidate_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return Gemini-style candidate objects from plural or collapsed wrappers."""
+
+    if not isinstance(raw, dict):
+        return []
+    candidates = raw.get("candidates")
+    if isinstance(candidates, dict):
+        return [candidates]
+    if isinstance(candidates, list):
+        return [candidate for candidate in candidates if isinstance(candidate, dict)]
+    candidate = raw.get("candidate")
+    if isinstance(candidate, dict):
+        return [candidate]
+    return []
+
+
 def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = "gemini.candidate") -> dict[str, Any]:
     """Normalize candidate/part native function calls into the common shape.
 
     Some OpenAI-compatible gateways front providers that expose Gemini-style
-    ``candidates[].content.parts[]`` payloads with camelCase ``functionCall``
-    entries and ``args``/``parameters`` objects instead of Chat Completions
+    ``candidates[].content.parts[]`` payloads, while lighter shims may collapse
+    that into ``candidates: {...}`` or a singular ``candidate`` object.  Normalize
+    those wrappers at the adapter boundary; camelCase ``functionCall`` entries
+    and ``args``/``parameters`` objects become inert calls instead of Chat Completions
     ``tool_calls``.  Treat them exactly like other planner proposals: translate
     only the requested registered-call shape and leave all ROE/schema/runtime
     enforcement to the Phobos runtime.  Provider-side ``functionResponse``
@@ -1831,12 +1849,10 @@ def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = 
 
     if not isinstance(raw, dict):
         return {}
-    candidates = raw.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
+    candidates = _candidate_items(raw)
+    if not candidates:
         return {}
     first = candidates[0]
-    if not isinstance(first, dict):
-        return {}
     content = first.get("content") if isinstance(first.get("content"), dict) else {}
     parts = content.get("parts") if isinstance(content, dict) else None
     if isinstance(parts, dict):

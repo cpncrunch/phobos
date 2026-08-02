@@ -8341,6 +8341,105 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_candidate_collapsed_wrappers_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Collapsed Candidate Wrappers",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            response_counter = {"count": 0}
+
+            class FakeCollapsedCandidateHTTPResponse:
+                def __init__(self, payload: dict):
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                response_counter["count"] += 1
+                if response_counter["count"] == 1:
+                    return FakeCollapsedCandidateHTTPResponse({
+                        "candidates": {
+                            "content": {
+                                "parts": [
+                                    {"text": "collapsed candidate object token=collapsed-candidate-secret"},
+                                    {
+                                        "functionCall": {
+                                            "toolCallId": "candidate_object_memory",
+                                            "name": "remember",
+                                            "args": {"key": "native-candidate-object", "value": "single candidate object accepted"},
+                                        }
+                                    },
+                                ]
+                            }
+                        }
+                    })
+                return FakeCollapsedCandidateHTTPResponse({
+                    "candidate": {
+                        "content": {
+                            "parts": {
+                                "functionCall": {
+                                    "functionCallId": "candidate_singular_memory",
+                                    "name": "remember",
+                                    "parameters": {"key": "native-candidate-singular", "value": "candidate singular wrapper accepted"},
+                                }
+                            }
+                        }
+                    }
+                })
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-collapsed-candidate-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-collapsed-candidate", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native collapsed candidate wrapper token=collapsed-candidate-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-candidate-object")
+                    self.assertIn("native provider candidate functionCall", payload["tool_calls"][0].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0].get("metadata", {}).get("provider_tool_call_id"), "candidate_object_memory")
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertNotIn("collapsed-candidate-secret", planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native singular candidate wrapper token=collapsed-candidate-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["candidate_singular_memory"])
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native provider candidate functionCall")
+                recall = runtime.handle_message('/recall query=native-candidate-singular')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("candidate singular wrapper accepted", recall)
+                self.assertIn("single_candidate_object", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("candidate_singular_wrapper", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("single_candidate_object_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("candidate_singular_wrapper_translation"), status)
+                self.assertEqual([payload.get("tool_choice") for payload in captured_payloads], ["auto", "auto"])
+                self.assertNotIn("collapsed-candidate-secret", applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_root_message_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
