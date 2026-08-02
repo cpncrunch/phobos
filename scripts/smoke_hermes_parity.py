@@ -5585,6 +5585,99 @@ def main(argv: list[str] | None = None) -> int:
             and "native-anthropic-secret" not in native_anthropic_outputs
         )
 
+        native_anthropic_alias_result_marker = "NATIVE_ANTHROPIC_TOOLUSE_ALIAS_RESULT_SHOULD_NOT_SURFACE"
+        native_anthropic_alias_captured = {}
+
+        class NativeAnthropicToolUseAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "type": "message",
+                    "content": [
+                        {"type": "text", "text": "native Anthropic toolUse alias smoke token=native-anthropic-tooluse-secret"},
+                        {
+                            "type": "toolUse",
+                            "toolUseId": "anthropic_tooluse_alias_memory",
+                            "toolName": "remember",
+                            "inputJson": {"key": "native-anthropic-tooluse-alias-smoke", "value": "Anthropic Messages toolUse alias native tool call translated"},
+                        },
+                        {
+                            "type": "tool_use",
+                            "toolUse": {
+                                "toolUseId": "anthropic_tooluse_alias_tasks",
+                                "toolName": "list_tasks",
+                                "inputJson": {"status": "all", "limit": 1},
+                            },
+                        },
+                        {"type": "toolResult", "toolUseId": "anthropic_tooluse_alias_result", "content": native_anthropic_alias_result_marker + " token=native-anthropic-tooluse-secret"},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_anthropic_alias_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_anthropic_alias_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_anthropic_alias_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeAnthropicToolUseAliasSmokeResponse()
+
+        native_anthropic_alias_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-anthropic-tooluse-alias.db"),
+                session_name="native-anthropic-tooluse-alias-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=AnthropicMessagesAdapter(
+                model="fake-anthropic-tooluse-alias-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_SMOKE_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_anthropic_alias_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_anthropic_alias_urlopen
+            native_anthropic_alias_plan = native_anthropic_alias_runtime.handle_message('/auto model=true prompt="native Anthropic toolUse alias smoke token=native-anthropic-tooluse-secret"')
+            native_anthropic_alias_plan_payload = json.loads(native_anthropic_alias_plan.split("\n", 1)[1])
+            native_anthropic_alias_apply = native_anthropic_alias_runtime.handle_message('/auto apply=true model=true prompt="native Anthropic toolUse alias smoke token=native-anthropic-tooluse-secret"')
+            native_anthropic_alias_apply_payload = json.loads(native_anthropic_alias_apply.split("\n", 1)[1])
+            native_anthropic_alias_recall = native_anthropic_alias_runtime.handle_message('/recall query=native-anthropic-tooluse-alias-smoke')
+            write("native-anthropic-tooluse-alias-tool-calls.json", json.dumps({
+                "plan": native_anthropic_alias_plan_payload,
+                "apply": native_anthropic_alias_apply_payload,
+                "captured": native_anthropic_alias_captured,
+                "recall": native_anthropic_alias_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_anthropic_alias_original_urlopen
+            native_anthropic_alias_runtime.close()
+        native_anthropic_alias_calls = native_anthropic_alias_plan_payload.get("tool_calls", []) if isinstance(native_anthropic_alias_plan_payload.get("tool_calls"), list) else []
+        native_anthropic_alias_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_anthropic_alias_calls]
+        native_anthropic_alias_ledger = native_anthropic_alias_apply_payload.get("execution_ledger", []) if isinstance(native_anthropic_alias_apply_payload.get("execution_ledger"), list) else []
+        native_anthropic_alias_outputs = native_anthropic_alias_plan + native_anthropic_alias_apply + native_anthropic_alias_recall + json.dumps(native_anthropic_alias_plan_payload) + json.dumps(native_anthropic_alias_apply_payload)
+        checks["native_anthropic_tool_use_alias_ok"] = (
+            native_anthropic_alias_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_anthropic_alias_calls] == ["remember", "list_tasks"]
+            and all("native provider anthropic messages content toolUse" in call.get("reason", "") for call in native_anthropic_alias_calls)
+            and native_anthropic_alias_calls[0].get("args", {}).get("value") == "Anthropic Messages toolUse alias native tool call translated"
+            and native_anthropic_alias_calls[1].get("args", {}).get("limit") == 1
+            and [item.get("provider_tool_call_id") for item in native_anthropic_alias_call_metadata] == ["anthropic_tooluse_alias_memory", "anthropic_tooluse_alias_tasks"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_alias_call_metadata] == ["native provider anthropic messages content toolUse", "native provider anthropic messages content toolUse"]
+            and [item.get("provider_tool_call_id") for item in native_anthropic_alias_ledger] == ["anthropic_tooluse_alias_memory", "anthropic_tooluse_alias_tasks"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_alias_ledger] == ["native provider anthropic messages content toolUse", "native provider anthropic messages content toolUse"]
+            and [item.get("result", {}).get("status") for item in native_anthropic_alias_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("anthropic_messages_tool_use_alias_translation") is True
+            and "anthropic_messages_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and native_anthropic_alias_captured.get("tool_choice") == {"type": "auto"}
+            and native_anthropic_alias_captured.get("tool_count", 0) > 0
+            and "Anthropic Messages toolUse alias native tool call translated" in native_anthropic_alias_recall
+            and native_anthropic_alias_result_marker not in native_anthropic_alias_outputs
+            and "native-anthropic-tooluse-secret" not in native_anthropic_alias_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -8335,6 +8428,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",
             "native_anthropic_adapter_ok",
+            "native_anthropic_tool_use_alias_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",

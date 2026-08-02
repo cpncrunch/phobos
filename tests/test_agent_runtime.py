@@ -3998,6 +3998,92 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_anthropic_messages_adapter_accepts_tooluse_alias_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Anthropic ToolUse Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            result_marker = "ANTHROPIC_TOOLUSE_ALIAS_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeAnthropicToolUseAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "type": "message",
+                        "content": [
+                            {"type": "text", "text": "native Anthropic toolUse alias token=anthropic-tooluse-secret"},
+                            {
+                                "type": "toolUse",
+                                "toolUseId": "anthropic_alias_memory",
+                                "toolName": "remember",
+                                "inputJson": {"key": "native-anthropic-tooluse-alias", "value": "Anthropic Messages camelCase toolUse alias translated"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "toolUse": {
+                                    "toolUseId": "anthropic_nested_tasks",
+                                    "toolName": "list_tasks",
+                                    "inputJson": {"status": "all", "limit": 1},
+                                },
+                            },
+                            {"type": "toolResult", "toolUseId": "anthropic_alias_result", "content": result_marker + " token=anthropic-tooluse-secret"},
+                        ],
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                return FakeAnthropicToolUseAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-anthropic-tooluse-alias-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=AnthropicMessagesAdapter(
+                    model="fake-anthropic-tooluse-alias-model",
+                    base_url="http://127.0.0.1:9/v1",
+                    key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+                ),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Anthropic toolUse alias token=anthropic-tooluse-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Anthropic toolUse alias token=anthropic-tooluse-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                recall = runtime.handle_message('/recall query=native-anthropic-tooluse-alias')
+                calls = plan_payload.get("tool_calls", [])
+                call_metadata = [call.get("metadata", {}) for call in calls]
+                apply_ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call.get("tool") for call in calls], ["remember", "list_tasks"])
+                self.assertEqual(calls[0].get("args", {}).get("value"), "Anthropic Messages camelCase toolUse alias translated")
+                self.assertEqual(calls[1].get("args", {}).get("limit"), 1)
+                self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["anthropic_alias_memory", "anthropic_nested_tasks"])
+                self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider anthropic messages content toolUse", "native provider anthropic messages content toolUse"])
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["anthropic_alias_memory", "anthropic_nested_tasks"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider anthropic messages content toolUse", "native provider anthropic messages content toolUse"])
+                self.assertEqual([item.get("result", {}).get("status") for item in apply_payload.get("results", [])], ["ok", "ok"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("anthropic_messages_tool_use_alias_translation"), status)
+                self.assertIn("anthropic_messages_toolUse", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("Anthropic Messages camelCase toolUse alias translated", recall)
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("anthropic-tooluse-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
     def test_openai_native_tool_call_edge_cases_keep_rejected_calls_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
