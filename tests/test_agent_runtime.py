@@ -3026,6 +3026,90 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_native_provider_function_call_id_aliases_preserve_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Provider Function Call ID Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+
+            class FakeFunctionCallIdAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "native provider function-call-id aliases token=function-call-id-secret",
+                                    "tool_calls": [
+                                        {
+                                            "function_call_id": "function_alias_memory",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps({"key": "native-function-call-id-alias", "value": "snake function_call_id alias accepted"}),
+                                            },
+                                        },
+                                        {
+                                            "functionCallId": "functionAliasTasks",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "list_tasks",
+                                                "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                return FakeFunctionCallIdAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-function-call-id-aliases",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-function-call-id-aliases", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native function call id aliases token=function-call-id-secret"')
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native function call id aliases token=function-call-id-secret"')
+                payload = json.loads(planned.split("\n", 1)[1])
+                apply_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual(payload.get("mode"), "plan_only")
+                self.assertEqual([call.get("tool") for call in payload.get("tool_calls", [])], ["remember", "list_tasks"])
+                call_metadata = [call.get("metadata", {}) for call in payload.get("tool_calls", [])]
+                self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["function_alias_memory", "functionAliasTasks"])
+                self.assertTrue(all(item.get("native_tool_call_source") == "native provider tool_call" for item in call_metadata))
+                ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["function_alias_memory", "functionAliasTasks"])
+                self.assertEqual([item.get("result", {}).get("status") for item in apply_payload.get("results", [])], ["ok", "ok"])
+                recall = runtime.handle_message('/recall query=native-function-call-id-alias')
+                self.assertIn("snake function_call_id alias accepted", recall)
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("provider_function_call_id_alias_translation"), status)
+                self.assertIn("function_call_id", status.get("provider_tool_call_id_aliases", []))
+                self.assertIn("functionCallId", status.get("provider_tool_call_id_aliases", []))
+                combined = planned + applied + recall + json.dumps(payload) + json.dumps(apply_payload) + json.dumps(status)
+                self.assertNotIn("function-call-id-secret", combined)
+            finally:
+                runtime.close()
+
     def test_model_plan_rejects_duplicate_provider_call_ids_before_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3530,7 +3614,7 @@ class AgentRuntimeTests(unittest.TestCase):
                                 "item": {
                                     "id": "sse_alias_dry_item",
                                     "type": "function_call",
-                                    "call_id": "responses_sse_alias_dry",
+                                    "function_call_id": "responses_sse_alias_dry",
                                     "name": "run_command",
                                     "arguments": "",
                                 },
@@ -3538,7 +3622,7 @@ class AgentRuntimeTests(unittest.TestCase):
                         ),
                         {
                             "type": "response.function_call_arguments.done",
-                            "call_id": "responses_sse_alias_dry",
+                            "functionCallId": "responses_sse_alias_dry",
                             "arguments": run_args,
                         },
                     ]

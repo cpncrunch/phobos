@@ -805,12 +805,14 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
                 bucket = buckets.get(key)
                 if bucket is None:
                     bucket = dict(item, _provider_shape=str(item.get("_provider_shape") or "responses.stream.output"))
-                    if bucket.get("call_id") not in (None, "") or bucket.get("callId") not in (None, ""):
+                    if any(bucket.get(alias) not in (None, "") for alias in ("call_id", "callId", "tool_call_id", "toolCallId", "tool_use_id", "toolUseId", "function_call_id", "functionCallId")):
                         bucket.pop("id", None)
                     buckets[key] = bucket
                     output_items.append(bucket)
                 else:
                     _merge_native_tool_call_fragment(bucket, item)
+                    if any(bucket.get(alias) not in (None, "") for alias in ("call_id", "callId", "tool_call_id", "toolCallId", "tool_use_id", "toolUseId", "function_call_id", "functionCallId")):
+                        bucket.pop("id", None)
                 continue
         if "function_call_arguments" in event_type or "tool_call_arguments" in event_type:
             key = resolve_bucket_key(event, item if isinstance(item, dict) else None, fallback=f"position:{position}")
@@ -822,7 +824,7 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
             name = _responses_stream_event_value(event, "name", "function_name", "functionName", "toolName")
             if isinstance(name, str) and name.strip() and not bucket.get("name"):
                 bucket["name"] = name
-            call_id = _responses_stream_event_value(event, "call_id", "tool_call_id", "toolCallId", "callId")
+            call_id = _responses_stream_event_value(event, "call_id", "tool_call_id", "function_call_id", "toolCallId", "functionCallId", "callId")
             if call_id not in (None, "") and not bucket.get("call_id"):
                 bucket["call_id"] = call_id
             if event_type.endswith(".delta"):
@@ -985,10 +987,19 @@ def _responses_stream_item_keys(event: dict[str, Any], item: dict[str, Any] | No
 
     candidates = [
         _responses_stream_event_value(event, "item_id", "itemId", "output_item_id", "outputItemId"),
-        _responses_stream_event_value(event, "call_id", "callId", "tool_call_id", "toolCallId"),
+        _responses_stream_event_value(event, "call_id", "callId", "tool_call_id", "toolCallId", "function_call_id", "functionCallId"),
     ]
     if isinstance(item, dict):
-        candidates.extend([item.get("id"), item.get("item_id"), item.get("call_id"), item.get("callId"), item.get("tool_call_id"), item.get("toolCallId")])
+        candidates.extend([
+            item.get("id"),
+            item.get("item_id"),
+            item.get("call_id"),
+            item.get("callId"),
+            item.get("tool_call_id"),
+            item.get("toolCallId"),
+            item.get("function_call_id"),
+            item.get("functionCallId"),
+        ])
     output_index = _responses_stream_event_value(event, "output_index", "outputIndex", "index")
     if output_index not in (None, ""):
         candidates.append(f"index:{output_index}")
@@ -2464,15 +2475,16 @@ def _native_call_id(*items: Any) -> str:
 
     Provider bridges disagree on where they place the opaque correlation id:
     OpenAI-style content blocks usually use ``id``, Responses-style blocks often
-    use ``call_id``, some shims use ``tool_call_id``, and Anthropic-compatible
-    bridges may use ``tool_use_id``.  Preserve the bounded id as provenance only;
-    runtime schema/ROE checks still decide whether any call can be applied.
+    use ``call_id``, some shims use ``tool_call_id``/``function_call_id``, and
+    Anthropic-compatible bridges may use ``tool_use_id``.  Preserve the bounded
+    id as provenance only; runtime schema/ROE checks still decide whether any
+    call can be applied.
     """
 
     for item in items:
         if not isinstance(item, dict):
             continue
-        for key in ("id", "call_id", "tool_call_id", "tool_use_id", "callId", "toolCallId", "toolUseId"):
+        for key in ("id", "call_id", "tool_call_id", "tool_use_id", "function_call_id", "callId", "toolCallId", "toolUseId", "functionCallId"):
             value = item.get(key)
             if value not in (None, ""):
                 return _sanitize_native_call_id(value)

@@ -2160,6 +2160,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
+            and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
             and native_status_milestone_contract.get("per_step_model_tool_call_budget") is True
             and native_status_data.get("model_planning_enabled") is True
             and native_status_data.get("wrapped_json_plan_extraction") is True
@@ -2255,6 +2256,8 @@ def main(argv: list[str] | None = None) -> int:
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "toolCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "toolUseId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "function_call_id" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "functionCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "arguments_json" in native_status_data.get("provider_argument_aliases", [])
             and "inputJson" in native_status_data.get("provider_argument_aliases", [])
             and "toolName" in native_status_data.get("provider_tool_name_aliases", [])
@@ -2622,6 +2625,87 @@ def main(argv: list[str] | None = None) -> int:
             and native_call_id_status_data.get("milestone_contract", {}).get("provider_call_id_redaction_bounds") is True
             and "native-call-id-smoke-secret" not in native_call_id_blob
             and ("I" * 210) not in native_call_id_blob
+        )
+
+        class NativeFunctionCallIdAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "native function-call-id alias smoke token=native-function-call-id-secret",
+                                "tool_calls": [
+                                    {
+                                        "function_call_id": "function_alias_memory_smoke",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-function-call-id-smoke", "value": "function_call_id alias native tool call translated"}),
+                                        },
+                                    },
+                                    {
+                                        "functionCallId": "functionAliasTasksSmoke",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_tasks",
+                                            "arguments": json.dumps({"status": "all", "limit": "1"}),
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_function_call_id_urlopen(request, timeout=0):
+            return NativeFunctionCallIdAliasSmokeResponse()
+
+        native_function_call_id_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-function-call-id-alias.db"),
+                session_name="native-provider-function-call-id-alias-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-function-call-id-alias", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_function_call_id_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_function_call_id_urlopen
+            native_function_call_id_plan = native_function_call_id_runtime.handle_message('/auto model=true prompt="native function-call-id alias smoke token=native-function-call-id-secret"')
+            native_function_call_id_payload = json.loads(native_function_call_id_plan.split("\n", 1)[1])
+            native_function_call_id_apply = native_function_call_id_runtime.handle_message('/auto apply=true model=true prompt="native function-call-id alias smoke token=native-function-call-id-secret"')
+            native_function_call_id_apply_payload = json.loads(native_function_call_id_apply.split("\n", 1)[1])
+            native_function_call_id_recall = native_function_call_id_runtime.handle_message('/recall query=native-function-call-id-smoke')
+            write("native-provider-function-call-id-alias.json", json.dumps({
+                "plan": native_function_call_id_payload,
+                "apply": native_function_call_id_apply_payload,
+                "recall": native_function_call_id_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_function_call_id_original_urlopen
+            native_function_call_id_runtime.close()
+        native_function_call_id_calls = native_function_call_id_payload.get("tool_calls", []) if isinstance(native_function_call_id_payload.get("tool_calls"), list) else []
+        native_function_call_id_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_function_call_id_calls]
+        native_function_call_id_ledger = native_function_call_id_apply_payload.get("execution_ledger", []) if isinstance(native_function_call_id_apply_payload.get("execution_ledger"), list) else []
+        native_function_call_id_blob = native_function_call_id_plan + native_function_call_id_apply + native_function_call_id_recall + json.dumps(native_function_call_id_payload) + json.dumps(native_function_call_id_apply_payload)
+        checks["native_provider_function_call_id_alias_ok"] = (
+            native_function_call_id_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_function_call_id_calls] == ["remember", "list_tasks"]
+            and [item.get("provider_tool_call_id") for item in native_function_call_id_metadata] == ["function_alias_memory_smoke", "functionAliasTasksSmoke"]
+            and [item.get("provider_tool_call_id") for item in native_function_call_id_ledger] == ["function_alias_memory_smoke", "functionAliasTasksSmoke"]
+            and [item.get("result", {}).get("status") for item in native_function_call_id_apply_payload.get("results", [])] == ["ok", "ok"]
+            and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
+            and "function_call_id" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "functionCallId" in native_status_data.get("provider_tool_call_id_aliases", [])
+            and "function_call_id alias native tool call translated" in native_function_call_id_recall
+            and "native-function-call-id-secret" not in native_function_call_id_blob
         )
 
         native_duplicate_call_id_marker = root / "native-duplicate-call-id-should-not-run.txt"
@@ -8030,10 +8114,10 @@ def main(argv: list[str] | None = None) -> int:
                         "response.output_item.added",
                         {
                             "type": "response.output_item.added",
-                            "item": {"id": "sse_smoke_dry_item", "type": "function_call", "call_id": "responses_sse_smoke_dry", "name": "run_command", "arguments": ""},
+                            "item": {"id": "sse_smoke_dry_item", "type": "function_call", "function_call_id": "responses_sse_smoke_dry", "name": "run_command", "arguments": ""},
                         },
                     ),
-                    ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "call_id": "responses_sse_smoke_dry", "arguments": run_args}),
+                    ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "functionCallId": "responses_sse_smoke_dry", "arguments": run_args}),
                     ("response.output_item.done", {"type": "response.output_item.done", "item": {"id": "sse_smoke_result", "type": "function_call_output", "output": "RESPONSES_SSE_SMOKE_RESULT_SHOULD_NOT_SURFACE token=native-responses-sse-secret"}}),
                 ]
                 return (
@@ -8245,6 +8329,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_calls_nested_aliases_ok",
             "native_tool_call_provider_call_id_provenance_ok",
             "native_provider_call_id_redaction_bounds_ok",
+            "native_provider_function_call_id_alias_ok",
             "native_provider_call_id_uniqueness_ok",
             "native_tool_call_transcript_provenance_ok",
             "native_provider_single_top_level_tool_call_ok",
