@@ -2154,6 +2154,11 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_contents_wrapper_translation") is True
             and native_status_milestone_contract.get("root_predictions_wrapper_translation") is True
             and native_status_milestone_contract.get("root_outputs_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_outputs_direct_tool_call_translation") is True
+            and native_status_milestone_contract.get("root_output_items_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_output_item_singular_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_items_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_item_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_response_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_result_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_data_envelope_wrapper_translation") is True
@@ -2250,6 +2255,13 @@ def main(argv: list[str] | None = None) -> int:
             and "root_contents_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_predictions_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_outputs_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_outputs_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_output_items_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_output_item_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_items_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_items_function" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_item_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_item_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "provider_response_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "provider_result_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "provider_data_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -5476,6 +5488,232 @@ def main(argv: list[str] | None = None) -> int:
             and native_root_output_item_singular_captured.get("dry", {}).get("tool_count", 0) > 0
             and not native_root_output_item_singular_marker.exists()
             and "native-root-output-item-singular-secret" not in native_root_output_item_singular_blob
+        )
+
+        native_root_items_captured = {}
+        native_root_items_marker = root / "native-root-items-should-not-run.txt"
+        native_root_items_result_marker = "ROOT_ITEMS_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootItemsSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "items": [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "root_items_old_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-items-old-smoke", "value": "old root items call should not dispatch"}),
+                                    },
+                                }
+                            ],
+                        },
+                        {"role": "tool", "content": native_root_items_result_marker + " token=native-root-items-secret"},
+                        {
+                            "type": "function_call",
+                            "call_id": "root_items_memory",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-root-items-smoke", "value": "root items function_call native tool call translated"}),
+                        },
+                        {
+                            "type": "function",
+                            "id": "root_items_dry",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "root items native dry-run smoke",
+                                    "command": f"printf native-root-items > {native_root_items_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                        },
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_root_items_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_items_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_items_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootItemsSmokeResponse()
+
+        native_root_items_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-items.db"),
+                session_name="native-provider-root-items-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-items-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_items_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_items_urlopen
+            native_root_items_plan = native_root_items_runtime.handle_message('/auto model=true prompt="native root items smoke token=native-root-items-secret"')
+            native_root_items_plan_payload = json.loads(native_root_items_plan.split("\n", 1)[1])
+            native_root_items_apply = native_root_items_runtime.handle_message('/auto apply=true model=true prompt="native root items smoke token=native-root-items-secret"')
+            native_root_items_apply_payload = json.loads(native_root_items_apply.split("\n", 1)[1])
+            native_root_items_recall = native_root_items_runtime.handle_message('/recall query=native-root-items-smoke')
+            write("native-provider-root-items-function-calls.json", json.dumps({
+                "plan": native_root_items_plan_payload,
+                "apply": native_root_items_apply_payload,
+                "captured": native_root_items_captured,
+                "recall": native_root_items_recall,
+                "marker_exists": native_root_items_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_items_original_urlopen
+            native_root_items_runtime.close()
+        native_root_items_calls = native_root_items_plan_payload.get("tool_calls", []) if isinstance(native_root_items_plan_payload.get("tool_calls"), list) else []
+        native_root_items_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_items_calls]
+        native_root_items_ledger = native_root_items_apply_payload.get("execution_ledger", []) if isinstance(native_root_items_apply_payload.get("execution_ledger"), list) else []
+        native_root_items_blob = native_root_items_plan + native_root_items_apply + native_root_items_recall + json.dumps(native_root_items_plan_payload) + json.dumps(native_root_items_apply_payload)
+        checks["native_provider_root_items_wrapper_ok"] = (
+            native_root_items_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_items_calls] == ["remember", "run_command"]
+            and [item.get("provider_tool_call_id") for item in native_root_items_call_metadata] == ["root_items_memory", "root_items_dry"]
+            and [item.get("native_tool_call_source") for item in native_root_items_call_metadata] == ["native provider root items function_call", "native provider root items function"]
+            and native_root_items_calls[0].get("args", {}).get("key") == "native-root-items-smoke"
+            and native_root_items_calls[1].get("args", {}).get("execute") is False
+            and [item.get("result", {}).get("status") for item in native_root_items_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_items_ledger] == ["root_items_memory", "root_items_dry"]
+            and native_root_items_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_items_wrapper_translation") is True
+            and "root_items_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_items_function" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root items function_call native tool call translated" in native_root_items_recall
+            and "old root items call should not dispatch" not in native_root_items_recall
+            and native_root_items_captured.get("tool_choice") == "auto"
+            and native_root_items_captured.get("tool_count", 0) > 0
+            and not native_root_items_marker.exists()
+            and native_root_items_result_marker not in native_root_items_blob
+            and "native-root-items-secret" not in native_root_items_blob
+        )
+
+        native_root_item_singular_captured = {"memory": {}, "dry": {}}
+        native_root_item_singular_marker = root / "native-root-item-singular-should-not-run.txt"
+
+        class NativeOpenAIRootItemSingularSmokeResponse:
+            def __init__(self, kind: str):
+                self.kind = kind
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                if self.kind == "dry":
+                    return json.dumps({
+                        "item": {
+                            "type": "function",
+                            "id": "root_item_dry",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "root item singular native dry-run smoke",
+                                    "command": f"printf native-root-item-singular > {native_root_item_singular_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                        }
+                    }).encode("utf-8")
+                return json.dumps({
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "root_item_memory",
+                        "name": "remember",
+                        "arguments": json.dumps({"key": "native-root-item-singular-smoke", "value": "root item singular function_call native tool call translated"}),
+                    }
+                }).encode("utf-8")
+
+        def fake_native_root_item_singular_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            payload_blob = json.dumps(payload)
+            kind = "dry" if "native root item singular dry" in payload_blob else "memory"
+            native_root_item_singular_captured[kind] = {
+                "tool_count": len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0,
+                "tool_choice": payload.get("tool_choice"),
+            }
+            return NativeOpenAIRootItemSingularSmokeResponse(kind)
+
+        native_root_item_singular_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-item-singular.db"),
+                session_name="native-provider-root-item-singular-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-item-singular-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_item_singular_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_item_singular_urlopen
+            native_root_item_singular_plan = native_root_item_singular_runtime.handle_message('/auto model=true prompt="native root item singular smoke token=native-root-item-singular-secret"')
+            native_root_item_singular_plan_payload = json.loads(native_root_item_singular_plan.split("\n", 1)[1])
+            native_root_item_singular_apply = native_root_item_singular_runtime.handle_message('/auto apply=true model=true prompt="native root item singular smoke token=native-root-item-singular-secret"')
+            native_root_item_singular_apply_payload = json.loads(native_root_item_singular_apply.split("\n", 1)[1])
+            native_root_item_singular_dry_plan = native_root_item_singular_runtime.handle_message('/auto model=true prompt="native root item singular dry token=native-root-item-singular-secret"')
+            native_root_item_singular_dry_plan_payload = json.loads(native_root_item_singular_dry_plan.split("\n", 1)[1])
+            native_root_item_singular_dry_apply = native_root_item_singular_runtime.handle_message('/auto apply=true model=true prompt="native root item singular dry token=native-root-item-singular-secret"')
+            native_root_item_singular_dry_apply_payload = json.loads(native_root_item_singular_dry_apply.split("\n", 1)[1])
+            native_root_item_singular_recall = native_root_item_singular_runtime.handle_message('/recall query=native-root-item-singular-smoke')
+            write("native-provider-root-item-singular-wrapper.json", json.dumps({
+                "plan": native_root_item_singular_plan_payload,
+                "apply": native_root_item_singular_apply_payload,
+                "dry_plan": native_root_item_singular_dry_plan_payload,
+                "dry_apply": native_root_item_singular_dry_apply_payload,
+                "captured": native_root_item_singular_captured,
+                "recall": native_root_item_singular_recall,
+                "marker_exists": native_root_item_singular_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_item_singular_original_urlopen
+            native_root_item_singular_runtime.close()
+        native_root_item_singular_calls = native_root_item_singular_plan_payload.get("tool_calls", []) if isinstance(native_root_item_singular_plan_payload.get("tool_calls"), list) else []
+        native_root_item_singular_dry_calls = native_root_item_singular_dry_plan_payload.get("tool_calls", []) if isinstance(native_root_item_singular_dry_plan_payload.get("tool_calls"), list) else []
+        native_root_item_singular_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_item_singular_calls]
+        native_root_item_singular_dry_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_item_singular_dry_calls]
+        native_root_item_singular_ledger = native_root_item_singular_apply_payload.get("execution_ledger", []) if isinstance(native_root_item_singular_apply_payload.get("execution_ledger"), list) else []
+        native_root_item_singular_dry_ledger = native_root_item_singular_dry_apply_payload.get("execution_ledger", []) if isinstance(native_root_item_singular_dry_apply_payload.get("execution_ledger"), list) else []
+        native_root_item_singular_blob = native_root_item_singular_plan + native_root_item_singular_apply + native_root_item_singular_dry_plan + native_root_item_singular_dry_apply + native_root_item_singular_recall + json.dumps(native_root_item_singular_plan_payload) + json.dumps(native_root_item_singular_dry_plan_payload)
+        checks["native_provider_root_item_singular_wrapper_ok"] = (
+            native_root_item_singular_plan_payload.get("mode") == "plan_only"
+            and native_root_item_singular_dry_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_item_singular_calls] == ["remember"]
+            and [call.get("tool") for call in native_root_item_singular_dry_calls] == ["run_command"]
+            and [item.get("provider_tool_call_id") for item in native_root_item_singular_call_metadata] == ["root_item_memory"]
+            and [item.get("provider_tool_call_id") for item in native_root_item_singular_dry_call_metadata] == ["root_item_dry"]
+            and [item.get("native_tool_call_source") for item in native_root_item_singular_call_metadata] == ["native provider root item function_call"]
+            and [item.get("native_tool_call_source") for item in native_root_item_singular_dry_call_metadata] == ["native provider root item function"]
+            and native_root_item_singular_calls[0].get("args", {}).get("key") == "native-root-item-singular-smoke"
+            and native_root_item_singular_dry_calls[0].get("args", {}).get("execute") is False
+            and [item.get("result", {}).get("status") for item in native_root_item_singular_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("result", {}).get("status") for item in native_root_item_singular_dry_apply_payload.get("results", [])] == ["dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_item_singular_ledger] == ["root_item_memory"]
+            and [item.get("provider_tool_call_id") for item in native_root_item_singular_dry_ledger] == ["root_item_dry"]
+            and native_root_item_singular_dry_ledger[0].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_item_singular_wrapper_translation") is True
+            and "root_item_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_item_function" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root item singular function_call native tool call translated" in native_root_item_singular_recall
+            and native_root_item_singular_captured.get("memory", {}).get("tool_choice") == "auto"
+            and native_root_item_singular_captured.get("dry", {}).get("tool_choice") == "auto"
+            and native_root_item_singular_captured.get("memory", {}).get("tool_count", 0) > 0
+            and native_root_item_singular_captured.get("dry", {}).get("tool_count", 0) > 0
+            and not native_root_item_singular_marker.exists()
+            and "native-root-item-singular-secret" not in native_root_item_singular_blob
         )
 
         native_collapsed_choice_captured = {"wrappers": []}
@@ -11017,6 +11255,8 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_root_outputs_direct_function_call_ok",
             "native_provider_root_output_items_wrapper_ok",
             "native_provider_root_output_item_singular_wrapper_ok",
+            "native_provider_root_items_wrapper_ok",
+            "native_provider_root_item_singular_wrapper_ok",
             "native_provider_root_message_alias_matrix_ok",
             "native_provider_root_function_call_ok",
             "native_provider_tool_call_edge_cases_ok",

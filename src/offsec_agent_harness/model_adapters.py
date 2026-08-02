@@ -2081,14 +2081,16 @@ def _root_output_wrapper_items(raw: dict[str, Any]) -> tuple[str, list[dict[str,
 
     OpenAI Responses uses ``output[]`` while some OpenAI-compatible routers and
     trace gateways expose pluralized ``outputs[]`` or raw item captures as
-    ``output_items[]`` / ``outputItems[]``.  Normalize only those explicit output
-    wrappers here; the resulting tool calls still pass through Phobos runtime
+    ``output_items[]`` / ``outputItems[]``. A few router transcript APIs shorten
+    the same final provider-output capture to root ``items[]`` / ``item``.
+    Normalize only those explicit output wrappers here; the resulting tool calls
+    still pass through Phobos runtime
     schema, policy, ROE, approval, execute, transcript, and ledger boundaries.
     """
 
     if not isinstance(raw, dict):
         return "", []
-    for wrapper_key in ("outputs", "output_items", "outputItems", "output_item", "outputItem"):
+    for wrapper_key in ("outputs", "output_items", "outputItems", "output_item", "outputItem", "items", "item"):
         outputs = raw.get(wrapper_key)
         if isinstance(outputs, dict):
             return wrapper_key, [outputs]
@@ -3375,7 +3377,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.")):
+        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.", "root.items.", "root.item.")):
             wrapper_label = provider_shape.split(".", 2)[1]
             label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
@@ -3495,7 +3497,7 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.")):
+        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.", "root.items.", "root.item.")):
             wrapper_label = provider_shape.split(".", 2)[1]
             label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
