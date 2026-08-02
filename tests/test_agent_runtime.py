@@ -4084,6 +4084,103 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_anthropic_messages_adapter_accepts_sse_tool_use_fragments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Anthropic SSE ToolUse",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            dry_run_marker = tmp_path / "native-anthropic-sse-should-not-execute.txt"
+            result_marker = "ANTHROPIC_SSE_TOOL_RESULT_SHOULD_NOT_SURFACE"
+            captured_requests = []
+
+            def frame(event: str, data: dict) -> str:
+                return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+            class FakeAnthropicSSEHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    chunks = [
+                        frame("message_start", {"type": "message_start", "message": {"id": "msg_anthropic_sse", "type": "message", "role": "assistant", "content": []}}),
+                        frame("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                        frame("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "native Anthropic SSE token=anthropic-sse-secret"}}),
+                        frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                        frame("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "anthropic_sse_memory", "name": "remember", "input": {}}}),
+                        frame("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"key\":\"native-anthropic-sse\","}}),
+                        frame("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "\"value\":\"Anthropic SSE tool_use fragments translated\"}"}}),
+                        frame("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                        frame("content_block_start", {"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "anthropic_sse_dry", "name": "run_command", "input": {}}}),
+                        frame("content_block_delta", {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"target": "app.example.test", "purpose": "Anthropic SSE dry-run validation", "command": f"printf native-anthropic-sse > {dry_run_marker}", "execute": True})}}),
+                        frame("content_block_stop", {"type": "content_block_stop", "index": 2}),
+                        frame("content_block_start", {"type": "content_block_start", "index": 3, "content_block": {"type": "tool_result", "tool_use_id": "anthropic_sse_result", "content": result_marker + " token=anthropic-sse-secret"}}),
+                        frame("content_block_stop", {"type": "content_block_stop", "index": 3}),
+                        frame("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                        frame("message_stop", {"type": "message_stop"}),
+                    ]
+                    return "".join(chunks).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append({
+                    "url": request.full_url,
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "headers": dict(request.header_items()),
+                })
+                return FakeAnthropicSSEHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-anthropic-sse-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=AnthropicMessagesAdapter(
+                    model="fake-anthropic-sse-model",
+                    base_url="http://127.0.0.1:9/v1",
+                    key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+                ),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Anthropic SSE token=anthropic-sse-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Anthropic SSE token=anthropic-sse-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                recall = runtime.handle_message('/recall query=native-anthropic-sse')
+                calls = plan_payload.get("tool_calls", [])
+                call_metadata = [call.get("metadata", {}) for call in calls]
+                apply_ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call.get("tool") for call in calls], ["remember", "run_command"])
+                self.assertEqual(calls[0].get("args", {}).get("value"), "Anthropic SSE tool_use fragments translated")
+                self.assertFalse(calls[1].get("args", {}).get("execute"))
+                self.assertTrue(all("native provider anthropic messages stream content tool_use" in call.get("reason", "") for call in calls))
+                self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["anthropic_sse_memory", "anthropic_sse_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider anthropic messages stream content tool_use", "native provider anthropic messages stream content tool_use"])
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["anthropic_sse_memory", "anthropic_sse_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider anthropic messages stream content tool_use", "native provider anthropic messages stream content tool_use"])
+                self.assertEqual([item.get("result", {}).get("status") for item in apply_payload.get("results", [])], ["ok", "dry_run"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("anthropic_messages_sse_tool_use_stream_translation"), status)
+                self.assertIn("anthropic_messages_sse_tool_use", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_requests)
+                self.assertEqual(captured_requests[0]["payload"].get("tool_choice"), {"type": "auto"})
+                self.assertIn("Anthropic SSE tool_use fragments translated", recall)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("anthropic-sse-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
     def test_openai_native_tool_call_edge_cases_keep_rejected_calls_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -475,7 +475,14 @@ class AnthropicMessagesAdapter(BaseModelAdapter):
         req = urllib.request.Request(self.base_url + "/messages", data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8", errors="replace"))
+                body = response.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as exc:
+                    events = _parse_responses_sse_events(body)
+                    if events:
+                        return {"events": events, "_response_format": "anthropic_sse"}
+                    raise RuntimeError("Anthropic Messages endpoint returned neither JSON nor parseable SSE event data") from exc
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Anthropic Messages endpoint HTTP {exc.code}: {body[:500]}") from exc
@@ -642,6 +649,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     responses_stream_message = _responses_stream_events_to_message(raw)
     if responses_stream_message:
         return responses_stream_message
+    anthropic_stream_message = _anthropic_stream_events_to_message(raw)
+    if anthropic_stream_message:
+        return anthropic_stream_message
     choices = raw.get("choices") if isinstance(raw, dict) else []
     if isinstance(choices, list) and choices:
         first = choices[0]
@@ -948,6 +958,110 @@ def _parse_responses_sse_events(raw: str) -> list[dict[str, Any]]:
             event["sse_id"] = _sanitize_native_call_id(sse_id)
         events.append(event)
     return events
+
+
+def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
+    """Assemble Anthropic Messages SSE tool_use fragments into message shape.
+
+    Anthropic streaming emits ``content_block_start`` plus
+    ``content_block_delta`` frames; tool arguments arrive as
+    ``input_json_delta.partial_json`` fragments.  Assemble those fragments only
+    into inert provider-native planning proposals.  The runtime still owns tool
+    name/schema validation, runtime policy, ROE preview, approval queueing,
+    explicit execution gating, and transcript redaction before any dispatch.
+    """
+
+    events = _responses_stream_event_items(raw)
+    if not events:
+        return {}
+    blocks: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    saw_anthropic_stream = False
+
+    def block_key(event: dict[str, Any], position: int) -> str:
+        value = _responses_stream_event_value(event, "index", "content_block_index", "contentBlockIndex")
+        if isinstance(value, bool) or value in (None, ""):
+            return f"position:{position}"
+        return f"index:{value}"
+
+    def ensure_block(key: str, initial: dict[str, Any] | None = None) -> dict[str, Any]:
+        if key not in blocks:
+            block = dict(initial or {})
+            block.setdefault("type", "text")
+            block.setdefault("_provider_shape", "anthropic.messages.stream.content")
+            blocks[key] = block
+            order.append(key)
+        elif initial:
+            _merge_native_tool_call_fragment(blocks[key], initial)
+            blocks[key].setdefault("_provider_shape", "anthropic.messages.stream.content")
+        return blocks[key]
+
+    for position, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        raw_event_type = str(_responses_stream_event_value(event, "type", "event") or "").strip()
+        event_type = {
+            "messageStart": "message_start",
+            "messageDelta": "message_delta",
+            "messageStop": "message_stop",
+            "contentBlockStart": "content_block_start",
+            "contentBlockDelta": "content_block_delta",
+            "contentBlockStop": "content_block_stop",
+        }.get(raw_event_type, raw_event_type)
+        if not event_type.startswith(("message_", "content_block_")):
+            continue
+        saw_anthropic_stream = True
+        if event_type == "message_start":
+            message = _responses_stream_event_value(event, "message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict):
+                            ensure_block(f"message:{len(order)}", dict(item, _provider_shape="anthropic.messages.stream.content"))
+            continue
+        if event_type == "content_block_start":
+            content_block = _responses_stream_event_value(event, "content_block", "contentBlock", "block")
+            if isinstance(content_block, dict):
+                ensure_block(block_key(event, position), dict(content_block, _provider_shape="anthropic.messages.stream.content"))
+            continue
+        if event_type != "content_block_delta":
+            continue
+        delta = _responses_stream_event_value(event, "delta")
+        if not isinstance(delta, dict):
+            continue
+        block = ensure_block(block_key(event, position))
+        delta_type = str(delta.get("type") or "").strip()
+        text_delta = delta.get("text")
+        if delta_type == "text_delta" and isinstance(text_delta, str):
+            block["text"] = str(block.get("text") or "") + text_delta
+            block["type"] = str(block.get("type") or "text") or "text"
+            continue
+        partial = None
+        for key in ("partial_json", "partialJson", "partial", *_native_argument_delta_keys(("input", "arguments", "args", "parameters", "params"))):
+            value = delta.get(key)
+            if isinstance(value, str):
+                partial = value
+                break
+        if partial is not None:
+            block["_partial_input_json"] = str(block.get("_partial_input_json") or "") + partial
+            if str(block.get("type") or "") == "text":
+                block["type"] = "tool_use"
+
+    if not saw_anthropic_stream:
+        return {}
+    content_blocks: list[dict[str, Any]] = []
+    for key in order:
+        block = dict(blocks[key])
+        partial = block.pop("_partial_input_json", "")
+        if isinstance(partial, str) and partial:
+            try:
+                parsed = json.loads(partial)
+                block["input"] = parsed if isinstance(parsed, dict) else partial
+            except json.JSONDecodeError:
+                block["input"] = partial
+        content_blocks.append(block)
+    return {"content": content_blocks} if content_blocks else {}
 
 
 def _responses_stream_event_value(event: dict[str, Any], *keys: str) -> Any:
@@ -2112,6 +2226,8 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider content parts {native_kind}"
     if provider_shape == "anthropic.messages.content":
         return f"native provider anthropic messages content {native_kind}"
+    if provider_shape == "anthropic.messages.stream.content":
+        return f"native provider anthropic messages stream content {native_kind}"
     if provider_shape.startswith("choice."):
         return f"native provider {provider_shape.replace('.', ' ')} {native_kind}"
     return f"native content-block {native_kind}"

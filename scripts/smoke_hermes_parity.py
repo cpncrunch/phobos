@@ -2158,6 +2158,8 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("top_level_content_block_tool_call_translation") is True
             and native_status_milestone_contract.get("content_block_function_call_alias_translation") is True
             and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
+            and native_status_milestone_contract.get("anthropic_messages_tool_use_alias_translation") is True
+            and native_status_milestone_contract.get("anthropic_messages_sse_tool_use_stream_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
@@ -2251,6 +2253,7 @@ def main(argv: list[str] | None = None) -> int:
             and "message_function_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "message_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "anthropic_messages_sse_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -5678,6 +5681,101 @@ def main(argv: list[str] | None = None) -> int:
             and "native-anthropic-tooluse-secret" not in native_anthropic_alias_outputs
         )
 
+        native_anthropic_sse_marker = root / "native-anthropic-sse-should-not-run.txt"
+        native_anthropic_sse_result_marker = "NATIVE_ANTHROPIC_SSE_RESULT_SHOULD_NOT_SURFACE"
+        native_anthropic_sse_captured = {}
+
+        def native_anthropic_sse_frame(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        class NativeAnthropicSSEToolUseSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                frames = [
+                    native_anthropic_sse_frame("message_start", {"type": "message_start", "message": {"id": "msg_anthropic_sse_smoke", "type": "message", "role": "assistant", "content": []}}),
+                    native_anthropic_sse_frame("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                    native_anthropic_sse_frame("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "native Anthropic SSE smoke token=native-anthropic-sse-secret"}}),
+                    native_anthropic_sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    native_anthropic_sse_frame("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "anthropic_sse_smoke_memory", "name": "remember", "input": {}}}),
+                    native_anthropic_sse_frame("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"key\":\"native-anthropic-sse-smoke\","}}),
+                    native_anthropic_sse_frame("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "\"value\":\"Anthropic Messages SSE tool_use fragments translated\"}"}}),
+                    native_anthropic_sse_frame("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                    native_anthropic_sse_frame("content_block_start", {"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "anthropic_sse_smoke_dry", "name": "run_command", "input": {}}}),
+                    native_anthropic_sse_frame("content_block_delta", {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"target": "app.example.test", "purpose": "Anthropic SSE dry-run smoke", "command": f"printf native-anthropic-sse > {native_anthropic_sse_marker}", "execute": True})}}),
+                    native_anthropic_sse_frame("content_block_stop", {"type": "content_block_stop", "index": 2}),
+                    native_anthropic_sse_frame("content_block_start", {"type": "content_block_start", "index": 3, "content_block": {"type": "tool_result", "tool_use_id": "anthropic_sse_smoke_result", "content": native_anthropic_sse_result_marker + " token=native-anthropic-sse-secret"}}),
+                    native_anthropic_sse_frame("content_block_stop", {"type": "content_block_stop", "index": 3}),
+                    native_anthropic_sse_frame("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                    native_anthropic_sse_frame("message_stop", {"type": "message_stop"}),
+                ]
+                return "".join(frames).encode("utf-8")
+
+        def fake_native_anthropic_sse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_anthropic_sse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_anthropic_sse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeAnthropicSSEToolUseSmokeResponse()
+
+        native_anthropic_sse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-anthropic-sse-tooluse.db"),
+                session_name="native-anthropic-sse-tooluse-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=AnthropicMessagesAdapter(
+                model="fake-anthropic-sse-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_SMOKE_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_anthropic_sse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_anthropic_sse_urlopen
+            native_anthropic_sse_plan = native_anthropic_sse_runtime.handle_message('/auto model=true prompt="native Anthropic SSE smoke token=native-anthropic-sse-secret"')
+            native_anthropic_sse_plan_payload = json.loads(native_anthropic_sse_plan.split("\n", 1)[1])
+            native_anthropic_sse_apply = native_anthropic_sse_runtime.handle_message('/auto apply=true model=true prompt="native Anthropic SSE smoke token=native-anthropic-sse-secret"')
+            native_anthropic_sse_apply_payload = json.loads(native_anthropic_sse_apply.split("\n", 1)[1])
+            native_anthropic_sse_recall = native_anthropic_sse_runtime.handle_message('/recall query=native-anthropic-sse-smoke')
+            write("native-anthropic-sse-tooluse.json", redact_secrets(json.dumps({
+                "plan": native_anthropic_sse_plan_payload,
+                "apply": native_anthropic_sse_apply_payload,
+                "captured": native_anthropic_sse_captured,
+                "recall": native_anthropic_sse_recall,
+                "marker_exists": native_anthropic_sse_marker.exists(),
+            }, indent=2, sort_keys=True)) or "{}")
+        finally:
+            model_adapters.urllib.request.urlopen = native_anthropic_sse_original_urlopen
+            native_anthropic_sse_runtime.close()
+        native_anthropic_sse_calls = native_anthropic_sse_plan_payload.get("tool_calls", []) if isinstance(native_anthropic_sse_plan_payload.get("tool_calls"), list) else []
+        native_anthropic_sse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_anthropic_sse_calls]
+        native_anthropic_sse_ledger = native_anthropic_sse_apply_payload.get("execution_ledger", []) if isinstance(native_anthropic_sse_apply_payload.get("execution_ledger"), list) else []
+        native_anthropic_sse_outputs = native_anthropic_sse_plan + native_anthropic_sse_apply + native_anthropic_sse_recall + json.dumps(native_anthropic_sse_plan_payload) + json.dumps(native_anthropic_sse_apply_payload)
+        checks["native_anthropic_sse_tool_use_stream_ok"] = (
+            native_anthropic_sse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_anthropic_sse_calls] == ["remember", "run_command"]
+            and native_anthropic_sse_calls[0].get("args", {}).get("value") == "Anthropic Messages SSE tool_use fragments translated"
+            and native_anthropic_sse_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_anthropic_sse_call_metadata] == ["anthropic_sse_smoke_memory", "anthropic_sse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_sse_call_metadata] == ["native provider anthropic messages stream content tool_use", "native provider anthropic messages stream content tool_use"]
+            and [item.get("provider_tool_call_id") for item in native_anthropic_sse_ledger] == ["anthropic_sse_smoke_memory", "anthropic_sse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_sse_ledger] == ["native provider anthropic messages stream content tool_use", "native provider anthropic messages stream content tool_use"]
+            and [item.get("result", {}).get("status") for item in native_anthropic_sse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("anthropic_messages_sse_tool_use_stream_translation") is True
+            and "anthropic_messages_sse_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and native_anthropic_sse_captured.get("tool_choice") == {"type": "auto"}
+            and native_anthropic_sse_captured.get("tool_count", 0) > 0
+            and "Anthropic Messages SSE tool_use fragments translated" in native_anthropic_sse_recall
+            and not native_anthropic_sse_marker.exists()
+            and native_anthropic_sse_result_marker not in native_anthropic_sse_outputs
+            and "native-anthropic-sse-secret" not in native_anthropic_sse_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -8429,6 +8527,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_gemini_adapter_ok",
             "native_anthropic_adapter_ok",
             "native_anthropic_tool_use_alias_ok",
+            "native_anthropic_sse_tool_use_stream_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_choice_delta_tool_call_ok",
             "native_provider_choice_delta_fragment_merge_ok",
