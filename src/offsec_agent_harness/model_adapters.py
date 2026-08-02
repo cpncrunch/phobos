@@ -637,6 +637,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
         first = choices[0]
         if isinstance(first, dict):
             if isinstance(first.get("message"), dict):
+                result_echo = _native_provider_result_role_message(first["message"], provider_shape="choice.message")
+                if result_echo:
+                    return result_echo
                 return first["message"]
             choice_delta_message = _choice_delta_sequence_to_message(choices)
             if choice_delta_message:
@@ -785,6 +788,9 @@ def _merge_native_tool_call_fragment(destination: dict[str, Any], source: dict[s
 def _provider_message_wrapper_to_message(raw: dict[str, Any], *, provider_shape_prefix: str) -> dict[str, Any]:
     """Build a chat message from a provider wrapper carrying message fields."""
 
+    result_echo = _native_provider_result_role_message(raw, provider_shape=provider_shape_prefix)
+    if result_echo:
+        return result_echo
     message: dict[str, Any] = {}
     if "content" in raw:
         content_blocks: list[dict[str, Any]] = []
@@ -925,6 +931,45 @@ def _native_content_parts(content: Any) -> list[Any] | None:
     return None
 
 
+def _native_provider_result_role_message(raw: Any, *, provider_shape: str) -> dict[str, Any]:
+    """Return an inert message for provider role=tool/function result echoes.
+
+    Some hosted/model gateways echo previous tool outputs as full messages with
+    ``role=tool`` or legacy ``role=function`` instead of typed ``tool_result``
+    blocks.  Treat those as provider-side result state, not assistant summary
+    text and never as fresh tool requests.  Do not preserve raw content: it may
+    contain upstream command output or secrets and is not needed for Phobos'
+    local validation boundary.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    role_value = raw.get("role")
+    author = raw.get("author")
+    if role_value in (None, "") and isinstance(author, dict):
+        role_value = author.get("role")
+    role = str(role_value or "").strip().lower()
+    if role not in _NATIVE_PROVIDER_RESULT_MESSAGE_ROLES:
+        return {}
+    return {
+        "content": [
+            {
+                "type": "tool_result",
+                "content": "<provider tool result omitted>",
+                "_provider_shape": f"{provider_shape}.role_result",
+            }
+        ]
+    }
+
+
+def _extend_result_echo_content_blocks(blocks: list[dict[str, Any]], message: dict[str, Any]) -> None:
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        blocks.extend([item for item in content if isinstance(item, dict)])
+    elif isinstance(content, dict):
+        blocks.append(content)
+
+
 _NATIVE_TOOL_USE_ALIAS_KEYS = ("tool_use", "toolUse", "tool_uses", "toolUses")
 
 
@@ -944,6 +989,9 @@ def _root_message_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     root_message = raw.get("message")
     if not isinstance(root_message, dict):
         return {}
+    result_echo = _native_provider_result_role_message(root_message, provider_shape="root.message")
+    if result_echo:
+        return result_echo
     message: dict[str, Any] = {}
     if "content" in root_message:
         content_blocks: list[dict[str, Any]] = []
@@ -1064,6 +1112,14 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
         is_message_item = block_type == "message" or is_typeless_nested_message or is_typeless_direct_message
         if is_message_item:
             direct_prefix = "responses.output.message_typeless" if is_typeless_direct_message else "responses.message"
+            direct_result_echo = _native_provider_result_role_message(item, provider_shape=direct_prefix)
+            if direct_result_echo:
+                _extend_result_echo_content_blocks(content_blocks, direct_result_echo)
+                continue
+            nested_result_echo = _native_provider_result_role_message(nested_message, provider_shape="responses.output.message") if isinstance(nested_message, dict) else {}
+            if nested_result_echo:
+                _extend_result_echo_content_blocks(content_blocks, nested_result_echo)
+                continue
             direct_content_shape = f"{direct_prefix}.content"
             _extend_responses_content_blocks(content_blocks, item.get("content"), provider_shape=direct_content_shape)
             _extend_responses_message_tool_calls(tool_calls, item, provider_shape_prefix=direct_prefix)
@@ -1348,6 +1404,9 @@ def _top_level_content_message(raw: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(raw, dict):
         return {}
+    result_echo = _native_provider_result_role_message(raw, provider_shape="root")
+    if result_echo:
+        return result_echo
     message: dict[str, Any] = {}
     if "content" in raw:
         content = raw.get("content")
@@ -1518,6 +1577,9 @@ def _native_tool_use_batch_items(provider_shape: str, raw_tool_uses: Any) -> lis
 
 
 def _native_tool_calls_to_plan_content(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    role_result_message = _native_provider_result_role_message(message, provider_shape="message")
+    if role_result_message:
+        message = role_result_message
     content_value = message.get("content", "")
     content_text = _message_content_text(content_value).strip()
     calls: list[dict[str, Any]] = []
@@ -2153,6 +2215,7 @@ _NATIVE_PROVIDER_RESULT_BLOCK_TYPES = {
     "tool_call_result",
     "toolCallResult",
 }
+_NATIVE_PROVIDER_RESULT_MESSAGE_ROLES = {"tool", "function", "tool_result", "function_result"}
 _NATIVE_PROVIDER_RESULT_ALIAS_KEYS = (
     "toolResult",
     "tool_result",

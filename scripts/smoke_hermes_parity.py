@@ -6894,6 +6894,86 @@ def main(argv: list[str] | None = None) -> int:
             and native_provider_custom_marker not in native_edge_plan + native_edge_apply + native_edge_recall + json.dumps(native_edge_plan_payload) + json.dumps(native_edge_apply_payload)
             and native_responses_custom_marker not in native_responses_plan + native_responses_apply + native_responses_recall + json.dumps(native_responses_plan_payload) + json.dumps(native_responses_apply_payload)
         )
+
+        native_role_result_marker = "NATIVE_ROLE_TOOL_RESULT_SHOULD_NOT_SURFACE"
+        native_role_result_captured = []
+
+        class NativeProviderRoleResultSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                role = "function" if len(native_role_result_captured) >= 2 else "tool"
+                return json.dumps({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": role,
+                                "tool_call_id": f"role_result_echo_smoke_{role}",
+                                "content": native_role_result_marker + " token=native-role-result-secret",
+                                "tool_calls": [
+                                    {
+                                        "id": "role_result_echo_should_not_dispatch",
+                                        "type": "tool_call",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-role-result-echo-smoke", "value": "should not store"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_role_result_urlopen(request, timeout=0):
+            native_role_result_captured.append(json.loads(request.data.decode("utf-8")))
+            return NativeProviderRoleResultSmokeResponse()
+
+        native_role_result_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-role-result.db"),
+                session_name="native-provider-role-result-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-role-result-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_role_result_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_role_result_urlopen
+            native_role_result_plan = native_role_result_runtime.handle_message('/auto model=true prompt="native role result echo smoke token=native-role-result-secret"')
+            native_role_result_plan_payload = json.loads(native_role_result_plan.split("\n", 1)[1])
+            native_role_result_apply = native_role_result_runtime.handle_message('/auto apply=true model=true prompt="native role result echo smoke token=native-role-result-secret"')
+            native_role_result_apply_payload = json.loads(native_role_result_apply.split("\n", 1)[1])
+            native_role_result_recall = native_role_result_runtime.handle_message('/recall query=native-role-result-echo-smoke')
+            write("native-provider-role-result-message-ignore.json", json.dumps({
+                "plan": native_role_result_plan_payload,
+                "apply": native_role_result_apply_payload,
+                "recall": native_role_result_recall,
+                "captured_count": len(native_role_result_captured),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_role_result_original_urlopen
+            native_role_result_runtime.close()
+        native_role_result_outputs = native_role_result_plan + native_role_result_apply + native_role_result_recall + json.dumps(native_role_result_plan_payload) + json.dumps(native_role_result_apply_payload)
+        checks["native_provider_result_role_message_ignore_ok"] = (
+            native_role_result_plan_payload.get("mode") == "plan_only"
+            and native_role_result_plan_payload.get("tool_calls") == []
+            and "tool_result" in json.dumps(native_role_result_plan_payload.get("warnings", [])).lower()
+            and native_role_result_apply_payload.get("results") == []
+            and native_role_result_apply_payload.get("execution_ledger") == []
+            and "Found 0 memory entries" in native_role_result_recall
+            and native_role_result_captured
+            and native_status_milestone_contract.get("provider_result_role_messages_ignored") is True
+            and "tool" in native_status_data.get("provider_tool_result_message_roles_ignored", [])
+            and "function" in native_status_data.get("provider_tool_result_message_roles_ignored", [])
+            and native_role_result_marker not in native_role_result_outputs
+            and "native-role-result-secret" not in native_role_result_outputs
+        )
         checks["native_provider_tool_result_ignore_ok"] = (
             "tool_result" in native_edge_warnings.lower()
             and "tool_result" in native_content_warnings.lower()
@@ -7878,6 +7958,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_hosted_tool_call_reject_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",
+            "native_provider_result_role_message_ignore_ok",
             "native_tool_call_guardrail_approval_ok",
             "native_provider_root_function_calls_alias_ok",
             "native_provider_root_function_calls_nested_function_call_alias_ok",

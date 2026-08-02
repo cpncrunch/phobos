@@ -109,6 +109,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "transcript_provider_call_provenance": True,
     "custom_freeform_tool_calls_rejected": True,
     "provider_hosted_tool_calls_rejected": True,
+    "provider_result_role_messages_ignored": True,
     "gateway_and_bridge_surfaces": True,
 }
 
@@ -1591,6 +1592,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
                 "tool_call_result",
                 "toolCallResult",
             ],
+            "provider_tool_result_message_roles_ignored": ["tool", "function", "tool_result", "function_result"],
             "provider_unsupported_tool_call_types_rejected": [
                 "custom_tool_call",
                 "computer_call",
