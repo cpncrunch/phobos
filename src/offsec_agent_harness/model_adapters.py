@@ -705,6 +705,9 @@ def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> di
     root_predictions = _root_predictions_to_message(raw, depth=_wrapper_depth)
     if root_predictions:
         return root_predictions
+    root_outputs = _root_outputs_to_message(raw, depth=_wrapper_depth)
+    if root_outputs:
+        return root_outputs
     candidate_message = _candidate_content_to_message(raw)
     if candidate_message:
         return candidate_message
@@ -1949,6 +1952,57 @@ def _root_predictions_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict
     return {}
 
 
+def _root_output_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return provider output objects from root-level plural ``outputs`` wrappers."""
+
+    if not isinstance(raw, dict):
+        return []
+    outputs = raw.get("outputs")
+    if isinstance(outputs, dict):
+        return [outputs]
+    if isinstance(outputs, list):
+        return [output for output in outputs if isinstance(output, dict)]
+    return []
+
+
+def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
+    """Normalize root-level ``outputs[]`` wrappers from provider gateways.
+
+    Some AI-gateway and model-router responses use ``{"outputs": [...]}`` as
+    the outer envelope for assistant messages or native tool-call proposals.
+    Translate only recognizable message/function-call content into the existing
+    inert planner boundary, skip provider result echoes, and recurse with a hard
+    depth cap so malformed nested wrappers fail closed.  Runtime schema
+    validation, runtime policy, ROE previews, approval replay, explicit execute
+    intent, transcript redaction, and dispatch remain Phobos runtime concerns.
+    """
+
+    if depth >= 3 or not isinstance(raw, dict):
+        return {}
+    items = _root_output_items(raw)
+    if not items:
+        return {}
+    for item in reversed(items):
+        if _native_provider_result_role_message(item, provider_shape="root.outputs"):
+            continue
+        message_obj = item.get("message")
+        if isinstance(message_obj, dict):
+            result_echo = _native_provider_result_role_message(message_obj, provider_shape="root.outputs")
+            if result_echo:
+                continue
+            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix="root.outputs")
+            if message:
+                return message
+        if _responses_output_item_looks_like_message(item):
+            message = _provider_message_wrapper_to_message(item, provider_shape_prefix="root.outputs")
+            if message:
+                return message
+        nested = _first_choice_message(item, _wrapper_depth=depth + 1)
+        if nested:
+            return nested
+    return {}
+
+
 def _candidate_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Return Gemini-style candidate objects from plural or collapsed wrappers."""
 
@@ -3053,6 +3107,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.predictions."):
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.outputs."):
+            label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
@@ -3166,6 +3222,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.predictions."):
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.outputs."):
+            label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":
