@@ -2093,21 +2093,73 @@ def _root_output_wrapper_items(raw: dict[str, Any]) -> tuple[str, list[dict[str,
     OpenAI Responses uses ``output[]`` while some OpenAI-compatible routers and
     trace gateways expose pluralized ``outputs[]`` or raw item captures as
     ``output_items[]`` / ``outputItems[]``. A few router transcript APIs shorten
-    the same final provider-output capture to root ``items[]`` / ``item``.
+    the same final provider-output capture to root ``items[]`` / ``item``. Some
+    lightweight routers expose plural wrappers as keyed object maps instead of
+    arrays, for example ``{"output_items": {"call_1": {"type": "function_call", ...}}}``.
     Normalize only those explicit output wrappers here; the resulting tool calls
-    still pass through Phobos runtime
-    schema, policy, ROE, approval, execute, transcript, and ledger boundaries.
+    still pass through Phobos runtime schema, policy, ROE, approval, execute,
+    transcript, and ledger boundaries.
     """
 
     if not isinstance(raw, dict):
         return "", []
+    plural_map_wrappers = {"outputs", "output_items", "outputItems", "items"}
     for wrapper_key in ("outputs", "output_items", "outputItems", "output_item", "outputItem", "items", "item"):
         outputs = raw.get(wrapper_key)
         if isinstance(outputs, dict):
+            if wrapper_key in plural_map_wrappers:
+                mapped = _root_output_object_map_items(outputs, provider_shape=f"root.{wrapper_key}.object_map")
+                if mapped:
+                    return wrapper_key, mapped
             return wrapper_key, [outputs]
         if isinstance(outputs, list):
             return wrapper_key, [output for output in outputs if isinstance(output, dict)]
     return "", []
+
+
+def _root_output_object_map_items(outputs: dict[str, Any], *, provider_shape: str) -> list[dict[str, Any]]:
+    """Expand keyed root output-wrapper maps into inert provider output items.
+
+    Provider maps are provenance only.  Preserve a bounded map key as ``call_id``
+    when the nested output item lacks one, but do not validate schemas, queue
+    approvals, write evidence, or dispatch handlers in the adapter.
+    """
+
+    if _root_output_mapping_looks_like_single(outputs):
+        return []
+    items: list[dict[str, Any]] = []
+    for map_key, value in outputs.items():
+        if not isinstance(value, dict):
+            continue
+        entry = dict(value)
+        entry.setdefault("_provider_shape", provider_shape)
+        if not _native_tool_call_has_id(entry):
+            entry["call_id"] = str(map_key)
+        items.append(entry)
+    return items
+
+
+def _root_output_mapping_looks_like_single(value: dict[str, Any]) -> bool:
+    """Return True when a root output wrapper dict is a collapsed single item.
+
+    This keeps already-supported collapsed ``{"output_items": {"type": ...}}``
+    responses working while allowing dicts whose keys are only provider call IDs
+    to be treated as object maps.
+    """
+
+    if _root_output_item_is_direct_tool_call(value):
+        return True
+    if _responses_output_item_looks_like_message(value):
+        return True
+    return any(
+        key in value
+        for key in (
+            "message",
+            "role",
+            "author",
+            *_NATIVE_CALL_ID_ALIAS_KEYS,
+        )
+    )
 
 
 def _root_output_item_is_direct_tool_call(item: dict[str, Any]) -> bool:

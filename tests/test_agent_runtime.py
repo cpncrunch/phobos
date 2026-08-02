@@ -10025,6 +10025,106 @@ class AgentRuntimeTests(unittest.TestCase):
                     finally:
                         runtime.close()
 
+    def test_openai_root_output_items_object_map_wrappers_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root Output Items Object Map",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-root-output-items-object-map-should-not-run.txt"
+            provider_result_marker = "ROOT_OUTPUT_ITEMS_OBJECT_MAP_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeRootOutputItemsObjectMapHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output_items": {
+                            "stale-map-call": {
+                                "type": "function_call",
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-root-output-items-object-map-old", "value": "old object-map call should not dispatch"}),
+                            },
+                            "map-tool-result": {"role": "tool", "content": provider_result_marker + " token=root-output-items-object-map-secret"},
+                            "map-memory-call": {
+                                "type": "function_call",
+                                "name": "remember",
+                                "arguments": json.dumps({"key": "native-root-output-items-object-map", "value": "root output_items object-map wrapper accepted"}),
+                            },
+                            "map-dry-call": {
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": json.dumps({
+                                        "target": "app.example.test",
+                                        "purpose": "root output_items object-map native dry-run boundary",
+                                        "command": f"printf native-root-output-items-object-map > {dry_run_marker}",
+                                        "execute": True,
+                                    }),
+                                },
+                            },
+                        }
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeRootOutputItemsObjectMapHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-output-items-object-map-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-output-items-object-map", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root output_items object map wrapper token=root-output-items-object-map-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertIn("native provider root output_items object_map", payload["tool_calls"][0].get("reason", ""))
+                    self.assertIn("native provider root output_items function", payload["tool_calls"][1].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-root-output-items-object-map")
+                    self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["map-memory-call", "map-dry-call"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root output_items object_map", "native provider root output_items function"])
+                    self.assertNotIn("root-output-items-object-map-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root output_items object map wrapper token=root-output-items-object-map-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["map-memory-call", "map-dry-call"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root output_items object_map", "native provider root output_items function"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-root-output-items-object-map')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("root output_items object-map wrapper accepted", recall)
+                self.assertNotIn("old object-map call should not dispatch", recall)
+                self.assertIn("root_output_items_object_map", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("root_output_items_object_map_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("root-output-items-object-map-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_root_output_item_singular_wrappers_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

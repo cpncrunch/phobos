@@ -5483,6 +5483,104 @@ def main(argv: list[str] | None = None) -> int:
             and "native-root-output-items-secret" not in native_root_output_items_blob
         )
 
+        native_root_output_items_object_map_captured = {}
+        native_root_output_items_object_map_marker = root / "native-root-output-items-object-map-should-not-run.txt"
+        native_root_output_items_object_map_result_marker = "ROOT_OUTPUT_ITEMS_OBJECT_MAP_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootOutputItemsObjectMapSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output_items": {
+                        "stale-map-call": {
+                            "type": "function_call",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-root-output-items-object-map-old-smoke", "value": "old root output_items object-map call should not dispatch"}),
+                        },
+                        "map-tool-result": {"role": "tool", "content": native_root_output_items_object_map_result_marker + " token=native-root-output-items-object-map-secret"},
+                        "map-memory-call": {
+                            "type": "function_call",
+                            "name": "remember",
+                            "arguments": json.dumps({"key": "native-root-output-items-object-map-smoke", "value": "root output_items object-map native tool call translated"}),
+                        },
+                        "map-dry-call": {
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "root output_items object-map native dry-run smoke",
+                                    "command": f"printf native-root-output-items-object-map > {native_root_output_items_object_map_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                        },
+                    }
+                }).encode("utf-8")
+
+        def fake_native_root_output_items_object_map_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_output_items_object_map_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_output_items_object_map_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootOutputItemsObjectMapSmokeResponse()
+
+        native_root_output_items_object_map_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-output-items-object-map.db"),
+                session_name="native-provider-root-output-items-object-map-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-output-items-object-map-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_output_items_object_map_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_output_items_object_map_urlopen
+            native_root_output_items_object_map_plan = native_root_output_items_object_map_runtime.handle_message('/auto model=true prompt="native root output_items object map smoke token=native-root-output-items-object-map-secret"')
+            native_root_output_items_object_map_plan_payload = json.loads(native_root_output_items_object_map_plan.split("\n", 1)[1])
+            native_root_output_items_object_map_apply = native_root_output_items_object_map_runtime.handle_message('/auto apply=true model=true prompt="native root output_items object map smoke token=native-root-output-items-object-map-secret"')
+            native_root_output_items_object_map_apply_payload = json.loads(native_root_output_items_object_map_apply.split("\n", 1)[1])
+            native_root_output_items_object_map_recall = native_root_output_items_object_map_runtime.handle_message('/recall query=native-root-output-items-object-map-smoke')
+            write("native-provider-root-output-items-object-map.json", json.dumps({
+                "plan": native_root_output_items_object_map_plan_payload,
+                "apply": native_root_output_items_object_map_apply_payload,
+                "captured": native_root_output_items_object_map_captured,
+                "recall": native_root_output_items_object_map_recall,
+                "marker_exists": native_root_output_items_object_map_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_output_items_object_map_original_urlopen
+            native_root_output_items_object_map_runtime.close()
+        native_root_output_items_object_map_calls = native_root_output_items_object_map_plan_payload.get("tool_calls", []) if isinstance(native_root_output_items_object_map_plan_payload.get("tool_calls"), list) else []
+        native_root_output_items_object_map_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_output_items_object_map_calls]
+        native_root_output_items_object_map_ledger = native_root_output_items_object_map_apply_payload.get("execution_ledger", []) if isinstance(native_root_output_items_object_map_apply_payload.get("execution_ledger"), list) else []
+        native_root_output_items_object_map_blob = native_root_output_items_object_map_plan + native_root_output_items_object_map_apply + native_root_output_items_object_map_recall + json.dumps(native_root_output_items_object_map_plan_payload) + json.dumps(native_root_output_items_object_map_apply_payload)
+        checks["native_provider_root_output_items_object_map_ok"] = (
+            native_root_output_items_object_map_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_output_items_object_map_calls] == ["remember", "run_command"]
+            and [item.get("provider_tool_call_id") for item in native_root_output_items_object_map_call_metadata] == ["map-memory-call", "map-dry-call"]
+            and [item.get("native_tool_call_source") for item in native_root_output_items_object_map_call_metadata] == ["native provider root output_items object_map", "native provider root output_items function"]
+            and native_root_output_items_object_map_calls[0].get("args", {}).get("key") == "native-root-output-items-object-map-smoke"
+            and native_root_output_items_object_map_calls[1].get("args", {}).get("execute") is False
+            and [item.get("result", {}).get("status") for item in native_root_output_items_object_map_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_output_items_object_map_ledger] == ["map-memory-call", "map-dry-call"]
+            and native_root_output_items_object_map_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_output_items_object_map_translation") is True
+            and "root_output_items_object_map" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root output_items object-map native tool call translated" in native_root_output_items_object_map_recall
+            and "old root output_items object-map call should not dispatch" not in native_root_output_items_object_map_recall
+            and native_root_output_items_object_map_captured.get("tool_choice") == "auto"
+            and native_root_output_items_object_map_captured.get("tool_count", 0) > 0
+            and not native_root_output_items_object_map_marker.exists()
+            and native_root_output_items_object_map_result_marker not in native_root_output_items_object_map_blob
+            and "native-root-output-items-object-map-secret" not in native_root_output_items_object_map_blob
+        )
+
         native_root_output_item_singular_captured = {"memory": {}, "dry": {}}
         native_root_output_item_singular_marker = root / "native-root-output-item-singular-should-not-run.txt"
 
@@ -11367,6 +11465,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_root_outputs_wrapper_ok",
             "native_provider_root_outputs_direct_function_call_ok",
             "native_provider_root_output_items_wrapper_ok",
+            "native_provider_root_output_items_object_map_ok",
             "native_provider_root_output_item_singular_wrapper_ok",
             "native_provider_root_items_wrapper_ok",
             "native_provider_root_item_singular_wrapper_ok",
