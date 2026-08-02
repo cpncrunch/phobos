@@ -2145,6 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("responses_message_content_function_call_alias_translation") is True
             and native_status_milestone_contract.get("candidate_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_part_function_call_translation") is True
+            and native_status_milestone_contract.get("candidate_direct_function_call_translation") is True
             and native_status_milestone_contract.get("single_candidate_object_translation") is True
             and native_status_milestone_contract.get("candidate_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("root_message_wrapper_translation") is True
@@ -2256,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_message_content_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_part_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate_direct_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_candidate_object" in native_status_data.get("provider_native_tool_call_variants", [])
             and "candidate_singular_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -8609,6 +8611,103 @@ def main(argv: list[str] | None = None) -> int:
             and native_collapsed_candidate_captured.get("tool_count", 0) > 0
             and "native-collapsed-candidate-secret" not in native_collapsed_candidate_plan + native_collapsed_candidate_apply + native_collapsed_candidate_recall + json.dumps(native_collapsed_candidate_plan_payload) + json.dumps(native_collapsed_candidate_apply_payload)
         )
+        native_direct_candidate_captured = {"count": 0, "tool_choices": []}
+        native_direct_candidate_result_marker = "NATIVE_DIRECT_CANDIDATE_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeProviderDirectCandidateSmokeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_native_direct_candidate_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_direct_candidate_captured["count"] += 1
+            native_direct_candidate_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_direct_candidate_captured["tool_choices"].append(payload.get("tool_choice"))
+            if native_direct_candidate_captured["count"] == 1:
+                return NativeProviderDirectCandidateSmokeResponse({
+                    "candidates": [
+                        {
+                            "content": {
+                                "text": "native direct candidate content smoke token=native-direct-candidate-secret",
+                                "functionCall": {
+                                    "toolCallId": "direct_candidate_content_memory",
+                                    "name": "remember",
+                                    "args": {"key": "native-candidate-direct-content-smoke", "value": "candidate direct content native tool call translated"},
+                                },
+                                "functionResponse": {"response": {"content": native_direct_candidate_result_marker + " token=native-direct-candidate-secret"}},
+                            }
+                        }
+                    ]
+                })
+            return NativeProviderDirectCandidateSmokeResponse({
+                "candidate": {
+                    "text": "native direct candidate object smoke token=native-direct-candidate-secret",
+                    "functionCall": {
+                        "functionCallId": "direct_candidate_object_memory",
+                        "name": "remember",
+                        "parameters": {"key": "native-candidate-direct-object-smoke", "value": "candidate direct object native tool call translated"},
+                    },
+                }
+            })
+
+        native_direct_candidate_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-direct-candidate.db"),
+                session_name="native-provider-direct-candidate-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-direct-candidate-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_direct_candidate_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_direct_candidate_urlopen
+            native_direct_candidate_plan = native_direct_candidate_runtime.handle_message('/auto model=true prompt="native direct candidate smoke token=native-direct-candidate-secret"')
+            native_direct_candidate_plan_payload = json.loads(native_direct_candidate_plan.split("\n", 1)[1])
+            native_direct_candidate_apply = native_direct_candidate_runtime.handle_message('/auto apply=true model=true prompt="native direct candidate object smoke token=native-direct-candidate-secret"')
+            native_direct_candidate_apply_payload = json.loads(native_direct_candidate_apply.split("\n", 1)[1])
+            native_direct_candidate_recall = native_direct_candidate_runtime.handle_message('/recall query=native-candidate-direct-object-smoke')
+            write("native-provider-direct-candidate-function-call.json", json.dumps({
+                "plan": native_direct_candidate_plan_payload,
+                "apply": native_direct_candidate_apply_payload,
+                "captured": native_direct_candidate_captured,
+                "recall": native_direct_candidate_recall,
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_direct_candidate_original_urlopen
+            native_direct_candidate_runtime.close()
+        native_direct_candidate_calls = native_direct_candidate_plan_payload.get("tool_calls", []) if isinstance(native_direct_candidate_plan_payload.get("tool_calls"), list) else []
+        native_direct_candidate_metadata = native_direct_candidate_plan_payload.get("metadata", {}) if isinstance(native_direct_candidate_plan_payload.get("metadata"), dict) else {}
+        native_direct_candidate_ledger = native_direct_candidate_apply_payload.get("execution_ledger", []) if isinstance(native_direct_candidate_apply_payload.get("execution_ledger"), list) else []
+        native_direct_candidate_outputs = native_direct_candidate_plan + native_direct_candidate_apply + native_direct_candidate_recall + json.dumps(native_direct_candidate_plan_payload) + json.dumps(native_direct_candidate_apply_payload)
+        checks["native_provider_candidate_direct_function_call_ok"] = (
+            native_direct_candidate_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_direct_candidate_calls] == ["remember"]
+            and native_direct_candidate_calls[0].get("args", {}).get("key") == "native-candidate-direct-content-smoke"
+            and "native provider candidate functionCall" in native_direct_candidate_calls[0].get("reason", "")
+            and native_direct_candidate_calls[0].get("metadata", {}).get("provider_tool_call_id") == "direct_candidate_content_memory"
+            and native_direct_candidate_metadata.get("native_tool_call_count") == 1
+            and "tool_result" in json.dumps(native_direct_candidate_plan_payload.get("warnings", [])).lower()
+            and [item.get("result", {}).get("status") for item in native_direct_candidate_apply_payload.get("results", [])] == ["ok"]
+            and [item.get("provider_tool_call_id") for item in native_direct_candidate_ledger] == ["direct_candidate_object_memory"]
+            and native_direct_candidate_ledger[0].get("native_tool_call_source") == "native provider candidate functionCall"
+            and native_status_milestone_contract.get("candidate_direct_function_call_translation") is True
+            and "candidate_direct_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "candidate direct object native tool call translated" in native_direct_candidate_recall
+            and native_direct_candidate_captured.get("tool_choices") == ["auto", "auto"]
+            and native_direct_candidate_captured.get("tool_count", 0) > 0
+            and native_direct_candidate_result_marker not in native_direct_candidate_outputs
+            and "native-direct-candidate-secret" not in native_direct_candidate_outputs
+        )
         native_hosted_marker = "NATIVE_HOSTED_TOOL_INPUT_SHOULD_NOT_SURFACE_SMOKE"
         native_hosted_captured = {}
 
@@ -10149,6 +10248,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_single_candidate_part_function_call_ok",
             "native_provider_candidate_part_call_id_ok",
             "native_provider_collapsed_candidate_wrapper_ok",
+            "native_provider_candidate_direct_function_call_ok",
             "native_provider_hosted_tool_call_reject_ok",
             "native_provider_custom_tool_call_reject_ok",
             "native_provider_tool_result_ignore_ok",

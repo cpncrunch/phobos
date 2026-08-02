@@ -8440,6 +8440,103 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_candidate_direct_function_call_wrappers_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Direct Candidate FunctionCall Wrappers",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            response_counter = {"count": 0}
+            provider_result_marker = "DIRECT_CANDIDATE_TOOL_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeDirectCandidateHTTPResponse:
+                def __init__(self, payload: dict):
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                response_counter["count"] += 1
+                if response_counter["count"] == 1:
+                    return FakeDirectCandidateHTTPResponse({
+                        "candidates": [
+                            {
+                                "content": {
+                                    "text": "direct candidate content token=direct-candidate-secret",
+                                    "functionCall": {
+                                        "toolCallId": "candidate_direct_content_memory",
+                                        "name": "remember",
+                                        "args": {"key": "native-candidate-direct-content", "value": "candidate direct content accepted"},
+                                    },
+                                    "functionResponse": {"response": {"content": provider_result_marker + " token=direct-candidate-secret"}},
+                                }
+                            }
+                        ]
+                    })
+                return FakeDirectCandidateHTTPResponse({
+                    "candidate": {
+                        "text": "direct candidate object token=direct-candidate-secret",
+                        "functionCall": {
+                            "functionCallId": "candidate_direct_object_memory",
+                            "name": "remember",
+                            "parameters": {"key": "native-candidate-direct-object", "value": "candidate direct object accepted"},
+                        },
+                    }
+                })
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-candidate-direct-function-call",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-direct-candidate", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native direct candidate function call token=direct-candidate-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-candidate-direct-content")
+                    self.assertIn("native provider candidate functionCall", payload["tool_calls"][0].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0].get("metadata", {}).get("provider_tool_call_id"), "candidate_direct_content_memory")
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 1)
+                    self.assertIn("tool_result", json.dumps(payload.get("warnings", [])).lower())
+                    self.assertNotIn("direct-candidate-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native direct candidate object token=direct-candidate-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["candidate_direct_object_memory"])
+                    self.assertEqual(ledger[0].get("native_tool_call_source"), "native provider candidate functionCall")
+                recall = runtime.handle_message('/recall query=native-candidate-direct-object')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("candidate direct object accepted", recall)
+                self.assertIn("candidate_direct_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("candidate_direct_function_call_translation"), status)
+                self.assertEqual([payload.get("tool_choice") for payload in captured_payloads], ["auto", "auto"])
+                self.assertNotIn("direct-candidate-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_root_message_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

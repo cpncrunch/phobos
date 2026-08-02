@@ -2019,6 +2019,48 @@ def _candidate_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _candidate_direct_part_like(mapping: dict[str, Any]) -> bool:
+    """Return True when a collapsed candidate/content object is itself a part.
+
+    Most Gemini-compatible providers use ``candidate.content.parts[]``.  Some
+    local gateways collapse a single-part response further and put
+    ``functionCall``/``function_call`` directly on ``content`` or the candidate
+    object itself.  Treat only recognizable part-like keys as native planner
+    state so unrelated metadata on a candidate does not become dispatch input.
+    """
+
+    if not isinstance(mapping, dict):
+        return False
+    if any(key in mapping for key in ("text", "functionCall", "function_call", *_NATIVE_TOOL_USE_ALIAS_KEYS)):
+        return True
+    if _native_provider_result_alias_value(mapping) is not None:
+        return True
+    block_type = str(mapping.get("type") or "").strip()
+    return block_type in (_NATIVE_PROVIDER_TOOL_CALL_BLOCK_TYPES | _NATIVE_PROVIDER_RESULT_BLOCK_TYPES)
+
+
+def _candidate_content_parts(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return candidate parts from list/dict/direct collapsed forms."""
+
+    if not isinstance(candidate, dict):
+        return []
+    content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if isinstance(parts, dict):
+        return [parts]
+    if isinstance(parts, list):
+        return [part for part in parts if isinstance(part, dict)]
+    if isinstance(content, dict) and "parts" in content:
+        # A present-but-malformed parts field should fail closed rather than
+        # falling back to looser direct-candidate parsing.
+        return []
+    if isinstance(content, dict) and _candidate_direct_part_like(content):
+        return [content]
+    if _candidate_direct_part_like(candidate):
+        return [candidate]
+    return []
+
+
 def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = "gemini.candidate") -> dict[str, Any]:
     """Normalize candidate/part native function calls into the common shape.
 
@@ -2040,16 +2082,8 @@ def _candidate_content_to_message(raw: dict[str, Any], *, provider_shape: str = 
     if not candidates:
         return {}
     first = candidates[0]
-    content = first.get("content") if isinstance(first.get("content"), dict) else {}
-    parts = content.get("parts") if isinstance(content, dict) else None
-    if isinstance(parts, dict):
-        # Some Gemini/OpenAI-compatible shims collapse a one-part candidate
-        # response into a single object instead of candidates[].content.parts[].
-        # Normalize at the adapter boundary so the runtime can still enforce the
-        # exact same schema, runtime-policy, ROE, and transcript provenance rules
-        # before anything can dispatch.
-        parts = [parts]
-    elif not isinstance(parts, list):
+    parts = _candidate_content_parts(first)
+    if not parts:
         return {}
     content_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
