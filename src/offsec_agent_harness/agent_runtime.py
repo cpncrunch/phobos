@@ -96,6 +96,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "root_outputs_wrapper_translation": True,
     "root_outputs_direct_tool_call_translation": True,
     "root_output_items_wrapper_translation": True,
+    "root_output_item_singular_wrapper_translation": True,
     "provider_response_envelope_wrapper_translation": True,
     "provider_result_envelope_wrapper_translation": True,
     "provider_data_envelope_wrapper_translation": True,

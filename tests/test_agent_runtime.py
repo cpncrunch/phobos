@@ -9917,6 +9917,131 @@ class AgentRuntimeTests(unittest.TestCase):
                     finally:
                         runtime.close()
 
+    def test_openai_root_output_item_singular_wrappers_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root Output Item Singular Wrapper",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-root-output-item-singular-should-not-run.txt"
+
+            def singular_payload(wrapper_key: str) -> dict:
+                if wrapper_key == "outputItem":
+                    return {
+                        "outputItem": {
+                            "type": "function",
+                            "id": "root_outputItem_dry",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({
+                                    "target": "app.example.test",
+                                    "purpose": "root outputItem singular native dry-run boundary",
+                                    "command": f"printf native-root-output-item-singular > {dry_run_marker}",
+                                    "execute": True,
+                                }),
+                            },
+                        }
+                    }
+                return {
+                    "output_item": {
+                        "type": "function_call",
+                        "call_id": "root_output_item_memory",
+                        "name": "remember",
+                        "arguments": json.dumps({
+                            "key": "native-root-output-item-singular",
+                            "value": "root output_item singular function_call accepted",
+                        }),
+                    }
+                }
+
+            class FakeRootOutputItemSingularHTTPResponse:
+                def __init__(self, wrapper_key: str):
+                    self.wrapper_key = wrapper_key
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(singular_payload(self.wrapper_key)).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                request_payload = json.loads(request.data.decode("utf-8"))
+                request_blob = json.dumps(request_payload)
+                wrapper_key = "outputItem" if "native root outputItem singular dry" in request_blob else "output_item"
+                captured_payloads.append({
+                    "wrapper": wrapper_key,
+                    "tool_choice": request_payload.get("tool_choice"),
+                    "tool_count": len(request_payload.get("tools", [])) if isinstance(request_payload.get("tools"), list) else 0,
+                })
+                return FakeRootOutputItemSingularHTTPResponse(wrapper_key)
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-output-item-singular-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-output-item-singular", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root output_item singular token=root-output-item-singular-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember"])
+                    self.assertIn("native provider root output_item function_call", payload["tool_calls"][0].get("reason", ""))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-root-output-item-singular")
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_output_item_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root output_item function_call"])
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root output_item singular token=root-output-item-singular-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_output_item_memory"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root output_item function_call"])
+
+                    dry_planned = runtime.handle_message('/auto model=true prompt="native root outputItem singular dry token=root-output-item-singular-secret"')
+                    dry_payload = json.loads(dry_planned.split("\n", 1)[1])
+                    self.assertEqual(dry_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in dry_payload["tool_calls"]], ["run_command"])
+                    self.assertIn("native provider root outputItem function", dry_payload["tool_calls"][0].get("reason", ""))
+                    self.assertFalse(dry_payload["tool_calls"][0]["args"].get("execute"))
+                    dry_metadata = [call.get("metadata", {}) for call in dry_payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in dry_metadata], ["root_outputItem_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in dry_metadata], ["native provider root outputItem function"])
+
+                    dry_applied = runtime.handle_message('/auto apply=true model=true prompt="native root outputItem singular dry token=root-output-item-singular-secret"')
+                    dry_applied_payload = json.loads(dry_applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in dry_applied_payload["results"]], ["dry_run"])
+                    dry_ledger = dry_applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in dry_ledger], ["root_outputItem_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in dry_ledger], ["native provider root outputItem function"])
+                    self.assertFalse(dry_ledger[0].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-root-output-item-singular')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("root output_item singular function_call accepted", recall)
+                self.assertIn("root_output_item_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("root_outputItem_function", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("root_output_item_singular_wrapper_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertEqual([item.get("wrapper") for item in captured_payloads], ["output_item", "output_item", "outputItem", "outputItem"])
+                self.assertTrue(all(item.get("tool_choice") == "auto" for item in captured_payloads))
+                self.assertTrue(all(item.get("tool_count", 0) > 0 for item in captured_payloads))
+                self.assertNotIn("root-output-item-singular-secret", planned + applied + dry_planned + dry_applied + recall + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_openai_collapsed_choice_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
