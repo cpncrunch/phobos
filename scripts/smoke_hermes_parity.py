@@ -4761,6 +4761,19 @@ def main(argv: list[str] | None = None) -> int:
             def read(self) -> bytes:
                 return json.dumps({
                     "predictions": [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "root_predictions_old_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-predictions-old-smoke", "value": "old root predictions call should not dispatch"}),
+                                    },
+                                }
+                            ],
+                        },
                         {"role": "tool", "content": native_root_predictions_result_marker + " token=native-root-predictions-secret"},
                         {
                             "message": {
@@ -4852,6 +4865,7 @@ def main(argv: list[str] | None = None) -> int:
             and "root_predictions_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "functionResponse" in json.dumps(native_root_predictions_plan_payload.get("warnings", []))
             and "root predictions wrapper native tool call translated" in native_root_predictions_recall
+            and "old root predictions call should not dispatch" not in native_root_predictions_recall
             and native_root_predictions_captured.get("tool_choice") == "auto"
             and native_root_predictions_captured.get("tool_count", 0) > 0
             and not native_root_predictions_marker.exists()

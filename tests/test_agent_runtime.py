@@ -9337,6 +9337,19 @@ class AgentRuntimeTests(unittest.TestCase):
                 def read(self) -> bytes:
                     return json.dumps({
                         "predictions": [
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "root_predictions_old_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-root-predictions-old", "value": "old root predictions call should not dispatch"}),
+                                        },
+                                    }
+                                ],
+                            },
                             {"role": "tool", "content": provider_result_marker + " token=root-predictions-secret"},
                             {
                                 "message": {
@@ -9413,6 +9426,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 recall = runtime.handle_message('/recall query=native-root-predictions')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("root predictions wrapper accepted", recall)
+                self.assertNotIn("old root predictions call should not dispatch", recall)
                 self.assertIn("root_predictions_tool_calls", status.get("provider_native_tool_call_variants", []))
                 self.assertTrue(status.get("milestone_contract", {}).get("root_predictions_wrapper_translation"), status)
                 self.assertFalse(dry_run_marker.exists())

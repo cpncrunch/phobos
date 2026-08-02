@@ -2020,17 +2020,17 @@ def _root_predictions_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict
 
     Several local or Vertex-compatible gateways return a final model payload as
     ``{"predictions": [...]}`` rather than Chat Completions ``choices`` or a
-    Gemini ``candidates`` object.  Treat each prediction as an inert assistant
-    message/proposal candidate, skip provider result echoes, and let the normal
-    Phobos runtime boundary validate schemas, runtime policy, ROE previews,
-    approvals, explicit execute intent, transcripts, and redaction before any
-    handler can run.  Recursion is bounded so malformed nested prediction
-    envelopes fail closed as no-tool responses.
+    Gemini ``candidates`` object.  Walk newest-first, treat each prediction as an
+    inert assistant message/proposal candidate, skip provider result echoes, and
+    let the normal Phobos runtime boundary validate schemas, runtime policy, ROE
+    previews, approvals, explicit execute intent, transcripts, and redaction
+    before any handler can run.  Recursion is bounded so malformed nested
+    prediction envelopes fail closed as no-tool responses.
     """
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
-    for item in _root_prediction_items(raw):
+    for item in reversed(_root_prediction_items(raw)):
         if _native_provider_result_role_message(item, provider_shape="root.predictions"):
             continue
         message_obj = item.get("message")
