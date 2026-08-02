@@ -3021,6 +3021,81 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_chat_completions_sse_legacy_function_call_chunks_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Chat SSE Legacy Function Call",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-openai-chat-sse-legacy-should-not-execute.txt"
+            run_args = json.dumps({
+                "target": "app.example.test",
+                "purpose": "Chat Completions SSE legacy function_call dry-run validation",
+                "command": f"printf native-openai-chat-sse-legacy > {dry_run_marker}",
+                "execute": True,
+            })
+
+            class FakeChatSSELegacyHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    chunks = [
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "legacy chat SSE token=chat-sse-legacy-secret"}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_command", "arguments": run_args[:34]}}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": run_args[34:91]}}}]},
+                        {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": run_args[91:]}}}]},
+                    ]
+                    body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+                    body += "data: [DONE]\n\n"
+                    return body.encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeChatSSELegacyHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-chat-sse-legacy-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-chat-sse-legacy-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native chat SSE legacy token=chat-sse-legacy-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["run_command"])
+                    self.assertFalse(plan_payload["tool_calls"][0]["args"]["execute"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["purpose"], "Chat Completions SSE legacy function_call dry-run validation")
+                    call_metadata = plan_payload["tool_calls"][0].get("metadata", {})
+                    self.assertEqual(call_metadata.get("native_tool_call_source"), "native provider chat completions sse delta function_call")
+                    self.assertEqual(call_metadata.get("native_tool_call_index"), 1)
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native chat SSE legacy token=chat-sse-legacy-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["dry_run"])
+                self.assertFalse(dry_run_marker.exists())
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("chat_completions_sse_legacy_function_call_translation"), status)
+                self.assertIn("openai_chat_completions_sse_legacy_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                combined = planned + applied + json.dumps(plan_payload) + json.dumps(applied_payload) + json.dumps(status)
+                self.assertNotIn("chat-sse-legacy-secret", combined)
+            finally:
+                runtime.close()
+
     def test_native_provider_call_ids_are_redacted_bounded_and_single_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

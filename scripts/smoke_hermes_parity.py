@@ -2513,6 +2513,88 @@ def main(argv: list[str] | None = None) -> int:
             and "native-chat-sse-secret" not in native_chat_sse_outputs
         )
 
+        native_chat_legacy_sse_marker = root / "native-openai-chat-sse-legacy-should-not-run.txt"
+        native_chat_legacy_sse_captured: dict[str, object] = {}
+        native_chat_legacy_sse_run_args = json.dumps({
+            "target": "app.example.test",
+            "purpose": "Chat Completions SSE legacy function_call dry-run smoke",
+            "command": f"printf native-openai-chat-sse-legacy > {native_chat_legacy_sse_marker}",
+            "execute": True,
+        })
+
+        class NativeOpenAIChatLegacySSESmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                chunks = [
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "legacy Chat Completions SSE token=native-chat-legacy-sse-secret"}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"name": "run_command", "arguments": native_chat_legacy_sse_run_args[:37]}}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": native_chat_legacy_sse_run_args[37:94]}}}]},
+                    {"type": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"function_call": {"arguments": native_chat_legacy_sse_run_args[94:]}}}]},
+                ]
+                body = "".join("event: chat.completion.chunk\ndata: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+                body += "data: [DONE]\n\n"
+                return body.encode("utf-8")
+
+        def fake_native_chat_legacy_sse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_chat_legacy_sse_captured["url"] = request.full_url
+            native_chat_legacy_sse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_chat_legacy_sse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIChatLegacySSESmokeResponse()
+
+        native_chat_legacy_sse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-openai-chat-sse-legacy.db"),
+                session_name="native-openai-chat-sse-legacy-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-chat-sse-legacy-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_chat_legacy_sse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_chat_legacy_sse_urlopen
+            native_chat_legacy_sse_plan = native_chat_legacy_sse_runtime.handle_message('/auto model=true prompt="native Chat Completions SSE legacy token=native-chat-legacy-sse-secret"')
+            native_chat_legacy_sse_plan_payload = json.loads(native_chat_legacy_sse_plan.split("\n", 1)[1])
+            native_chat_legacy_sse_apply = native_chat_legacy_sse_runtime.handle_message('/auto apply=true model=true prompt="native Chat Completions SSE legacy token=native-chat-legacy-sse-secret"')
+            native_chat_legacy_sse_apply_payload = json.loads(native_chat_legacy_sse_apply.split("\n", 1)[1])
+            write("native-openai-chat-completions-sse-legacy-function-call.json", json.dumps({
+                "plan": native_chat_legacy_sse_plan_payload,
+                "apply": native_chat_legacy_sse_apply_payload,
+                "captured": native_chat_legacy_sse_captured,
+                "marker_exists": native_chat_legacy_sse_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_chat_legacy_sse_original_urlopen
+            native_chat_legacy_sse_runtime.close()
+        native_chat_legacy_sse_calls = native_chat_legacy_sse_plan_payload.get("tool_calls", []) if isinstance(native_chat_legacy_sse_plan_payload.get("tool_calls"), list) else []
+        native_chat_legacy_sse_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_chat_legacy_sse_calls]
+        native_chat_legacy_sse_ledger = native_chat_legacy_sse_apply_payload.get("execution_ledger", []) if isinstance(native_chat_legacy_sse_apply_payload.get("execution_ledger"), list) else []
+        native_chat_legacy_sse_outputs = native_chat_legacy_sse_plan + native_chat_legacy_sse_apply + json.dumps(native_chat_legacy_sse_plan_payload) + json.dumps(native_chat_legacy_sse_apply_payload)
+        checks["native_openai_chat_completions_sse_legacy_function_call_ok"] = (
+            native_chat_legacy_sse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_chat_legacy_sse_calls] == ["run_command"]
+            and native_chat_legacy_sse_calls[0].get("args", {}).get("execute") is False
+            and native_chat_legacy_sse_calls[0].get("args", {}).get("purpose") == "Chat Completions SSE legacy function_call dry-run smoke"
+            and [item.get("native_tool_call_source") for item in native_chat_legacy_sse_metadata] == ["native provider chat completions sse delta function_call"]
+            and [item.get("native_tool_call_index") for item in native_chat_legacy_sse_metadata] == [1]
+            and [item.get("result", {}).get("status") for item in native_chat_legacy_sse_apply_payload.get("results", [])] == ["dry_run"]
+            and [item.get("execution_state") for item in native_chat_legacy_sse_ledger] == ["dry_run_not_executed"]
+            and native_chat_legacy_sse_ledger[0].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("chat_completions_sse_legacy_function_call_translation") is True
+            and "openai_chat_completions_sse_legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and str(native_chat_legacy_sse_captured.get("url", "")).endswith("/chat/completions")
+            and native_chat_legacy_sse_captured.get("tool_choice") == "auto"
+            and int(native_chat_legacy_sse_captured.get("tool_count", 0) or 0) > 0
+            and not native_chat_legacy_sse_marker.exists()
+            and "native-chat-legacy-sse-secret" not in native_chat_legacy_sse_outputs
+        )
+
         native_flat_marker = root / "native-flat-should-not-run.txt"
         native_flat_captured = {}
 
@@ -9076,6 +9158,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_tool_call_status_contract_ok",
             "native_openai_tool_call_adapter_ok",
             "native_openai_chat_completions_sse_tool_call_ok",
+            "native_openai_chat_completions_sse_legacy_function_call_ok",
             "native_openai_responses_adapter_ok",
             "native_gemini_adapter_ok",
             "native_gemini_stream_adapter_ok",

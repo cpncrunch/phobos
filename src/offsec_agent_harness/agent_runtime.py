@@ -35,6 +35,7 @@ _NATIVE_TOOL_CALL_MILESTONE_CONTRACT = {
     "wrapped_json_plan_extraction": True,
     "provider_native_tool_call_translation": True,
     "chat_completions_sse_tool_call_translation": True,
+    "chat_completions_sse_legacy_function_call_translation": True,
     "responses_api_endpoint_planning": True,
     "gemini_generate_content_planning": True,
     "gemini_stream_generate_content_translation": True,
@@ -1476,6 +1477,7 @@ def _runtime_metadata(config: AgentRuntimeConfig) -> dict[str, Any]:
             "provider_native_tool_call_variants": [
                 "openai_tool_calls",
                 "openai_chat_completions_sse_tool_calls",
+                "openai_chat_completions_sse_legacy_function_call",
                 "openai_responses_api",
                 "gemini_generate_content",
                 "gemini_stream_generate_content",

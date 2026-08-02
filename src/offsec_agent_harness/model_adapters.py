@@ -1341,6 +1341,7 @@ def _choice_delta_tool_call_merge_key(item: dict[str, Any], *, fallback_position
         if isinstance(value, bool) or value in (None, ""):
             continue
         return f"index:{value}"
+    provider_shape = str(item.get("_provider_shape") or "")
     call_id = _native_call_id(
         item,
         item.get("function") if isinstance(item.get("function"), dict) else None,
@@ -1351,6 +1352,17 @@ def _choice_delta_tool_call_merge_key(item: dict[str, Any], *, fallback_position
     )
     if call_id:
         return f"id:{call_id}"
+    if (
+        provider_shape.endswith(".function_call")
+        and provider_shape.startswith(("choice.delta", "chat.completions.sse.delta"))
+        and isinstance(item.get("function"), dict)
+    ):
+        # Legacy OpenAI-compatible Chat Completions streams expose a single
+        # ``delta.function_call`` object with the name and JSON arguments split
+        # across multiple chunks, but without modern ``tool_calls[].index`` or a
+        # provider call id.  Merge those chunks as one inert planner proposal;
+        # runtime schema, ROE, policy, and execute gates still own dispatch.
+        return f"{provider_shape}:legacy_function_call"
     return f"position:{fallback_position}"
 
 
