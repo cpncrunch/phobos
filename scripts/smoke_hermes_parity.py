@@ -2126,6 +2126,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("provider_hosted_tool_calls_rejected") is True
             and native_status_milestone_contract.get("gateway_and_bridge_surfaces") is True
             and native_status_milestone_contract.get("responses_output_tool_call_translation") is True
+            and native_status_milestone_contract.get("responses_stream_event_function_call_translation") is True
             and native_status_milestone_contract.get("single_responses_output_tool_call_translation") is True
             and native_status_milestone_contract.get("responses_output_nested_function_call_translation") is True
             and native_status_milestone_contract.get("responses_output_message_alias_translation") is True
@@ -2199,6 +2200,7 @@ def main(argv: list[str] | None = None) -> int:
             and "single_content_block_tool_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_stream_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -7895,6 +7897,101 @@ def main(argv: list[str] | None = None) -> int:
             and "native-loop-secret" not in json.dumps(gateway_loop)
             and "native-chat-secret" not in json.dumps(bridge_loop.to_dict())
         )
+        native_responses_stream_marker = root / "native-responses-stream-should-not-run.txt"
+        native_responses_stream_captured: dict[str, object] = {}
+
+        class NativeOpenAIResponsesStreamSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                memory_args = json.dumps({"key": "native-responses-stream-smoke", "value": "Responses stream events assembled in smoke"})
+                run_args = json.dumps({
+                    "target": "app.example.test",
+                    "purpose": "Responses stream dry-run smoke",
+                    "command": f"printf native-responses-stream > {native_responses_stream_marker}",
+                    "execute": True,
+                })
+                return json.dumps({
+                    "events": [
+                        {"type": "response.output_text.delta", "delta": "native Responses stream smoke token=native-responses-stream-secret"},
+                        {
+                            "type": "response.output_item.added",
+                            "item": {"id": "stream_smoke_memory_item", "type": "function_call", "call_id": "responses_stream_smoke_memory", "name": "remember", "arguments": memory_args[:31]},
+                        },
+                        {"type": "response.function_call_arguments.delta", "item_id": "stream_smoke_memory_item", "delta": memory_args[31:]},
+                        {
+                            "type": "response.output_item.added",
+                            "item": {"id": "stream_smoke_dry_item", "type": "function_call", "call_id": "responses_stream_smoke_dry", "name": "run_command", "arguments": ""},
+                        },
+                        {"type": "response.function_call_arguments.done", "item_id": "stream_smoke_dry_item", "arguments": run_args},
+                        {"type": "response.output_item.done", "item": {"id": "stream_smoke_result", "type": "function_call_output", "output": "RESPONSES_STREAM_SMOKE_RESULT_SHOULD_NOT_SURFACE token=native-responses-stream-secret"}},
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_responses_stream_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_stream_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_stream_captured["tool_choice"] = payload.get("tool_choice")
+            native_responses_stream_captured["url"] = request.full_url
+            return NativeOpenAIResponsesStreamSmokeResponse()
+
+        native_responses_stream_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-stream.db"),
+                session_name="native-provider-responses-stream-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAIResponsesAdapter(model="fake-native-responses-stream-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_stream_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_stream_urlopen
+            native_responses_stream_plan = native_responses_stream_runtime.handle_message('/auto model=true prompt="native Responses stream smoke token=native-responses-stream-secret"')
+            native_responses_stream_plan_payload = json.loads(native_responses_stream_plan.split("\n", 1)[1])
+            native_responses_stream_apply = native_responses_stream_runtime.handle_message('/auto apply=true model=true prompt="native Responses stream smoke token=native-responses-stream-secret"')
+            native_responses_stream_apply_payload = json.loads(native_responses_stream_apply.split("\n", 1)[1])
+            native_responses_stream_recall = native_responses_stream_runtime.handle_message('/recall query=native-responses-stream-smoke')
+            write("native-provider-responses-stream-events.json", json.dumps({
+                "plan": native_responses_stream_plan_payload,
+                "apply": native_responses_stream_apply_payload,
+                "captured": native_responses_stream_captured,
+                "recall": native_responses_stream_recall,
+                "marker_exists": native_responses_stream_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_stream_original_urlopen
+            native_responses_stream_runtime.close()
+        native_responses_stream_calls = native_responses_stream_plan_payload.get("tool_calls", []) if isinstance(native_responses_stream_plan_payload.get("tool_calls"), list) else []
+        native_responses_stream_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_stream_calls]
+        native_responses_stream_ledger = native_responses_stream_apply_payload.get("execution_ledger", []) if isinstance(native_responses_stream_apply_payload.get("execution_ledger"), list) else []
+        native_responses_stream_outputs = native_responses_stream_plan + native_responses_stream_apply + native_responses_stream_recall + json.dumps(native_responses_stream_plan_payload) + json.dumps(native_responses_stream_apply_payload)
+        checks["native_provider_responses_stream_event_ok"] = (
+            native_responses_stream_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_stream_calls] == ["remember", "run_command"]
+            and native_responses_stream_calls[0].get("args", {}).get("value") == "Responses stream events assembled in smoke"
+            and native_responses_stream_calls[1].get("args", {}).get("execute") is False
+            and all("native provider responses stream function_call" in call.get("reason", "") for call in native_responses_stream_calls)
+            and [item.get("provider_tool_call_id") for item in native_responses_stream_call_metadata] == ["responses_stream_smoke_memory", "responses_stream_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_responses_stream_call_metadata] == ["native provider responses stream function_call", "native provider responses stream function_call"]
+            and [item.get("result", {}).get("status") for item in native_responses_stream_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_responses_stream_ledger] == ["responses_stream_smoke_memory", "responses_stream_smoke_dry"]
+            and native_responses_stream_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("responses_stream_event_function_call_translation") is True
+            and "responses_stream_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses stream events assembled in smoke" in native_responses_stream_recall
+            and native_responses_stream_captured.get("tool_choice") == "auto"
+            and str(native_responses_stream_captured.get("url", "")).endswith("/responses")
+            and int(native_responses_stream_captured.get("tool_count", 0) or 0) > 0
+            and not native_responses_stream_marker.exists()
+            and "RESPONSES_STREAM_SMOKE_RESULT_SHOULD_NOT_SURFACE" not in native_responses_stream_outputs
+            and "native-responses-stream-secret" not in native_responses_stream_outputs
+        )
+
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
             "native_tool_call_plan_transcript_ok",
@@ -7940,6 +8037,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_tool_name_aliases_ok",
             "native_provider_single_content_block_tool_call_ok",
             "native_provider_responses_output_tool_call_ok",
+            "native_provider_responses_stream_event_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_output_message_aliases_ok",
             "native_provider_responses_output_message_typeless_wrapper_ok",

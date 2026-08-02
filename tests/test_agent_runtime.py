@@ -3253,6 +3253,107 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_stream_events_are_assembled_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Responses Stream Events",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-openai-responses-stream-should-not-execute.txt"
+            result_marker = "RESPONSES_STREAM_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesStreamHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    memory_args = json.dumps({"key": "native-openai-responses-stream", "value": "Responses stream events assembled"})
+                    run_args = json.dumps({
+                        "target": "app.example.test",
+                        "purpose": "Responses stream dry-run validation",
+                        "command": f"printf native-openai-responses-stream > {dry_run_marker}",
+                        "execute": True,
+                    })
+                    return json.dumps({
+                        "events": [
+                            {"type": "response.output_text.delta", "delta": "native Responses stream plan token=responses-stream-secret"},
+                            {
+                                "type": "response.output_item.added",
+                                "item": {
+                                    "id": "stream_memory_item",
+                                    "type": "function_call",
+                                    "call_id": "responses_stream_memory",
+                                    "name": "remember",
+                                    "arguments": memory_args[:30],
+                                },
+                            },
+                            {"type": "response.function_call_arguments.delta", "item_id": "stream_memory_item", "delta": memory_args[30:]},
+                            {
+                                "type": "response.output_item.added",
+                                "item": {
+                                    "id": "stream_dry_item",
+                                    "type": "function_call",
+                                    "call_id": "responses_stream_dry",
+                                    "name": "run_command",
+                                    "arguments": "",
+                                },
+                            },
+                            {"type": "response.function_call_arguments.done", "item_id": "stream_dry_item", "arguments": run_args},
+                            {"type": "response.output_item.done", "item": {"id": "stream_result", "type": "function_call_output", "output": result_marker + " token=responses-stream-secret"}},
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesStreamHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-responses-stream-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAIResponsesAdapter(model="fake-native-responses-stream-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Responses stream token=responses-stream-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["value"], "Responses stream events assembled")
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+                    self.assertTrue(all("native provider responses stream function_call" in call.get("reason", "") for call in plan_payload["tool_calls"]))
+                    self.assertIn("tool_result", json.dumps(plan_payload.get("warnings", [])).lower())
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Responses stream token=responses-stream-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-openai-responses-stream')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses stream events assembled", recall)
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["responses_stream_memory", "responses_stream_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider responses stream function_call", "native provider responses stream function_call"])
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_stream_event_function_call_translation"), status)
+                self.assertIn("responses_stream_function_call", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_requests)
+                self.assertEqual(captured_requests[0].get("tool_choice"), "auto")
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("responses-stream-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload) + json.dumps(status))
+            finally:
+                runtime.close()
+
     def test_gemini_adapter_native_tool_plan_uses_generate_content_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9219,6 +9320,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertTrue(milestone_contract.get("top_level_content_block_tool_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("content_parts_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("single_responses_output_tool_call_translation"), native_status)
+                self.assertTrue(milestone_contract.get("responses_stream_event_function_call_translation"), native_status)
                 self.assertTrue(milestone_contract.get("responses_message_tool_call_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("responses_message_tool_calls_camel_alias_translation"), native_status)
                 self.assertTrue(milestone_contract.get("responses_message_tool_call_singular_alias_translation"), native_status)
@@ -9257,6 +9359,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 self.assertIn("top_level_content_block_tool_use", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("content_parts_functionCall", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("single_responses_output_function_call", native_status.get("provider_native_tool_call_variants", []))
+                self.assertIn("responses_stream_function_call", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_output_message_typeless_wrapper", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_tool_calls", native_status.get("provider_native_tool_call_variants", []))
                 self.assertIn("responses_message_toolCalls", native_status.get("provider_native_tool_call_variants", []))

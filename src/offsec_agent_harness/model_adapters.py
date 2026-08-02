@@ -632,6 +632,9 @@ def _tool_plan_prompt(prompt: str, tool_specs: list[dict[str, Any]], *, allow_co
 
 
 def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
+    responses_stream_message = _responses_stream_events_to_message(raw)
+    if responses_stream_message:
+        return responses_stream_message
     choices = raw.get("choices") if isinstance(raw, dict) else []
     if isinstance(choices, list) and choices:
         first = choices[0]
@@ -728,6 +731,154 @@ def _choice_delta_sequence_to_message(choices: list[Any]) -> dict[str, Any]:
     if merged_tool_calls:
         message["tool_calls"] = merged_tool_calls
     return message
+
+
+def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
+    """Normalize captured Responses streaming events into message shape.
+
+    Some OpenAI/Responses-compatible gateways expose a bounded JSON capture of
+    SSE events instead of the final ``output[]`` object.  Assemble function-call
+    argument deltas locally, then pass only the reconstructed registered-call
+    shape into the normal Responses output parser.  This remains an adapter-only
+    translation boundary: no tool dispatch, approval queueing, evidence writes,
+    or target activity can happen here.
+    """
+
+    events = _responses_stream_event_items(raw)
+    if not events:
+        return {}
+    output_items: list[dict[str, Any]] = []
+    buckets: dict[str, dict[str, Any]] = {}
+    text_parts: list[str] = []
+    saw_stream_event = False
+    for position, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or event.get("event") or "").strip()
+        data = event.get("data")
+        if isinstance(data, dict) and not event_type:
+            event_type = str(data.get("type") or data.get("event") or "").strip()
+        if not event_type.startswith("response."):
+            continue
+        saw_stream_event = True
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = _responses_stream_event_value(event, "delta", "text")
+            if isinstance(delta, str):
+                text_parts.append(delta)
+            continue
+        if event_type in {"response.output_text.done", "response.refusal.done"}:
+            text = _responses_stream_event_value(event, "text", "delta")
+            if isinstance(text, str):
+                text_parts.append(text)
+            continue
+        response_obj = _responses_stream_event_value(event, "response")
+        if isinstance(response_obj, dict):
+            response_message = _responses_output_to_message(response_obj)
+            if response_message:
+                return response_message
+        item = _responses_stream_event_item(event)
+        if isinstance(item, dict):
+            item_type = str(item.get("type") or "").strip()
+            if item_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES or _native_provider_result_alias_value(item) is not None:
+                output_items.append({"type": "tool_result", "content": "<provider tool result omitted>", "_provider_shape": "responses.stream.output"})
+                continue
+            if item_type in _NATIVE_PROVIDER_UNSUPPORTED_TOOL_CALL_BLOCK_TYPES:
+                output_items.append(dict(item, _provider_shape=str(item.get("_provider_shape") or "responses.stream.output")))
+                continue
+            if item_type in {"function_call", "tool_call", "tool_use"} or _responses_output_item_looks_like_message(item):
+                key = _responses_stream_item_key(event, item, fallback=f"position:{position}")
+                bucket = buckets.get(key)
+                if bucket is None:
+                    bucket = dict(item, _provider_shape=str(item.get("_provider_shape") or "responses.stream.output"))
+                    if bucket.get("call_id") not in (None, "") or bucket.get("callId") not in (None, ""):
+                        bucket.pop("id", None)
+                    buckets[key] = bucket
+                    output_items.append(bucket)
+                else:
+                    _merge_native_tool_call_fragment(bucket, item)
+                continue
+        if "function_call_arguments" in event_type or "tool_call_arguments" in event_type:
+            key = _responses_stream_item_key(event, item if isinstance(item, dict) else None, fallback=f"position:{position}")
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = {"type": "function_call", "_provider_shape": "responses.stream.output"}
+                buckets[key] = bucket
+                output_items.append(bucket)
+            name = _responses_stream_event_value(event, "name", "function_name", "functionName", "toolName")
+            if isinstance(name, str) and name.strip() and not bucket.get("name"):
+                bucket["name"] = name
+            call_id = _responses_stream_event_value(event, "call_id", "tool_call_id", "toolCallId", "callId")
+            if call_id not in (None, "") and not bucket.get("call_id"):
+                bucket["call_id"] = call_id
+            if event_type.endswith(".delta"):
+                delta = _responses_stream_event_value(event, "delta", "arguments_delta", "argumentsDelta", "args_delta", "argsDelta")
+                if isinstance(delta, str):
+                    bucket["arguments"] = str(bucket.get("arguments") or "") + delta
+            if event_type.endswith(".done"):
+                arguments = _responses_stream_event_value(event, "arguments", "args", "input", "parameters")
+                if arguments not in (None, ""):
+                    bucket["arguments"] = arguments
+    if not saw_stream_event:
+        return {}
+    payload: dict[str, Any] = {}
+    if output_items:
+        payload["output"] = output_items
+    if text_parts:
+        payload["output_text"] = "".join(text_parts)
+    return _responses_output_to_message(payload) if payload else {}
+
+
+def _responses_stream_event_items(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if not isinstance(raw, dict):
+        return []
+    for key in ("events", "stream", "chunks"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            return value
+    data = raw.get("data")
+    if isinstance(data, list) and any(isinstance(item, dict) and str(item.get("type") or item.get("event") or "").startswith("response.") for item in data):
+        return data
+    if str(raw.get("type") or raw.get("event") or "").startswith("response."):
+        return [raw]
+    return []
+
+
+def _responses_stream_event_value(event: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in event:
+            return event.get(key)
+    data = event.get("data")
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data:
+                return data.get(key)
+    return None
+
+
+def _responses_stream_event_item(event: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("item", "output_item", "outputItem"):
+        value = _responses_stream_event_value(event, key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _responses_stream_item_key(event: dict[str, Any], item: dict[str, Any] | None, *, fallback: str) -> str:
+    candidates = [
+        _responses_stream_event_value(event, "item_id", "itemId", "output_item_id", "outputItemId"),
+        _responses_stream_event_value(event, "call_id", "callId", "tool_call_id", "toolCallId"),
+    ]
+    if isinstance(item, dict):
+        candidates.extend([item.get("id"), item.get("item_id"), item.get("call_id"), item.get("callId"), item.get("tool_call_id"), item.get("toolCallId")])
+    output_index = _responses_stream_event_value(event, "output_index", "outputIndex", "index")
+    if output_index not in (None, ""):
+        candidates.append(f"index:{output_index}")
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            return str(candidate)
+    return fallback
 
 
 def _merge_choice_delta_tool_call_chunks(chunks: list[Any]) -> list[Any]:
@@ -2052,6 +2203,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
         arguments = _native_argument_value(item, preferred=("arguments", "args", "input", "parameters", "params"))
         if item.get("_provider_shape") == "responses.output":
             label = "native provider responses output function_call"
+        elif item.get("_provider_shape") == "responses.stream.output":
+            label = "native provider responses stream function_call"
         elif item.get("_provider_shape") == "single_responses.output":
             label = "native provider single responses output function_call"
         elif item.get("_provider_shape") == "responses.output.functionCall":

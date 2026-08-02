@@ -702,6 +702,7 @@ native_provider_argument_aliases_ok=True
 native_provider_tool_name_aliases_ok=True
 native_provider_single_content_block_tool_call_ok=True
 native_provider_responses_output_tool_call_ok=True
+native_provider_responses_stream_event_ok=True
 native_provider_responses_output_nested_function_call_ok=True
 native_provider_responses_output_message_aliases_ok=True
 native_provider_responses_output_message_typeless_wrapper_ok=True
@@ -813,11 +814,11 @@ remote_vps_ui_auth_ok=True
 pack_exported_and_redacted=True
 no_legacy_public_terms_ok=True
 db_exists=True
-artifact_count=757
+artifact_count=763
 pack=/root/Documents/Tools/phobos-agent/demo-phobos-parity/evidence/phobos-agent-parity-smoke/agent/exports/closeout-pack.zip
 ```
 
-`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct Gemini GenerateContent candidate `functionCall` plans, direct Anthropic Messages `tool_use` plans, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, typed and typeless nested `output[].message` wrappers, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance with duplicate-ID rejection before dispatch, per-step model tool-call budget enforcement, result-echo suppression (including camelCase result aliases and role=`tool`/`function` result messages), provider-hosted/freeform tool-call rejection (including Responses file-search, image-generation, local-shell, and MCP hosted calls), runtime policy, ROE preview, approval stops, and ledger claim semantics. The smoke gate also compares the aggregate list against every `native_*` smoke boolean so new native coverage cannot be left out silently.
+`native_tool_call_milestone_contract_ok=True` is an aggregate gate over every native tool-call safety/translation smoke above, including direct Gemini GenerateContent candidate `functionCall` plans, direct Anthropic Messages `tool_use` plans, single/top-level content-block calls, flat/choice-delta/choice-delta-fragment/choice-delta-functionCall-fragment/choice-delta-toolUse-fragment/nested/message-level/message-content/parts Responses output calls, captured Responses streaming function-call events with argument-delta assembly, typed and typeless nested `output[].message` wrappers, root-level `message` wrapper alias matrix, root-level `toolUse`/`toolUses` aliases, message-level `toolUse`/`toolUses` aliases, root/message `functionCall` / `functionCalls` / `function_calls` aliases, provider tool-name alias normalization, bounded/redacted provider call-ID provenance with duplicate-ID rejection before dispatch, per-step model tool-call budget enforcement, result-echo suppression (including camelCase result aliases and role=`tool`/`function` result messages), provider-hosted/freeform tool-call rejection (including Responses file-search, image-generation, local-shell, and MCP hosted calls), runtime policy, ROE preview, approval stops, and ledger claim semantics. The smoke gate also compares the aggregate list against every `native_*` smoke boolean so new native coverage cannot be left out silently.
 
 Live local integration smoke is available as `scripts/smoke_live_integrations.py`. It verifies scanner binary resolution and real wrapper execution against only a temporary `127.0.0.1` HTTP server; it uses a generated one-request Nuclei template and never sends chat messages. Current local run with scanner execution required produced:
 
