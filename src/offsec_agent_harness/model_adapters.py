@@ -702,6 +702,9 @@ def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> di
     root_contents = _root_contents_to_message(raw)
     if root_contents:
         return root_contents
+    root_predictions = _root_predictions_to_message(raw, depth=_wrapper_depth)
+    if root_predictions:
+        return root_predictions
     candidate_message = _candidate_content_to_message(raw)
     if candidate_message:
         return candidate_message
@@ -1894,6 +1897,58 @@ def _root_contents_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _root_prediction_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return Vertex/AI-gateway prediction objects from plural or singular wrappers."""
+
+    if not isinstance(raw, dict):
+        return []
+    predictions = raw.get("predictions")
+    if isinstance(predictions, dict):
+        return [predictions]
+    if isinstance(predictions, list):
+        return [prediction for prediction in predictions if isinstance(prediction, dict)]
+    prediction = raw.get("prediction")
+    if isinstance(prediction, dict):
+        return [prediction]
+    return []
+
+
+def _root_predictions_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
+    """Normalize root-level Vertex/AI-gateway ``predictions[]`` wrappers.
+
+    Several local or Vertex-compatible gateways return a final model payload as
+    ``{"predictions": [...]}`` rather than Chat Completions ``choices`` or a
+    Gemini ``candidates`` object.  Treat each prediction as an inert assistant
+    message/proposal candidate, skip provider result echoes, and let the normal
+    Phobos runtime boundary validate schemas, runtime policy, ROE previews,
+    approvals, explicit execute intent, transcripts, and redaction before any
+    handler can run.  Recursion is bounded so malformed nested prediction
+    envelopes fail closed as no-tool responses.
+    """
+
+    if depth >= 3 or not isinstance(raw, dict):
+        return {}
+    for item in _root_prediction_items(raw):
+        if _native_provider_result_role_message(item, provider_shape="root.predictions"):
+            continue
+        message_obj = item.get("message")
+        if isinstance(message_obj, dict):
+            result_echo = _native_provider_result_role_message(message_obj, provider_shape="root.predictions")
+            if result_echo:
+                continue
+            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix="root.predictions")
+            if message:
+                return message
+        if _responses_output_item_looks_like_message(item):
+            message = _provider_message_wrapper_to_message(item, provider_shape_prefix="root.predictions")
+            if message:
+                return message
+        nested = _first_choice_message(item, _wrapper_depth=depth + 1)
+        if nested:
+            return nested
+    return {}
+
+
 def _candidate_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Return Gemini-style candidate objects from plural or collapsed wrappers."""
 
@@ -2727,6 +2782,10 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root contents content {native_kind}"
     if provider_shape == "root.contents.content.parts":
         return f"native provider root contents content parts {native_kind}"
+    if provider_shape == "root.predictions.content":
+        return f"native provider root predictions content {native_kind}"
+    if provider_shape == "root.predictions.content.parts":
+        return f"native provider root predictions content parts {native_kind}"
     if provider_shape == "bedrock.converse.message.content":
         return f"native provider bedrock converse message content {native_kind}"
     if provider_shape == "bedrock.converse.message.content.parts":
@@ -2835,6 +2894,10 @@ def _parse_native_content_function_call_block(
         label = "native provider root contents content functionCall"
     elif provider_shape == "root.contents.content.parts":
         label = "native provider root contents content parts functionCall"
+    elif provider_shape == "root.predictions.content":
+        label = "native provider root predictions content functionCall"
+    elif provider_shape == "root.predictions.content.parts":
+        label = "native provider root predictions content parts functionCall"
     elif provider_shape == "bedrock.converse.message.content":
         label = "native provider bedrock converse message content functionCall"
     elif provider_shape == "bedrock.converse.message.content.parts":
@@ -2988,6 +3051,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.messages."):
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.predictions."):
+            label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
@@ -3099,6 +3164,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.messages."):
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("root.predictions."):
+            label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":
