@@ -756,6 +756,14 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
         return {}
     output_items: list[dict[str, Any]] = []
     buckets: dict[str, dict[str, Any]] = {}
+    bucket_aliases: dict[str, str] = {}
+
+    def resolve_bucket_key(event: dict[str, Any], item: dict[str, Any] | None, *, fallback: str) -> str:
+        keys = _responses_stream_item_keys(event, item, fallback=fallback)
+        canonical = next((bucket_aliases[key] for key in keys if key in bucket_aliases), keys[0])
+        for key in keys:
+            bucket_aliases[key] = canonical
+        return canonical
     text_parts: list[str] = []
     saw_stream_event = False
     for position, event in enumerate(events):
@@ -793,7 +801,7 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
                 output_items.append(dict(item, _provider_shape=str(item.get("_provider_shape") or "responses.stream.output")))
                 continue
             if item_type in {"function_call", "tool_call", "tool_use"} or _responses_output_item_looks_like_message(item):
-                key = _responses_stream_item_key(event, item, fallback=f"position:{position}")
+                key = resolve_bucket_key(event, item, fallback=f"position:{position}")
                 bucket = buckets.get(key)
                 if bucket is None:
                     bucket = dict(item, _provider_shape=str(item.get("_provider_shape") or "responses.stream.output"))
@@ -805,7 +813,7 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
                     _merge_native_tool_call_fragment(bucket, item)
                 continue
         if "function_call_arguments" in event_type or "tool_call_arguments" in event_type:
-            key = _responses_stream_item_key(event, item if isinstance(item, dict) else None, fallback=f"position:{position}")
+            key = resolve_bucket_key(event, item if isinstance(item, dict) else None, fallback=f"position:{position}")
             bucket = buckets.get(key)
             if bucket is None:
                 bucket = {"type": "function_call", "_provider_shape": "responses.stream.output"}
@@ -955,6 +963,20 @@ def _responses_stream_event_item(event: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _responses_stream_item_key(event: dict[str, Any], item: dict[str, Any] | None, *, fallback: str) -> str:
+    return _responses_stream_item_keys(event, item, fallback=fallback)[0]
+
+
+def _responses_stream_item_keys(event: dict[str, Any], item: dict[str, Any] | None, *, fallback: str) -> list[str]:
+    """Return all safe correlation keys for a Responses stream item.
+
+    Raw Responses/SSE captures do not always use the same identifier on every
+    event: an ``output_item.added`` frame may carry an internal item ``id`` while
+    later argument deltas carry only the provider ``call_id``.  Return every
+    recognizable alias so the stream assembler can merge those fragments into a
+    single planned call while still preserving the provider call id separately in
+    transcripts and execution ledgers.
+    """
+
     candidates = [
         _responses_stream_event_value(event, "item_id", "itemId", "output_item_id", "outputItemId"),
         _responses_stream_event_value(event, "call_id", "callId", "tool_call_id", "toolCallId"),
@@ -964,10 +986,15 @@ def _responses_stream_item_key(event: dict[str, Any], item: dict[str, Any] | Non
     output_index = _responses_stream_event_value(event, "output_index", "outputIndex", "index")
     if output_index not in (None, ""):
         candidates.append(f"index:{output_index}")
+    keys: list[str] = []
     for candidate in candidates:
         if candidate not in (None, ""):
-            return str(candidate)
-    return fallback
+            key = str(candidate)
+            if key not in keys:
+                keys.append(key)
+    if fallback not in keys:
+        keys.append(fallback)
+    return keys
 
 
 def _merge_choice_delta_tool_call_chunks(chunks: list[Any]) -> list[Any]:

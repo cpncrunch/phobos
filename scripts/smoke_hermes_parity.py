@@ -8019,7 +8019,7 @@ def main(argv: list[str] | None = None) -> int:
                             "item": {"id": "sse_smoke_memory_item", "type": "function_call", "call_id": "responses_sse_smoke_memory", "name": "remember", "arguments": memory_args[:33]},
                         },
                     ),
-                    ("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "item_id": "sse_smoke_memory_item", "delta": memory_args[33:]}),
+                    ("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta", "call_id": "responses_sse_smoke_memory", "delta": memory_args[33:]}),
                     (
                         "response.output_item.added",
                         {
@@ -8027,7 +8027,7 @@ def main(argv: list[str] | None = None) -> int:
                             "item": {"id": "sse_smoke_dry_item", "type": "function_call", "call_id": "responses_sse_smoke_dry", "name": "run_command", "arguments": ""},
                         },
                     ),
-                    ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "item_id": "sse_smoke_dry_item", "arguments": run_args}),
+                    ("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "call_id": "responses_sse_smoke_dry", "arguments": run_args}),
                     ("response.output_item.done", {"type": "response.output_item.done", "item": {"id": "sse_smoke_result", "type": "function_call_output", "output": "RESPONSES_SSE_SMOKE_RESULT_SHOULD_NOT_SURFACE token=native-responses-sse-secret"}}),
                 ]
                 return (
@@ -8097,6 +8097,13 @@ def main(argv: list[str] | None = None) -> int:
             and "RESPONSES_SSE_SMOKE_RESULT_SHOULD_NOT_SURFACE" not in native_responses_sse_outputs
             and "native-responses-sse-secret" not in native_responses_sse_outputs
         )
+        checks["native_provider_responses_sse_call_id_delta_alias_ok"] = (
+            checks.get("native_provider_responses_sse_stream_event_ok") is True
+            and native_responses_sse_calls[0].get("args", {}).get("key") == "native-responses-sse-smoke"
+            and [item.get("provider_tool_call_id") for item in native_responses_sse_ledger] == ["responses_sse_smoke_memory", "responses_sse_smoke_dry"]
+            and native_status_milestone_contract.get("responses_stream_call_id_delta_alias_translation") is True
+            and "responses_stream_call_id_delta_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+        )
 
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
@@ -8145,6 +8152,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_output_tool_call_ok",
             "native_provider_responses_stream_event_ok",
             "native_provider_responses_sse_stream_event_ok",
+            "native_provider_responses_sse_call_id_delta_alias_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_output_message_aliases_ok",
             "native_provider_responses_output_message_typeless_wrapper_ok",
