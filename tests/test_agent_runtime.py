@@ -4263,6 +4263,107 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_bedrock_converse_message_tool_use_wrappers_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Bedrock Converse Message ToolUse",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            dry_run_marker = tmp_path / "native-bedrock-converse-should-not-execute.txt"
+            result_marker = "BEDROCK_CONVERSE_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeBedrockConverseHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "output": {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"text": "native Bedrock Converse message token=bedrock-converse-secret"},
+                                    {
+                                        "toolUse": {
+                                            "toolUseId": "bedrock_converse_memory",
+                                            "name": "remember",
+                                            "input": {
+                                                "key": "native-bedrock-converse",
+                                                "value": "Bedrock Converse output.message toolUse translated",
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "toolUse": {
+                                            "toolUseId": "bedrock_converse_dry",
+                                            "toolName": "run_command",
+                                            "input": {
+                                                "target": "app.example.test",
+                                                "purpose": "Bedrock Converse message dry-run validation",
+                                                "command": f"printf native-bedrock-converse > {dry_run_marker}",
+                                                "execute": True,
+                                            },
+                                        }
+                                    },
+                                    {"toolResult": {"toolUseId": "bedrock_converse_result", "content": result_marker + " token=bedrock-converse-secret"}},
+                                ],
+                            }
+                        },
+                        "stopReason": "tool_use",
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                return FakeBedrockConverseHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-bedrock-converse-message-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=AnthropicMessagesAdapter(
+                    model="fake-bedrock-converse-message-model",
+                    base_url="http://127.0.0.1:9/v1",
+                    key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+                ),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Bedrock Converse message token=bedrock-converse-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Bedrock Converse message token=bedrock-converse-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                recall = runtime.handle_message('/recall query=native-bedrock-converse')
+                calls = plan_payload.get("tool_calls", [])
+                call_metadata = [call.get("metadata", {}) for call in calls]
+                apply_ledger = apply_payload.get("execution_ledger", [])
+                self.assertEqual(plan_payload["mode"], "plan_only")
+                self.assertEqual([call.get("tool") for call in calls], ["remember", "run_command"])
+                self.assertEqual(calls[0].get("args", {}).get("value"), "Bedrock Converse output.message toolUse translated")
+                self.assertFalse(calls[1].get("args", {}).get("execute"))
+                self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["bedrock_converse_memory", "bedrock_converse_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider bedrock converse message content toolUse", "native provider bedrock converse message content toolUse"])
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["bedrock_converse_memory", "bedrock_converse_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider bedrock converse message content toolUse", "native provider bedrock converse message content toolUse"])
+                self.assertEqual([item.get("result", {}).get("status") for item in apply_payload.get("results", [])], ["ok", "dry_run"])
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertTrue(status.get("milestone_contract", {}).get("bedrock_converse_message_tool_use_translation"), status)
+                self.assertIn("bedrock_converse_message_toolUse", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("Bedrock Converse output.message toolUse translated", recall)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertNotIn(result_marker, planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+                self.assertNotIn("bedrock-converse-secret", planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload))
+            finally:
+                runtime.close()
+
     def test_openai_native_tool_call_edge_cases_keep_rejected_calls_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

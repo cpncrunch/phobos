@@ -652,6 +652,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     anthropic_stream_message = _anthropic_stream_events_to_message(raw)
     if anthropic_stream_message:
         return anthropic_stream_message
+    bedrock_converse_message = _bedrock_converse_output_to_message(raw)
+    if bedrock_converse_message:
+        return bedrock_converse_message
     choices = raw.get("choices") if isinstance(raw, dict) else []
     if isinstance(choices, list) and choices:
         first = choices[0]
@@ -1633,6 +1636,56 @@ def _candidate_content_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {"content": content_blocks, "tool_calls": tool_calls}
 
 
+def _bedrock_converse_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Bedrock/Converse ``output.message`` tool-use responses.
+
+    AWS Bedrock Converse and Anthropic-compatible gateways commonly return a
+    non-stream response as ``{"output": {"message": {"content": [...]}}}``
+    where tool requests are content-block ``toolUse`` objects and prior results
+    are ``toolResult`` blocks.  Translate only those inert planner proposals into
+    the normal message shape; runtime schema validation, policy, ROE previews,
+    approvals, explicit execute intent, and transcript redaction remain
+    authoritative before any Phobos handler can dispatch.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    output = raw.get("output")
+    if not isinstance(output, dict):
+        return {}
+    message_obj = output.get("message")
+    if not isinstance(message_obj, dict):
+        return {}
+    result_echo = _native_provider_result_role_message(message_obj, provider_shape="bedrock.converse.message")
+    if result_echo:
+        return result_echo
+    message: dict[str, Any] = {}
+    if "content" in message_obj:
+        content_blocks: list[dict[str, Any]] = []
+        _extend_responses_content_blocks(
+            content_blocks,
+            message_obj.get("content"),
+            provider_shape="bedrock.converse.message.content",
+        )
+        if content_blocks:
+            message["content"] = content_blocks
+        else:
+            content_value = message_obj.get("content")
+            if isinstance(content_value, (str, list, dict)) or content_value is None:
+                message["content"] = content_value
+    tool_calls: list[dict[str, Any]] = []
+    _extend_responses_message_tool_calls(tool_calls, message_obj, provider_shape_prefix="bedrock.converse.message")
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    function_response = _native_provider_result_alias_value(message_obj)
+    if isinstance(function_response, dict):
+        _append_message_content_block(
+            message,
+            {"type": "tool_result", "content": _native_provider_result_content(function_response)},
+        )
+    return message if message else {}
+
+
 def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize Responses-style output blocks into a chat message shape.
 
@@ -2330,6 +2383,10 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root message content {native_kind}"
     if provider_shape == "root.message.content.parts":
         return f"native provider root message content parts {native_kind}"
+    if provider_shape == "bedrock.converse.message.content":
+        return f"native provider bedrock converse message content {native_kind}"
+    if provider_shape == "bedrock.converse.message.content.parts":
+        return f"native provider bedrock converse message content parts {native_kind}"
     if provider_shape == "content.parts":
         return f"native provider content parts {native_kind}"
     if provider_shape == "anthropic.messages.content":
@@ -2420,6 +2477,10 @@ def _parse_native_content_function_call_block(
         label = "native provider root message content functionCall"
     elif provider_shape == "root.message.content.parts":
         label = "native provider root message content parts functionCall"
+    elif provider_shape == "bedrock.converse.message.content":
+        label = "native provider bedrock converse message content functionCall"
+    elif provider_shape == "bedrock.converse.message.content.parts":
+        label = "native provider bedrock converse message content parts functionCall"
     elif provider_shape == "content.parts":
         label = "native provider content parts functionCall"
     elif provider_shape == "anthropic.messages.content":
@@ -2561,6 +2622,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("bedrock.converse.message."):
+            label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
             label = "native provider " + provider_shape.replace("_", " ").replace(".", " ")
         elif provider_shape.startswith("choice."):
@@ -2664,6 +2727,8 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider responses output message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.message."):
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith("bedrock.converse.message."):
+            label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":
             label = "native provider single top-level tool_call"
         elif provider_shape == "singular.tool_call":

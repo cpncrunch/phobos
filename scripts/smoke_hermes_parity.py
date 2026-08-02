@@ -2160,6 +2160,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("content_block_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("anthropic_messages_tool_use_alias_translation") is True
             and native_status_milestone_contract.get("anthropic_messages_sse_tool_use_stream_translation") is True
+            and native_status_milestone_contract.get("bedrock_converse_message_tool_use_translation") is True
             and native_status_milestone_contract.get("provider_argument_alias_translation") is True
             and native_status_milestone_contract.get("provider_tool_name_alias_translation") is True
             and native_status_milestone_contract.get("provider_function_call_id_alias_translation") is True
@@ -2254,6 +2255,7 @@ def main(argv: list[str] | None = None) -> int:
             and "message_function_calls_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "legacy_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "anthropic_messages_sse_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "bedrock_converse_message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
             and "openai_responses_api" in native_status_data.get("provider_native_tool_call_variants", [])
             and "tool_use_id" in native_status_data.get("provider_tool_call_id_aliases", [])
             and "callId" in native_status_data.get("provider_tool_call_id_aliases", [])
@@ -5963,6 +5965,114 @@ def main(argv: list[str] | None = None) -> int:
             and "native-anthropic-converse-secret" not in native_anthropic_converse_outputs
         )
 
+        native_bedrock_converse_marker = root / "native-bedrock-converse-should-not-run.txt"
+        native_bedrock_converse_captured = {}
+        native_bedrock_converse_result_marker = "BEDROCK_CONVERSE_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeBedrockConverseMessageSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "output": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"text": "native Bedrock Converse message smoke token=native-bedrock-converse-secret"},
+                                {
+                                    "toolUse": {
+                                        "toolUseId": "bedrock_converse_smoke_memory",
+                                        "name": "remember",
+                                        "input": {
+                                            "key": "native-bedrock-converse-smoke",
+                                            "value": "Bedrock Converse output.message toolUse translated",
+                                        },
+                                    }
+                                },
+                                {
+                                    "toolUse": {
+                                        "toolUseId": "bedrock_converse_smoke_dry",
+                                        "toolName": "run_command",
+                                        "input": {
+                                            "target": "app.example.test",
+                                            "purpose": "Bedrock Converse message dry-run smoke",
+                                            "command": f"printf native-bedrock-converse > {native_bedrock_converse_marker}",
+                                            "execute": True,
+                                        },
+                                    }
+                                },
+                                {"toolResult": {"toolUseId": "bedrock_converse_smoke_result", "content": native_bedrock_converse_result_marker + " token=native-bedrock-converse-secret"}},
+                            ],
+                        }
+                    },
+                    "stopReason": "tool_use",
+                }).encode("utf-8")
+
+        def fake_native_bedrock_converse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_bedrock_converse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_bedrock_converse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeBedrockConverseMessageSmokeResponse()
+
+        native_bedrock_converse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(root / "native-bedrock-converse-agent.db"),
+                session_name="native-bedrock-converse-smoke-runtime",
+                auto_model_planning=True,
+            ),
+            adapter=AnthropicMessagesAdapter(
+                model="fake-bedrock-converse-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_bedrock_converse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_bedrock_converse_urlopen
+            native_bedrock_converse_plan = native_bedrock_converse_runtime.handle_message('/auto model=true prompt="native Bedrock Converse smoke token=native-bedrock-converse-secret"')
+            native_bedrock_converse_plan_payload = json.loads(native_bedrock_converse_plan.split("\n", 1)[1])
+            native_bedrock_converse_apply = native_bedrock_converse_runtime.handle_message('/auto apply=true model=true prompt="native Bedrock Converse smoke token=native-bedrock-converse-secret"')
+            native_bedrock_converse_apply_payload = json.loads(native_bedrock_converse_apply.split("\n", 1)[1])
+            native_bedrock_converse_recall = native_bedrock_converse_runtime.handle_message('/recall query=native-bedrock-converse-smoke')
+            write("native-bedrock-converse-message.json", redact_secrets(json.dumps({
+                "plan": native_bedrock_converse_plan_payload,
+                "apply": native_bedrock_converse_apply_payload,
+                "captured": native_bedrock_converse_captured,
+                "recall": native_bedrock_converse_recall,
+                "marker_exists": native_bedrock_converse_marker.exists(),
+            }, indent=2, sort_keys=True)) or "{}")
+        finally:
+            model_adapters.urllib.request.urlopen = native_bedrock_converse_original_urlopen
+            native_bedrock_converse_runtime.close()
+        native_bedrock_converse_calls = native_bedrock_converse_plan_payload.get("tool_calls", []) if isinstance(native_bedrock_converse_plan_payload.get("tool_calls"), list) else []
+        native_bedrock_converse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_bedrock_converse_calls]
+        native_bedrock_converse_ledger = native_bedrock_converse_apply_payload.get("execution_ledger", []) if isinstance(native_bedrock_converse_apply_payload.get("execution_ledger"), list) else []
+        native_bedrock_converse_outputs = native_bedrock_converse_plan + native_bedrock_converse_apply + native_bedrock_converse_recall + json.dumps(native_bedrock_converse_plan_payload) + json.dumps(native_bedrock_converse_apply_payload)
+        checks["native_bedrock_converse_message_tool_use_ok"] = (
+            native_bedrock_converse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_bedrock_converse_calls] == ["remember", "run_command"]
+            and native_bedrock_converse_calls[0].get("args", {}).get("value") == "Bedrock Converse output.message toolUse translated"
+            and native_bedrock_converse_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_bedrock_converse_call_metadata] == ["bedrock_converse_smoke_memory", "bedrock_converse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_bedrock_converse_call_metadata] == ["native provider bedrock converse message content toolUse", "native provider bedrock converse message content toolUse"]
+            and [item.get("provider_tool_call_id") for item in native_bedrock_converse_ledger] == ["bedrock_converse_smoke_memory", "bedrock_converse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_bedrock_converse_ledger] == ["native provider bedrock converse message content toolUse", "native provider bedrock converse message content toolUse"]
+            and [item.get("result", {}).get("status") for item in native_bedrock_converse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("bedrock_converse_message_tool_use_translation") is True
+            and "bedrock_converse_message_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and native_bedrock_converse_captured.get("tool_choice") == {"type": "auto"}
+            and native_bedrock_converse_captured.get("tool_count", 0) > 0
+            and "Bedrock Converse output.message toolUse translated" in native_bedrock_converse_recall
+            and not native_bedrock_converse_marker.exists()
+            and native_bedrock_converse_result_marker not in native_bedrock_converse_outputs
+            and "native-bedrock-converse-secret" not in native_bedrock_converse_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -8716,6 +8826,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_anthropic_tool_use_alias_ok",
             "native_anthropic_sse_tool_use_stream_ok",
             "native_anthropic_converse_stream_tool_use_ok",
+            "native_bedrock_converse_message_tool_use_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_tool_call_object_map_ok",
             "native_provider_choice_delta_tool_call_ok",
