@@ -2153,6 +2153,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
             and native_status_milestone_contract.get("root_contents_wrapper_translation") is True
             and native_status_milestone_contract.get("root_predictions_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_prediction_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("root_outputs_wrapper_translation") is True
             and native_status_milestone_contract.get("root_outputs_direct_tool_call_translation") is True
             and native_status_milestone_contract.get("root_output_items_wrapper_translation") is True
@@ -2254,6 +2255,7 @@ def main(argv: list[str] | None = None) -> int:
             and "root_messages_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_contents_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_predictions_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_prediction_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_outputs_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_outputs_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_output_items_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -5025,6 +5027,116 @@ def main(argv: list[str] | None = None) -> int:
             and not native_root_predictions_marker.exists()
             and native_root_predictions_result_marker not in native_root_predictions_blob
             and "native-root-predictions-secret" not in native_root_predictions_blob
+        )
+
+
+        native_root_prediction_captured = {}
+        native_root_prediction_marker = root / "native-root-prediction-should-not-run.txt"
+        native_root_prediction_result_marker = "ROOT_PREDICTION_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootPredictionSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "prediction": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "native root prediction smoke token=native-root-prediction-secret"},
+                                {"functionResponse": {"name": "remember", "response": {"content": native_root_prediction_result_marker + " trailing token=native-root-prediction-secret"}}},
+                            ],
+                            "tool_calls": [
+                                {
+                                    "id": "root_prediction_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-root-prediction-smoke", "value": "root prediction wrapper native tool call translated"}),
+                                    },
+                                },
+                                {
+                                    "toolCallId": "root_prediction_dry",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": json.dumps({
+                                            "target": "app.example.test",
+                                            "purpose": "root prediction native dry-run smoke",
+                                            "command": f"printf native-root-prediction > {native_root_prediction_marker}",
+                                            "execute": True,
+                                        }),
+                                    },
+                                },
+                            ],
+                        }
+                    }
+                }).encode("utf-8")
+
+        def fake_native_root_prediction_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_prediction_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_prediction_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootPredictionSmokeResponse()
+
+        native_root_prediction_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-prediction.db"),
+                session_name="native-provider-root-prediction-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-prediction-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_prediction_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_prediction_urlopen
+            native_root_prediction_plan = native_root_prediction_runtime.handle_message('/auto model=true prompt="native root prediction smoke token=native-root-prediction-secret"')
+            native_root_prediction_plan_payload = json.loads(native_root_prediction_plan.split("\n", 1)[1])
+            native_root_prediction_apply = native_root_prediction_runtime.handle_message('/auto apply=true model=true prompt="native root prediction smoke token=native-root-prediction-secret"')
+            native_root_prediction_apply_payload = json.loads(native_root_prediction_apply.split("\n", 1)[1])
+            native_root_prediction_recall = native_root_prediction_runtime.handle_message('/recall query=native-root-prediction-smoke')
+            write("native-provider-root-prediction-tool-calls.json", json.dumps({
+                "plan": native_root_prediction_plan_payload,
+                "apply": native_root_prediction_apply_payload,
+                "captured": native_root_prediction_captured,
+                "recall": native_root_prediction_recall,
+                "marker_exists": native_root_prediction_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_prediction_original_urlopen
+            native_root_prediction_runtime.close()
+        native_root_prediction_calls = native_root_prediction_plan_payload.get("tool_calls", []) if isinstance(native_root_prediction_plan_payload.get("tool_calls"), list) else []
+        native_root_prediction_metadata = native_root_prediction_plan_payload.get("metadata", {}) if isinstance(native_root_prediction_plan_payload.get("metadata"), dict) else {}
+        native_root_prediction_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_prediction_calls]
+        native_root_prediction_ledger = native_root_prediction_apply_payload.get("execution_ledger", []) if isinstance(native_root_prediction_apply_payload.get("execution_ledger"), list) else []
+        native_root_prediction_blob = native_root_prediction_plan + native_root_prediction_apply + native_root_prediction_recall + json.dumps(native_root_prediction_plan_payload) + json.dumps(native_root_prediction_apply_payload)
+        checks["native_provider_root_prediction_singular_wrapper_ok"] = (
+            native_root_prediction_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_prediction_calls] == ["remember", "run_command"]
+            and all("native provider root prediction tool_calls" in call.get("reason", "") for call in native_root_prediction_calls)
+            and native_root_prediction_calls[0].get("args", {}).get("key") == "native-root-prediction-smoke"
+            and native_root_prediction_calls[1].get("args", {}).get("execute") is False
+            and native_root_prediction_metadata.get("native_tool_calls") is True
+            and native_root_prediction_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_root_prediction_call_metadata] == ["root_prediction_memory", "root_prediction_dry"]
+            and [item.get("native_tool_call_source") for item in native_root_prediction_call_metadata] == ["native provider root prediction tool_calls", "native provider root prediction tool_calls"]
+            and [item.get("result", {}).get("status") for item in native_root_prediction_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_prediction_ledger] == ["root_prediction_memory", "root_prediction_dry"]
+            and native_root_prediction_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_prediction_singular_wrapper_translation") is True
+            and "root_prediction_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "functionResponse" in json.dumps(native_root_prediction_plan_payload.get("warnings", []))
+            and "root prediction wrapper native tool call translated" in native_root_prediction_recall
+            and native_root_prediction_captured.get("tool_choice") == "auto"
+            and native_root_prediction_captured.get("tool_count", 0) > 0
+            and not native_root_prediction_marker.exists()
+            and native_root_prediction_result_marker not in native_root_prediction_blob
+            and "native-root-prediction-secret" not in native_root_prediction_blob
         )
 
         native_root_outputs_captured = {}
@@ -11251,6 +11363,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_root_messages_wrapper_ok",
             "native_provider_root_contents_wrapper_ok",
             "native_provider_root_predictions_wrapper_ok",
+            "native_provider_root_prediction_singular_wrapper_ok",
             "native_provider_root_outputs_wrapper_ok",
             "native_provider_root_outputs_direct_function_call_ok",
             "native_provider_root_output_items_wrapper_ok",

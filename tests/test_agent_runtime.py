@@ -9570,6 +9570,114 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+
+    def test_openai_root_prediction_singular_wrapper_tool_calls_are_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native Root Prediction Singular Wrapper",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_payloads = []
+            dry_run_marker = tmp_path / "native-root-prediction-should-not-run.txt"
+            provider_result_marker = "ROOT_PREDICTION_TOOL_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeRootPredictionHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps({
+                        "prediction": {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "root prediction wrapper token=root-prediction-secret"},
+                                    {"functionResponse": {"name": "remember", "response": {"content": provider_result_marker + " trailing token=root-prediction-secret"}}},
+                                ],
+                                "tool_calls": [
+                                    {
+                                        "id": "root_prediction_memory",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "remember",
+                                            "arguments": json.dumps({"key": "native-root-prediction", "value": "root prediction wrapper accepted"}),
+                                        },
+                                    },
+                                    {
+                                        "toolCallId": "root_prediction_dry",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "run_command",
+                                            "arguments": json.dumps({
+                                                "target": "app.example.test",
+                                                "purpose": "root prediction native dry-run boundary",
+                                                "command": f"printf native-root-prediction > {dry_run_marker}",
+                                                "execute": True,
+                                            }),
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                return FakeRootPredictionHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-root-prediction-singular-wrapper",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAICompatibleAdapter(model="fake-native-root-prediction", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native root prediction wrapper token=root-prediction-secret"')
+                    payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertTrue(all("native provider root prediction tool_calls" in call.get("reason", "") for call in payload["tool_calls"]))
+                    self.assertEqual(payload["tool_calls"][0]["args"]["key"], "native-root-prediction")
+                    self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                    self.assertIn("functionResponse", json.dumps(payload.get("warnings", [])))
+                    call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["root_prediction_memory", "root_prediction_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], ["native provider root prediction tool_calls", "native provider root prediction tool_calls"])
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 2)
+                    self.assertNotIn("root-prediction-secret", planned + json.dumps(payload))
+                    self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native root prediction wrapper token=root-prediction-secret"')
+                    applied_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                    ledger = applied_payload.get("execution_ledger", [])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["root_prediction_memory", "root_prediction_dry"])
+                    self.assertEqual([item.get("native_tool_call_source") for item in ledger], ["native provider root prediction tool_calls", "native provider root prediction tool_calls"])
+                    self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                recall = runtime.handle_message('/recall query=native-root-prediction')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("root prediction wrapper accepted", recall)
+                self.assertIn("root_prediction_tool_calls", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(status.get("milestone_contract", {}).get("root_prediction_singular_wrapper_translation"), status)
+                self.assertFalse(dry_run_marker.exists())
+                self.assertTrue(captured_payloads)
+                self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                self.assertNotIn("root-prediction-secret", applied + recall + json.dumps(status))
+                self.assertNotIn(provider_result_marker, applied + recall)
+            finally:
+                runtime.close()
+
     def test_openai_root_outputs_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

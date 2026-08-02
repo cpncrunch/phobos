@@ -2024,50 +2024,61 @@ def _root_contents_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _root_prediction_wrapper_items(raw: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Return Vertex/AI-gateway prediction objects plus their root wrapper key."""
+
+    if not isinstance(raw, dict):
+        return "", []
+    predictions = raw.get("predictions")
+    if isinstance(predictions, dict):
+        return "predictions", [predictions]
+    if isinstance(predictions, list):
+        return "predictions", [prediction for prediction in predictions if isinstance(prediction, dict)]
+    prediction = raw.get("prediction")
+    if isinstance(prediction, dict):
+        return "prediction", [prediction]
+    return "", []
+
+
 def _root_prediction_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Return Vertex/AI-gateway prediction objects from plural or singular wrappers."""
 
-    if not isinstance(raw, dict):
-        return []
-    predictions = raw.get("predictions")
-    if isinstance(predictions, dict):
-        return [predictions]
-    if isinstance(predictions, list):
-        return [prediction for prediction in predictions if isinstance(prediction, dict)]
-    prediction = raw.get("prediction")
-    if isinstance(prediction, dict):
-        return [prediction]
-    return []
+    return _root_prediction_wrapper_items(raw)[1]
 
 
 def _root_predictions_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
     """Normalize root-level Vertex/AI-gateway ``predictions[]`` wrappers.
 
     Several local or Vertex-compatible gateways return a final model payload as
-    ``{"predictions": [...]}`` rather than Chat Completions ``choices`` or a
-    Gemini ``candidates`` object.  Walk newest-first, treat each prediction as an
-    inert assistant message/proposal candidate, skip provider result echoes, and
-    let the normal Phobos runtime boundary validate schemas, runtime policy, ROE
-    previews, approvals, explicit execute intent, transcripts, and redaction
-    before any handler can run.  Recursion is bounded so malformed nested
-    prediction envelopes fail closed as no-tool responses.
+    ``{"predictions": [...]}`` or a collapsed singular ``{"prediction": ...}``
+    rather than Chat Completions ``choices`` or a Gemini ``candidates`` object.
+    Walk newest-first, treat each prediction as an inert assistant
+    message/proposal candidate, skip provider result echoes, and let the normal
+    Phobos runtime boundary validate schemas, runtime policy, ROE previews,
+    approvals, explicit execute intent, transcripts, and redaction before any
+    handler can run.  Recursion is bounded so malformed nested prediction
+    envelopes fail closed as no-tool responses.
     """
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
-    for item in reversed(_root_prediction_items(raw)):
-        if _native_provider_result_role_message(item, provider_shape="root.predictions"):
+    wrapper_key, prediction_items = _root_prediction_wrapper_items(raw)
+    if not prediction_items:
+        return {}
+    provider_shape_prefix = "root.predictions" if wrapper_key == "predictions" else "root.prediction"
+    for item in reversed(prediction_items):
+        if _native_provider_result_role_message(item, provider_shape=provider_shape_prefix):
             continue
         message_obj = item.get("message")
         if isinstance(message_obj, dict):
-            result_echo = _native_provider_result_role_message(message_obj, provider_shape="root.predictions")
+            result_echo = _native_provider_result_role_message(message_obj, provider_shape=provider_shape_prefix)
             if result_echo:
                 continue
-            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix="root.predictions")
+            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix=provider_shape_prefix)
             if message:
                 return message
         if _responses_output_item_looks_like_message(item):
-            message = _provider_message_wrapper_to_message(item, provider_shape_prefix="root.predictions")
+            message = _provider_message_wrapper_to_message(item, provider_shape_prefix=provider_shape_prefix)
             if message:
                 return message
         nested = _first_choice_message(item, _wrapper_depth=depth + 1)
@@ -3373,8 +3384,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.messages."):
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith("root.predictions."):
-            label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith(("root.predictions.", "root.prediction.")):
+            wrapper_label = provider_shape.split(".", 2)[1]
+            label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.", "root.items.", "root.item.")):
@@ -3493,8 +3505,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.messages."):
             label = "native provider root messages " + provider_shape.rsplit(".", 1)[-1]
-        elif provider_shape.startswith("root.predictions."):
-            label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith(("root.predictions.", "root.prediction.")):
+            wrapper_label = provider_shape.split(".", 2)[1]
+            label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.", "root.items.", "root.item.")):
