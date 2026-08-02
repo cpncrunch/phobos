@@ -5874,6 +5874,95 @@ def main(argv: list[str] | None = None) -> int:
             and "native-anthropic-sse-secret" not in native_anthropic_sse_outputs
         )
 
+        native_anthropic_converse_marker = root / "native-anthropic-converse-should-not-run.txt"
+        native_anthropic_converse_result_marker = "NATIVE_ANTHROPIC_CONVERSE_RESULT_SHOULD_NOT_SURFACE"
+        native_anthropic_converse_captured = {}
+
+        class NativeAnthropicConverseStreamSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "events": [
+                        {"messageStart": {"message": {"role": "assistant", "content": []}}},
+                        {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "anthropic_converse_smoke_memory", "name": "remember"}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "{\"key\":\"native-anthropic-converse-smoke\","}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "\"value\":\"Converse-style stream toolUse wrappers translated\"}"}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 0}},
+                        {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "anthropic_converse_smoke_dry", "toolName": "run_command"}}}},
+                        {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": json.dumps({"target": "app.example.test", "purpose": "Converse stream dry-run smoke", "command": f"printf native-anthropic-converse > {native_anthropic_converse_marker}", "execute": True})}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 1}},
+                        {"contentBlockStart": {"contentBlockIndex": 2, "start": {"toolResult": {"toolUseId": "anthropic_converse_smoke_result", "content": native_anthropic_converse_result_marker + " token=native-anthropic-converse-secret"}}}},
+                        {"contentBlockStop": {"contentBlockIndex": 2}},
+                        {"messageStop": {"stopReason": "tool_use"}},
+                    ],
+                }).encode("utf-8")
+
+        def fake_native_anthropic_converse_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_anthropic_converse_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_anthropic_converse_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeAnthropicConverseStreamSmokeResponse()
+
+        native_anthropic_converse_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(root / "native-anthropic-converse-agent.db"),
+                session_name="native-anthropic-converse-smoke-runtime",
+                auto_model_planning=True,
+            ),
+            adapter=model_adapters.AnthropicMessagesAdapter(
+                model="fake-anthropic-converse-smoke-model",
+                base_url="http://127.0.0.1:9/v1",
+                key_env="PHOBOS_TEST_NO_SUCH_ANTHROPIC_KEY",
+            ),
+        )
+        native_anthropic_converse_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_anthropic_converse_urlopen
+            native_anthropic_converse_plan = native_anthropic_converse_runtime.handle_message('/auto model=true prompt="native Anthropic Converse smoke token=native-anthropic-converse-secret"')
+            native_anthropic_converse_plan_payload = json.loads(native_anthropic_converse_plan.split("\n", 1)[1])
+            native_anthropic_converse_apply = native_anthropic_converse_runtime.handle_message('/auto apply=true model=true prompt="native Anthropic Converse smoke token=native-anthropic-converse-secret"')
+            native_anthropic_converse_apply_payload = json.loads(native_anthropic_converse_apply.split("\n", 1)[1])
+            native_anthropic_converse_recall = native_anthropic_converse_runtime.handle_message('/recall query=native-anthropic-converse-smoke')
+            write("native-anthropic-converse-stream.json", redact_secrets(json.dumps({
+                "plan": native_anthropic_converse_plan_payload,
+                "apply": native_anthropic_converse_apply_payload,
+                "captured": native_anthropic_converse_captured,
+                "recall": native_anthropic_converse_recall,
+                "marker_exists": native_anthropic_converse_marker.exists(),
+            }, indent=2, sort_keys=True)) or "{}")
+        finally:
+            model_adapters.urllib.request.urlopen = native_anthropic_converse_original_urlopen
+            native_anthropic_converse_runtime.close()
+        native_anthropic_converse_calls = native_anthropic_converse_plan_payload.get("tool_calls", []) if isinstance(native_anthropic_converse_plan_payload.get("tool_calls"), list) else []
+        native_anthropic_converse_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_anthropic_converse_calls]
+        native_anthropic_converse_ledger = native_anthropic_converse_apply_payload.get("execution_ledger", []) if isinstance(native_anthropic_converse_apply_payload.get("execution_ledger"), list) else []
+        native_anthropic_converse_outputs = native_anthropic_converse_plan + native_anthropic_converse_apply + native_anthropic_converse_recall + json.dumps(native_anthropic_converse_plan_payload) + json.dumps(native_anthropic_converse_apply_payload)
+        checks["native_anthropic_converse_stream_tool_use_ok"] = (
+            native_anthropic_converse_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_anthropic_converse_calls] == ["remember", "run_command"]
+            and native_anthropic_converse_calls[0].get("args", {}).get("value") == "Converse-style stream toolUse wrappers translated"
+            and native_anthropic_converse_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_anthropic_converse_call_metadata] == ["anthropic_converse_smoke_memory", "anthropic_converse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_converse_call_metadata] == ["native provider anthropic messages stream content toolUse", "native provider anthropic messages stream content toolUse"]
+            and [item.get("provider_tool_call_id") for item in native_anthropic_converse_ledger] == ["anthropic_converse_smoke_memory", "anthropic_converse_smoke_dry"]
+            and [item.get("native_tool_call_source") for item in native_anthropic_converse_ledger] == ["native provider anthropic messages stream content toolUse", "native provider anthropic messages stream content toolUse"]
+            and [item.get("result", {}).get("status") for item in native_anthropic_converse_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and native_status_milestone_contract.get("anthropic_converse_stream_tool_use_translation") is True
+            and "anthropic_converse_stream_toolUse" in native_status_data.get("provider_native_tool_call_variants", [])
+            and native_anthropic_converse_captured.get("tool_choice") == {"type": "auto"}
+            and native_anthropic_converse_captured.get("tool_count", 0) > 0
+            and "Converse-style stream toolUse wrappers translated" in native_anthropic_converse_recall
+            and not native_anthropic_converse_marker.exists()
+            and native_anthropic_converse_result_marker not in native_anthropic_converse_outputs
+            and "native-anthropic-converse-secret" not in native_anthropic_converse_outputs
+        )
+
         native_responses_marker = root / "native-responses-should-not-run.txt"
         native_responses_captured = {}
         native_responses_custom_marker = "NATIVE_RESPONSES_CUSTOM_INPUT_SHOULD_NOT_SURFACE"
@@ -8626,6 +8715,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_anthropic_adapter_ok",
             "native_anthropic_tool_use_alias_ok",
             "native_anthropic_sse_tool_use_stream_ok",
+            "native_anthropic_converse_stream_tool_use_ok",
             "native_provider_flat_tool_call_ok",
             "native_provider_tool_call_object_map_ok",
             "native_provider_choice_delta_tool_call_ok",

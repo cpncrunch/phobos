@@ -899,6 +899,8 @@ def _responses_stream_event_items(raw: Any) -> list[Any]:
         parsed = _parse_responses_sse_events(data)
         if parsed:
             return parsed
+    if _is_anthropic_stream_wrapper_event(raw):
+        return [raw]
     if str(raw.get("type") or raw.get("event") or "").startswith("response."):
         return [raw]
     return []
@@ -960,6 +962,71 @@ def _parse_responses_sse_events(raw: str) -> list[dict[str, Any]]:
     return events
 
 
+_ANTHROPIC_STREAM_EVENT_ALIASES = {
+    "messageStart": "message_start",
+    "messageDelta": "message_delta",
+    "messageStop": "message_stop",
+    "contentBlockStart": "content_block_start",
+    "contentBlockDelta": "content_block_delta",
+    "contentBlockStop": "content_block_stop",
+}
+_ANTHROPIC_STREAM_WRAPPER_KEYS = tuple(_ANTHROPIC_STREAM_EVENT_ALIASES)
+
+
+def _is_anthropic_stream_wrapper_event(value: Any) -> bool:
+    return isinstance(value, dict) and any(key in value for key in _ANTHROPIC_STREAM_WRAPPER_KEYS)
+
+
+def _anthropic_stream_event_type_and_payload(event: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    raw_event_type = str(_responses_stream_event_value(event, "type", "event") or "").strip()
+    payload = event
+    if not raw_event_type:
+        for key in _ANTHROPIC_STREAM_WRAPPER_KEYS:
+            wrapped = event.get(key)
+            if isinstance(wrapped, dict):
+                raw_event_type = key
+                payload = wrapped
+                break
+    return _ANTHROPIC_STREAM_EVENT_ALIASES.get(raw_event_type, raw_event_type), payload if isinstance(payload, dict) else event
+
+
+def _anthropic_stream_start_block(event: dict[str, Any]) -> dict[str, Any] | None:
+    content_block = _responses_stream_event_value(event, "content_block", "contentBlock", "block")
+    if isinstance(content_block, dict):
+        return content_block
+    start = _responses_stream_event_value(event, "start")
+    if not isinstance(start, dict):
+        return None
+    tool_use_key, tool_use = _native_content_tool_use_alias(start)
+    if isinstance(tool_use, dict):
+        return {"type": tool_use_key or "toolUse", tool_use_key or "toolUse": tool_use}
+    function_call = start.get("functionCall") or start.get("function_call")
+    if isinstance(function_call, dict):
+        return {"type": "functionCall", "functionCall": function_call}
+    if _native_provider_result_alias_value(start) is not None:
+        return {"type": "tool_result", "content": "<provider tool result omitted>", "_provider_shape": "anthropic.messages.stream.content"}
+    if any(key in start for key in ("type", "text", "name", "toolName", "functionName", "input", "inputJson", "arguments", "args")):
+        return start
+    return None
+
+
+def _merge_anthropic_stream_tool_use_delta(block: dict[str, Any], delta: dict[str, Any]) -> bool:
+    tool_use_key, tool_use = _native_content_tool_use_alias(delta)
+    if not isinstance(tool_use, dict):
+        return False
+    block["type"] = tool_use_key or "toolUse"
+    destination_key = "toolUse" if tool_use_key == "toolUse" or "toolUse" in block else "tool_use"
+    existing = block.get(destination_key)
+    if not isinstance(existing, dict):
+        existing = {}
+        block[destination_key] = existing
+    for key in _native_argument_keys(("input", "arguments", "args", "parameters", "params")):
+        if key in tool_use and isinstance(tool_use.get(key), str) and existing.get(key) == {}:
+            existing[key] = ""
+    _merge_native_tool_call_fragment(existing, tool_use)
+    return True
+
+
 def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
     """Assemble Anthropic Messages SSE tool_use fragments into message shape.
 
@@ -999,20 +1066,12 @@ def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
     for position, event in enumerate(events):
         if not isinstance(event, dict):
             continue
-        raw_event_type = str(_responses_stream_event_value(event, "type", "event") or "").strip()
-        event_type = {
-            "messageStart": "message_start",
-            "messageDelta": "message_delta",
-            "messageStop": "message_stop",
-            "contentBlockStart": "content_block_start",
-            "contentBlockDelta": "content_block_delta",
-            "contentBlockStop": "content_block_stop",
-        }.get(raw_event_type, raw_event_type)
+        event_type, event_payload = _anthropic_stream_event_type_and_payload(event)
         if not event_type.startswith(("message_", "content_block_")):
             continue
         saw_anthropic_stream = True
         if event_type == "message_start":
-            message = _responses_stream_event_value(event, "message")
+            message = _responses_stream_event_value(event_payload, "message")
             if isinstance(message, dict):
                 content = message.get("content")
                 if isinstance(content, list):
@@ -1021,21 +1080,23 @@ def _anthropic_stream_events_to_message(raw: Any) -> dict[str, Any]:
                             ensure_block(f"message:{len(order)}", dict(item, _provider_shape="anthropic.messages.stream.content"))
             continue
         if event_type == "content_block_start":
-            content_block = _responses_stream_event_value(event, "content_block", "contentBlock", "block")
+            content_block = _anthropic_stream_start_block(event_payload)
             if isinstance(content_block, dict):
-                ensure_block(block_key(event, position), dict(content_block, _provider_shape="anthropic.messages.stream.content"))
+                ensure_block(block_key(event_payload, position), dict(content_block, _provider_shape="anthropic.messages.stream.content"))
             continue
         if event_type != "content_block_delta":
             continue
-        delta = _responses_stream_event_value(event, "delta")
+        delta = _responses_stream_event_value(event_payload, "delta")
         if not isinstance(delta, dict):
             continue
-        block = ensure_block(block_key(event, position))
+        block = ensure_block(block_key(event_payload, position))
         delta_type = str(delta.get("type") or "").strip()
         text_delta = delta.get("text")
         if delta_type == "text_delta" and isinstance(text_delta, str):
             block["text"] = str(block.get("text") or "") + text_delta
             block["type"] = str(block.get("type") or "text") or "text"
+            continue
+        if _merge_anthropic_stream_tool_use_delta(block, delta):
             continue
         partial = None
         for key in ("partial_json", "partialJson", "partial", *_native_argument_delta_keys(("input", "arguments", "args", "parameters", "params"))):
