@@ -724,30 +724,109 @@ def _first_choice_message(raw: dict[str, Any], *, _wrapper_depth: int = 0) -> di
 
 
 def _provider_response_envelope_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
-    """Unwrap one provider ``response``/``result``/``data`` envelope before native-call parsing.
+    """Unwrap provider ``response``/``result``/``data`` envelopes before native-call parsing.
 
     A few local/OpenAI-compatible gateways return the actual model payload under
     a root ``response`` object, for example ``{"response": {"message": ...}}``
     or ``{"response": {"choices": [...]}}``.  Some lightweight gateways use a
     ``result`` object for the same final provider payload, while generic API
-    facades commonly use a root ``data`` object.  Treat those envelopes as an
-    adapter translation concern only: recurse into the nested provider payload,
-    then let the existing Phobos runtime boundary validate schemas, runtime
-    policy, ROE, approvals, execution intent, and transcript redaction before
-    any tool can run.  Limit recursion so malformed nested envelopes fail closed
-    as no-tool responses instead of causing unbounded parsing.
+    facades commonly use a root ``data`` object or list.  Treat those envelopes
+    as an adapter translation concern only: recurse into the nested provider
+    payload, then let the existing Phobos runtime boundary validate schemas,
+    runtime policy, ROE, approvals, execution intent, and transcript redaction
+    before any tool can run.  Limit recursion so malformed nested envelopes fail
+    closed as no-tool responses instead of causing unbounded parsing.
     """
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
     for envelope_key in ("response", "result", "data"):
         wrapped = raw.get(envelope_key)
-        if not isinstance(wrapped, dict):
+        if isinstance(wrapped, dict):
+            message = _first_choice_message(wrapped, _wrapper_depth=depth + 1)
+            if message and not _native_message_is_result_echo_only(message):
+                return message
             continue
-        message = _first_choice_message(wrapped, _wrapper_depth=depth + 1)
-        if message:
-            return message
+        if isinstance(wrapped, list):
+            message = _provider_envelope_list_to_message(wrapped, envelope_key=envelope_key, depth=depth)
+            if message:
+                return message
     return {}
+
+
+def _provider_envelope_list_to_message(items: list[Any], *, envelope_key: str, depth: int) -> dict[str, Any]:
+    """Return the latest fresh assistant/model message from a list-valued envelope.
+
+    Some gateway facades wrap the provider response as ``{"data": [...]}`` (or
+    ``response``/``result`` lists) instead of a single object.  Walk newest-first,
+    skip provider result echoes, and only return a recognizable native-planning
+    message.  This keeps list envelopes translation-only: no schema validation,
+    approval queueing, evidence writes, or target activity happens here.
+    """
+
+    if depth >= 3:
+        return {}
+    for item in reversed(items):
+        if not isinstance(item, dict):
+            continue
+        if _native_provider_result_role_message(item, provider_shape=f"{envelope_key}.list"):
+            continue
+        message = _first_choice_message(item, _wrapper_depth=depth + 1)
+        if not message or _native_message_is_result_echo_only(message):
+            continue
+        return message
+    return {}
+
+
+def _native_message_is_result_echo_only(message: dict[str, Any]) -> bool:
+    """Return True when a normalized message contains only provider tool results.
+
+    Result echoes can appear as the newest item in list-valued provider envelopes;
+    they must not hide an earlier assistant/model tool-call proposal, and they
+    must not become prompt summaries or dispatch input.  Keep the check narrow:
+    any recognized fresh tool-call field or non-result text makes the message a
+    normal planner candidate for later runtime validation.
+    """
+
+    if not isinstance(message, dict):
+        return False
+    fresh_keys = (
+        "tool_calls",
+        "toolCalls",
+        "tool_call",
+        "toolCall",
+        "functionCall",
+        "functionCalls",
+        "function_calls",
+        "function_call",
+        "tool",
+        *_NATIVE_TOOL_USE_ALIAS_KEYS,
+    )
+    if any(key in message for key in fresh_keys):
+        return False
+    content = message.get("content")
+    if isinstance(content, dict):
+        blocks: list[Any] = [content]
+    elif isinstance(content, list):
+        blocks = list(content)
+    else:
+        return False
+    if not blocks:
+        return False
+    saw_result = False
+    for block in blocks:
+        if isinstance(block, str):
+            if block.strip():
+                return False
+            continue
+        if not isinstance(block, dict):
+            return False
+        block_type = str(block.get("type") or "").strip()
+        if block_type in _NATIVE_PROVIDER_RESULT_BLOCK_TYPES or _native_provider_result_alias_value(block) is not None:
+            saw_result = True
+            continue
+        return False
+    return saw_result
 
 
 def _choice_wrapper_to_message(choice: dict[str, Any]) -> dict[str, Any]:
