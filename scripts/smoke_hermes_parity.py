@@ -2149,6 +2149,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("candidate_singular_wrapper_translation") is True
             and native_status_milestone_contract.get("root_message_wrapper_translation") is True
             and native_status_milestone_contract.get("root_messages_wrapper_translation") is True
+            and native_status_milestone_contract.get("root_contents_wrapper_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
@@ -2233,6 +2234,7 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_output_message_typeless_direct" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "root_messages_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root_contents_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
             and native_status_milestone_contract.get("responses_message_tool_call_alias_translation") is True
             and "responses_message_tool_calls" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_message_toolCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -4146,6 +4148,103 @@ def main(argv: list[str] | None = None) -> int:
             and not native_root_messages_marker.exists()
             and native_root_messages_result_marker not in native_root_messages_blob
             and "native-root-messages-secret" not in native_root_messages_blob
+        )
+
+        native_root_contents_captured = {}
+        native_root_contents_marker = root / "native-root-contents-should-not-run.txt"
+        native_root_contents_result_marker = "ROOT_CONTENTS_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        class NativeOpenAIRootContentsSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "contents": [
+                        {"role": "user", "parts": [{"text": "operator prompt token=native-root-contents-secret"}]},
+                        {
+                            "role": "model",
+                            "parts": [
+                                {"text": "old root contents plan should not be selected"},
+                                {"functionCall": {"callId": "root_contents_old_memory", "name": "remember", "args": {"key": "native-root-contents-old-smoke", "value": "old root contents call should not dispatch"}}},
+                            ],
+                        },
+                        {"role": "function", "parts": [{"functionResponse": {"name": "remember", "response": {"content": native_root_contents_result_marker + " token=native-root-contents-secret"}}}]},
+                        {
+                            "role": "model",
+                            "parts": [
+                                {"text": "native root contents smoke token=native-root-contents-secret"},
+                                {"functionCall": {"callId": "root_contents_memory", "name": "remember", "args": {"key": "native-root-contents-smoke", "value": "root contents wrapper native tool call translated"}}},
+                                {"functionCall": {"toolCallId": "root_contents_dry", "name": "run_command", "args": {"target": "app.example.test", "purpose": "root contents native dry-run smoke", "command": f"printf native-root-contents > {native_root_contents_marker}", "execute": True}}},
+                                {"functionResponse": {"name": "remember", "response": {"content": native_root_contents_result_marker + " trailing token=native-root-contents-secret"}}},
+                            ],
+                        },
+                    ]
+                }).encode("utf-8")
+
+        def fake_native_root_contents_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_root_contents_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_root_contents_captured["tool_choice"] = payload.get("tool_choice")
+            return NativeOpenAIRootContentsSmokeResponse()
+
+        native_root_contents_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-root-contents.db"),
+                session_name="native-provider-root-contents-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-root-contents-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_root_contents_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_root_contents_urlopen
+            native_root_contents_plan = native_root_contents_runtime.handle_message('/auto model=true prompt="native root contents smoke token=native-root-contents-secret"')
+            native_root_contents_plan_payload = json.loads(native_root_contents_plan.split("\n", 1)[1])
+            native_root_contents_apply = native_root_contents_runtime.handle_message('/auto apply=true model=true prompt="native root contents smoke token=native-root-contents-secret"')
+            native_root_contents_apply_payload = json.loads(native_root_contents_apply.split("\n", 1)[1])
+            native_root_contents_recall = native_root_contents_runtime.handle_message('/recall query=native-root-contents-smoke')
+            write("native-provider-root-contents-tool-calls.json", json.dumps({
+                "plan": native_root_contents_plan_payload,
+                "apply": native_root_contents_apply_payload,
+                "captured": native_root_contents_captured,
+                "recall": native_root_contents_recall,
+                "marker_exists": native_root_contents_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_root_contents_original_urlopen
+            native_root_contents_runtime.close()
+        native_root_contents_calls = native_root_contents_plan_payload.get("tool_calls", []) if isinstance(native_root_contents_plan_payload.get("tool_calls"), list) else []
+        native_root_contents_metadata = native_root_contents_plan_payload.get("metadata", {}) if isinstance(native_root_contents_plan_payload.get("metadata"), dict) else {}
+        native_root_contents_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_root_contents_calls]
+        native_root_contents_ledger = native_root_contents_apply_payload.get("execution_ledger", []) if isinstance(native_root_contents_apply_payload.get("execution_ledger"), list) else []
+        native_root_contents_blob = native_root_contents_plan + native_root_contents_apply + native_root_contents_recall + json.dumps(native_root_contents_plan_payload) + json.dumps(native_root_contents_apply_payload)
+        checks["native_provider_root_contents_wrapper_ok"] = (
+            native_root_contents_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_root_contents_calls] == ["remember", "run_command"]
+            and all("native provider root contents content parts functionCall" in call.get("reason", "") for call in native_root_contents_calls)
+            and native_root_contents_calls[0].get("args", {}).get("key") == "native-root-contents-smoke"
+            and native_root_contents_calls[1].get("args", {}).get("execute") is False
+            and native_root_contents_metadata.get("native_tool_calls") is True
+            and native_root_contents_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_root_contents_call_metadata] == ["root_contents_memory", "root_contents_dry"]
+            and [item.get("native_tool_call_source") for item in native_root_contents_call_metadata] == ["native provider root contents content parts functionCall", "native provider root contents content parts functionCall"]
+            and [item.get("result", {}).get("status") for item in native_root_contents_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_root_contents_ledger] == ["root_contents_memory", "root_contents_dry"]
+            and native_root_contents_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("root_contents_wrapper_translation") is True
+            and "root_contents_content_parts_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "root contents wrapper native tool call translated" in native_root_contents_recall
+            and "old root contents call should not dispatch" not in native_root_contents_recall
+            and native_root_contents_captured.get("tool_choice") == "auto"
+            and native_root_contents_captured.get("tool_count", 0) > 0
+            and not native_root_contents_marker.exists()
+            and native_root_contents_result_marker not in native_root_contents_blob
+            and "native-root-contents-secret" not in native_root_contents_blob
         )
 
         native_root_message_alias_captured = {}
@@ -9435,6 +9534,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_camel_case_tool_call_alias_ok",
             "native_provider_root_message_wrapper_ok",
             "native_provider_root_messages_wrapper_ok",
+            "native_provider_root_contents_wrapper_ok",
             "native_provider_root_message_alias_matrix_ok",
             "native_provider_root_function_call_ok",
             "native_provider_tool_call_edge_cases_ok",

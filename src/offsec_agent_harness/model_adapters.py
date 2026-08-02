@@ -699,6 +699,9 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     root_messages = _root_messages_to_message(raw)
     if root_messages:
         return root_messages
+    root_contents = _root_contents_to_message(raw)
+    if root_contents:
+        return root_contents
     candidate_message = _candidate_content_to_message(raw)
     if candidate_message:
         return candidate_message
@@ -1816,6 +1819,51 @@ def _root_messages_to_message(raw: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _root_contents_to_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize root-level Gemini/Vertex ``contents[]`` transcript wrappers.
+
+    Some local provider gateways return a bounded Gemini-style transcript as
+    ``{"contents": [...]}`` instead of the final ``candidates[]`` response or a
+    Chat-Completions ``messages[]`` wrapper.  Select the latest assistant/model
+    content item, translate only its ``parts[]`` tool-call proposals, and ignore
+    prior tool/function result messages so upstream tool output cannot become a
+    Phobos summary or dispatch input.  This remains adapter-only translation:
+    schema validation, runtime policy, ROE preview, approvals, explicit execute
+    intent, and transcript redaction stay in the Phobos runtime.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    contents = raw.get("contents")
+    if isinstance(contents, dict):
+        content_items = [contents]
+    elif isinstance(contents, list):
+        content_items = [item for item in contents if isinstance(item, dict)]
+    else:
+        return {}
+    if not content_items:
+        return {}
+    for item in reversed(content_items):
+        if _native_provider_result_role_message(item, provider_shape="root.contents"):
+            continue
+        role_value = item.get("role")
+        author = item.get("author")
+        if role_value in (None, "") and isinstance(author, dict):
+            role_value = author.get("role")
+        role = str(role_value or "").strip().lower()
+        if role and role not in {"assistant", "model"}:
+            continue
+        candidate = dict(item)
+        if "content" not in candidate and "parts" in candidate:
+            candidate["content"] = {"parts": candidate.get("parts")}
+        if not _responses_output_item_looks_like_message(candidate):
+            continue
+        message = _provider_message_wrapper_to_message(candidate, provider_shape_prefix="root.contents")
+        if message:
+            return message
+    return {}
+
+
 def _candidate_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Return Gemini-style candidate objects from plural or collapsed wrappers."""
 
@@ -2645,6 +2693,10 @@ def _native_content_label(provider_shape: str, native_kind: str) -> str:
         return f"native provider root messages content {native_kind}"
     if provider_shape == "root.messages.content.parts":
         return f"native provider root messages content parts {native_kind}"
+    if provider_shape == "root.contents.content":
+        return f"native provider root contents content {native_kind}"
+    if provider_shape == "root.contents.content.parts":
+        return f"native provider root contents content parts {native_kind}"
     if provider_shape == "bedrock.converse.message.content":
         return f"native provider bedrock converse message content {native_kind}"
     if provider_shape == "bedrock.converse.message.content.parts":
@@ -2749,6 +2801,10 @@ def _parse_native_content_function_call_block(
         label = "native provider root messages content functionCall"
     elif provider_shape == "root.messages.content.parts":
         label = "native provider root messages content parts functionCall"
+    elif provider_shape == "root.contents.content":
+        label = "native provider root contents content functionCall"
+    elif provider_shape == "root.contents.content.parts":
+        label = "native provider root contents content parts functionCall"
     elif provider_shape == "bedrock.converse.message.content":
         label = "native provider bedrock converse message content functionCall"
     elif provider_shape == "bedrock.converse.message.content.parts":
