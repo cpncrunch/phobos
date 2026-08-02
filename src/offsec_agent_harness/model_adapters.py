@@ -826,11 +826,17 @@ def _responses_stream_events_to_message(raw: Any) -> dict[str, Any]:
             if call_id not in (None, "") and not bucket.get("call_id"):
                 bucket["call_id"] = call_id
             if event_type.endswith(".delta"):
-                delta = _responses_stream_event_value(event, "delta", "arguments_delta", "argumentsDelta", "args_delta", "argsDelta")
+                delta = _responses_stream_event_value(
+                    event,
+                    *_native_argument_delta_keys(("arguments", "args", "input", "parameters", "params")),
+                )
                 if isinstance(delta, str):
                     bucket["arguments"] = str(bucket.get("arguments") or "") + delta
             if event_type.endswith(".done"):
-                arguments = _responses_stream_event_value(event, "arguments", "args", "input", "parameters")
+                arguments = _responses_stream_event_value(
+                    event,
+                    *_native_argument_keys(("arguments", "args", "input", "parameters", "params")),
+                )
                 if arguments not in (None, ""):
                     bucket["arguments"] = arguments
     if not saw_stream_event:
@@ -1132,6 +1138,24 @@ def _native_argument_keys(preferred: tuple[str, ...]) -> list[str]:
         if not key:
             continue
         for candidate in (key, f"{key}_json", f"{key}Json"):
+            if candidate not in keys:
+                keys.append(candidate)
+    return keys
+
+
+def _native_argument_delta_keys(preferred: tuple[str, ...]) -> list[str]:
+    """Return streaming delta aliases for provider-native argument fragments.
+
+    Responses/SSE captures normally use ``delta`` or ``arguments_delta``, but a
+    few OpenAI-compatible gateways preserve JSON-alias spellings such as
+    ``argumentsJsonDelta`` or ``input_json_delta``.  Assemble those fragments at
+    the adapter boundary only; normal schema/ROE/runtime-policy validation still
+    owns any eventual dispatch.
+    """
+
+    keys = ["delta"]
+    for key in _native_argument_keys(preferred):
+        for candidate in (f"{key}_delta", f"{key}Delta"):
             if candidate not in keys:
                 keys.append(candidate)
     return keys

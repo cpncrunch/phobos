@@ -3591,6 +3591,96 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_responses_stream_argument_json_aliases_translate_without_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            engagement = tmp_path / "engagement.json"
+            EngagementROE(
+                name="Native OpenAI Responses Stream Argument JSON Aliases",
+                authorized=True,
+                in_scope_targets=["app.example.test"],
+                evidence_dir=str(tmp_path / "evidence"),
+            ).save(engagement)
+            captured_requests = []
+            dry_run_marker = tmp_path / "native-openai-responses-stream-json-alias-should-not-execute.txt"
+            result_marker = "RESPONSES_STREAM_JSON_ALIAS_RESULT_SHOULD_NOT_SURFACE"
+
+            class FakeResponsesArgumentJsonAliasHTTPResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self) -> bytes:
+                    memory_args = json.dumps({"key": "native-openai-responses-stream-json-alias", "value": "Responses stream argumentsJson alias translated"})
+                    run_args = json.dumps({
+                        "target": "app.example.test",
+                        "purpose": "Responses stream argsJson dry-run validation",
+                        "command": f"printf native-openai-responses-stream-json-alias > {dry_run_marker}",
+                        "execute": True,
+                    })
+                    return json.dumps({
+                        "events": [
+                            {"type": "response.output_text.delta", "delta": "native Responses JSON alias token=responses-json-alias-secret"},
+                            {
+                                "type": "response.function_call_arguments.done",
+                                "call_id": "responses_stream_json_alias_memory",
+                                "toolName": "remember",
+                                "argumentsJson": memory_args,
+                            },
+                            {
+                                "type": "response.function_call_arguments.done",
+                                "callId": "responses_stream_json_alias_dry",
+                                "functionName": "run_command",
+                                "argsJson": run_args,
+                            },
+                            {"type": "response.output_item.done", "item": {"id": "json_alias_result", "type": "function_call_output", "output": result_marker + " token=responses-json-alias-secret"}},
+                        ]
+                    }).encode("utf-8")
+
+            def fake_urlopen(request, timeout=0):
+                captured_requests.append(json.loads(request.data.decode("utf-8")))
+                return FakeResponsesArgumentJsonAliasHTTPResponse()
+
+            runtime = OffSecAgentRuntime(
+                AgentRuntimeConfig(
+                    engagement_path=str(engagement),
+                    db_path=str(tmp_path / "agent.db"),
+                    session_name="native-openai-responses-stream-json-alias-runtime",
+                    auto_model_planning=True,
+                ),
+                adapter=OpenAIResponsesAdapter(model="fake-native-responses-stream-json-alias-model", base_url="http://127.0.0.1:9/v1"),
+            )
+            try:
+                with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                    planned = runtime.handle_message('/auto model=true prompt="native Responses stream JSON alias token=responses-json-alias-secret"')
+                    plan_payload = json.loads(planned.split("\n", 1)[1])
+                    self.assertEqual(plan_payload["mode"], "plan_only")
+                    self.assertEqual([call["tool"] for call in plan_payload["tool_calls"]], ["remember", "run_command"])
+                    self.assertEqual(plan_payload["tool_calls"][0]["args"]["value"], "Responses stream argumentsJson alias translated")
+                    self.assertFalse(plan_payload["tool_calls"][1]["args"]["execute"])
+
+                    applied = runtime.handle_message('/auto apply=true model=true prompt="native Responses stream JSON alias token=responses-json-alias-secret"')
+                    apply_payload = json.loads(applied.split("\n", 1)[1])
+                    self.assertEqual([item["result"]["status"] for item in apply_payload["results"]], ["ok", "dry_run"])
+                    apply_ledger = apply_payload.get("execution_ledger", [])
+                recall = runtime.handle_message('/recall query=native-openai-responses-stream-json-alias')
+                status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                self.assertIn("Responses stream argumentsJson alias translated", recall)
+                self.assertEqual([item.get("provider_tool_call_id") for item in apply_ledger], ["responses_stream_json_alias_memory", "responses_stream_json_alias_dry"])
+                self.assertEqual([item.get("native_tool_call_source") for item in apply_ledger], ["native provider responses stream function_call", "native provider responses stream function_call"])
+                self.assertTrue(status.get("milestone_contract", {}).get("responses_stream_argument_json_alias_translation"), status)
+                self.assertIn("responses_stream_argument_json_alias", status.get("provider_native_tool_call_variants", []))
+                self.assertTrue(captured_requests)
+                self.assertEqual(captured_requests[0].get("tool_choice"), "auto")
+                self.assertFalse(dry_run_marker.exists())
+                combined = planned + applied + recall + json.dumps(plan_payload) + json.dumps(apply_payload) + json.dumps(status)
+                self.assertNotIn(result_marker, combined)
+                self.assertNotIn("responses-json-alias-secret", combined)
+            finally:
+                runtime.close()
+
     def test_gemini_adapter_native_tool_plan_uses_generate_content_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

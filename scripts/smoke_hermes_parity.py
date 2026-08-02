@@ -2106,6 +2106,9 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("schema_validation_before_dispatch") is True
             and native_status_milestone_contract.get("wrapped_json_plan_extraction") is True
             and native_status_milestone_contract.get("responses_api_endpoint_planning") is True
+            and native_status_milestone_contract.get("responses_stream_sse_capture_translation") is True
+            and native_status_milestone_contract.get("responses_stream_call_id_delta_alias_translation") is True
+            and native_status_milestone_contract.get("responses_stream_argument_json_alias_translation") is True
             and native_status_milestone_contract.get("guardrail_preview_before_target_activity") is True
             and native_status_milestone_contract.get("approval_queue_direct_replay_boundary") is True
             and native_status_milestone_contract.get("execution_ledger_claim_contract") is True
@@ -2201,6 +2204,9 @@ def main(argv: list[str] | None = None) -> int:
             and "top_level_content_block_tool_use" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_stream_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_stream_sse_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_stream_call_id_delta_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "responses_stream_argument_json_alias" in native_status_data.get("provider_native_tool_call_variants", [])
             and "single_responses_output_function_call" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_function" in native_status_data.get("provider_native_tool_call_variants", [])
             and "responses_output_nested_functionCall" in native_status_data.get("provider_native_tool_call_variants", [])
@@ -8105,6 +8111,114 @@ def main(argv: list[str] | None = None) -> int:
             and "responses_stream_call_id_delta_alias" in native_status_data.get("provider_native_tool_call_variants", [])
         )
 
+        native_responses_sse_json_alias_marker = root / "native-responses-sse-json-alias-should-not-run.txt"
+        native_responses_sse_json_alias_captured: dict[str, object] = {}
+        native_responses_sse_json_alias_result_marker = "RESPONSES_SSE_JSON_ALIAS_RESULT_SHOULD_NOT_SURFACE"
+
+        class NativeOpenAIResponsesSSEJsonAliasSmokeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                memory_args = json.dumps({"key": "native-responses-sse-json-alias-smoke", "value": "Responses SSE argumentsJson alias translated in smoke"})
+                run_args = json.dumps({
+                    "target": "app.example.test",
+                    "purpose": "Responses SSE argsJson alias dry-run smoke",
+                    "command": f"printf native-responses-sse-json-alias > {native_responses_sse_json_alias_marker}",
+                    "execute": True,
+                })
+                frames = [
+                    ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "native Responses SSE JSON alias smoke token=native-responses-sse-json-alias-secret"}),
+                    (
+                        "response.function_call_arguments.done",
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "call_id": "responses_sse_json_alias_memory",
+                            "toolName": "remember",
+                            "argumentsJson": memory_args,
+                        },
+                    ),
+                    (
+                        "response.function_call_arguments.done",
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "callId": "responses_sse_json_alias_dry",
+                            "functionName": "run_command",
+                            "argsJson": run_args,
+                        },
+                    ),
+                    ("response.output_item.done", {"type": "response.output_item.done", "item": {"id": "sse_json_alias_result", "type": "function_call_output", "output": native_responses_sse_json_alias_result_marker + " token=native-responses-sse-json-alias-secret"}}),
+                ]
+                return (
+                    "".join(
+                        f"event: {event_name}\nid: sse-json-alias-smoke-{index}\ndata: {json.dumps(data)}\n\n"
+                        for index, (event_name, data) in enumerate(frames, start=1)
+                    )
+                    + "data: [DONE]\n\n"
+                ).encode("utf-8")
+
+        def fake_native_responses_sse_json_alias_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_responses_sse_json_alias_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            native_responses_sse_json_alias_captured["tool_choice"] = payload.get("tool_choice")
+            native_responses_sse_json_alias_captured["url"] = request.full_url
+            return NativeOpenAIResponsesSSEJsonAliasSmokeResponse()
+
+        native_responses_sse_json_alias_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-responses-sse-json-alias.db"),
+                session_name="native-provider-responses-sse-json-alias-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAIResponsesAdapter(model="fake-native-responses-sse-json-alias-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_responses_sse_json_alias_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_responses_sse_json_alias_urlopen
+            native_responses_sse_json_alias_plan = native_responses_sse_json_alias_runtime.handle_message('/auto model=true prompt="native Responses SSE JSON alias smoke token=native-responses-sse-json-alias-secret"')
+            native_responses_sse_json_alias_plan_payload = json.loads(native_responses_sse_json_alias_plan.split("\n", 1)[1])
+            native_responses_sse_json_alias_apply = native_responses_sse_json_alias_runtime.handle_message('/auto apply=true model=true prompt="native Responses SSE JSON alias smoke token=native-responses-sse-json-alias-secret"')
+            native_responses_sse_json_alias_apply_payload = json.loads(native_responses_sse_json_alias_apply.split("\n", 1)[1])
+            native_responses_sse_json_alias_recall = native_responses_sse_json_alias_runtime.handle_message('/recall query=native-responses-sse-json-alias-smoke')
+            write("native-provider-responses-sse-json-alias-events.json", json.dumps({
+                "plan": native_responses_sse_json_alias_plan_payload,
+                "apply": native_responses_sse_json_alias_apply_payload,
+                "captured": native_responses_sse_json_alias_captured,
+                "recall": native_responses_sse_json_alias_recall,
+                "marker_exists": native_responses_sse_json_alias_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_responses_sse_json_alias_original_urlopen
+            native_responses_sse_json_alias_runtime.close()
+        native_responses_sse_json_alias_calls = native_responses_sse_json_alias_plan_payload.get("tool_calls", []) if isinstance(native_responses_sse_json_alias_plan_payload.get("tool_calls"), list) else []
+        native_responses_sse_json_alias_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_responses_sse_json_alias_calls]
+        native_responses_sse_json_alias_ledger = native_responses_sse_json_alias_apply_payload.get("execution_ledger", []) if isinstance(native_responses_sse_json_alias_apply_payload.get("execution_ledger"), list) else []
+        native_responses_sse_json_alias_outputs = native_responses_sse_json_alias_plan + native_responses_sse_json_alias_apply + native_responses_sse_json_alias_recall + json.dumps(native_responses_sse_json_alias_plan_payload) + json.dumps(native_responses_sse_json_alias_apply_payload)
+        checks["native_provider_responses_sse_argument_json_alias_ok"] = (
+            native_responses_sse_json_alias_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_responses_sse_json_alias_calls] == ["remember", "run_command"]
+            and native_responses_sse_json_alias_calls[0].get("args", {}).get("value") == "Responses SSE argumentsJson alias translated in smoke"
+            and native_responses_sse_json_alias_calls[1].get("args", {}).get("execute") is False
+            and [item.get("provider_tool_call_id") for item in native_responses_sse_json_alias_metadata] == ["responses_sse_json_alias_memory", "responses_sse_json_alias_dry"]
+            and [item.get("native_tool_call_source") for item in native_responses_sse_json_alias_metadata] == ["native provider responses stream function_call", "native provider responses stream function_call"]
+            and [item.get("result", {}).get("status") for item in native_responses_sse_json_alias_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_responses_sse_json_alias_ledger] == ["responses_sse_json_alias_memory", "responses_sse_json_alias_dry"]
+            and native_responses_sse_json_alias_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("responses_stream_argument_json_alias_translation") is True
+            and "responses_stream_argument_json_alias" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "Responses SSE argumentsJson alias translated in smoke" in native_responses_sse_json_alias_recall
+            and native_responses_sse_json_alias_captured.get("tool_choice") == "auto"
+            and str(native_responses_sse_json_alias_captured.get("url", "")).endswith("/responses")
+            and int(native_responses_sse_json_alias_captured.get("tool_count", 0) or 0) > 0
+            and not native_responses_sse_json_alias_marker.exists()
+            and native_responses_sse_json_alias_result_marker not in native_responses_sse_json_alias_outputs
+            and "native-responses-sse-json-alias-secret" not in native_responses_sse_json_alias_outputs
+        )
+
         native_milestone_required_checks = [
             "native_tool_call_plan_validation_ok",
             "native_tool_call_plan_transcript_ok",
@@ -8153,6 +8267,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_responses_stream_event_ok",
             "native_provider_responses_sse_stream_event_ok",
             "native_provider_responses_sse_call_id_delta_alias_ok",
+            "native_provider_responses_sse_argument_json_alias_ok",
             "native_provider_responses_output_nested_function_call_ok",
             "native_provider_responses_output_message_aliases_ok",
             "native_provider_responses_output_message_typeless_wrapper_ok",
