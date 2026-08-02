@@ -2076,17 +2076,25 @@ def _root_predictions_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict
     return {}
 
 
-def _root_output_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return provider output objects from root-level plural ``outputs`` wrappers."""
+def _root_output_wrapper_items(raw: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Return provider output objects from root-level output wrappers.
+
+    OpenAI Responses uses ``output[]`` while some OpenAI-compatible routers and
+    trace gateways expose pluralized ``outputs[]`` or raw item captures as
+    ``output_items[]`` / ``outputItems[]``.  Normalize only those explicit output
+    wrappers here; the resulting tool calls still pass through Phobos runtime
+    schema, policy, ROE, approval, execute, transcript, and ledger boundaries.
+    """
 
     if not isinstance(raw, dict):
-        return []
-    outputs = raw.get("outputs")
-    if isinstance(outputs, dict):
-        return [outputs]
-    if isinstance(outputs, list):
-        return [output for output in outputs if isinstance(output, dict)]
-    return []
+        return "", []
+    for wrapper_key in ("outputs", "output_items", "outputItems", "output_item", "outputItem"):
+        outputs = raw.get(wrapper_key)
+        if isinstance(outputs, dict):
+            return wrapper_key, [outputs]
+        if isinstance(outputs, list):
+            return wrapper_key, [output for output in outputs if isinstance(output, dict)]
+    return "", []
 
 
 def _root_output_item_is_direct_tool_call(item: dict[str, Any]) -> bool:
@@ -2108,23 +2116,23 @@ def _root_output_item_is_direct_tool_call(item: dict[str, Any]) -> bool:
     return any(isinstance(item.get(alias), dict) for alias in _NATIVE_TOOL_USE_ALIAS_KEYS)
 
 
-def _root_outputs_direct_tool_calls_to_message(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Normalize contiguous direct ``outputs[]`` tool-call blocks as one response.
+def _root_outputs_direct_tool_calls_to_message(items: list[dict[str, Any]], *, provider_shape_prefix: str = "root.outputs") -> dict[str, Any]:
+    """Normalize contiguous direct root output-wrapper tool-call blocks as one response.
 
     Some OpenAI-compatible routers pluralize Responses API ``output[]`` as
-    ``outputs[]`` and place flat ``function_call``/``function`` items there
-    directly instead of wrapping them in an assistant ``message``.  Keep this as
-    an adapter-only translation boundary: collect only the latest contiguous
-    direct-call block, preserve root-outputs provenance, and let runtime schema,
-    policy, ROE, approval, explicit execution, and transcript checks decide what
-    can run.
+    ``outputs[]`` or persist raw item captures as ``output_items[]`` and place
+    flat ``function_call``/``function`` items there directly instead of wrapping
+    them in an assistant ``message``.  Keep this as an adapter-only translation
+    boundary: collect only the latest contiguous direct-call block, preserve root
+    output provenance, and let runtime schema, policy, ROE, approval, explicit
+    execution, and transcript checks decide what can run.
     """
 
     output_items: list[dict[str, Any]] = []
     for item in items:
         entry = dict(item)
         block_type = str(entry.get("type") or "").strip() or "tool_call"
-        entry.setdefault("_provider_shape", f"root.outputs.{block_type}")
+        entry.setdefault("_provider_shape", f"{provider_shape_prefix}.{block_type}")
         output_items.append(entry)
     return _responses_output_to_message({"output": output_items}) if output_items else {}
 
@@ -2143,12 +2151,13 @@ def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
-    items = _root_output_items(raw)
+    wrapper_key, items = _root_output_wrapper_items(raw)
     if not items:
         return {}
+    provider_shape_prefix = "root.outputs" if wrapper_key == "outputs" else f"root.{wrapper_key}"
     direct_items: list[dict[str, Any]] = []
     for item in reversed(items):
-        if _native_provider_result_role_message(item, provider_shape="root.outputs"):
+        if _native_provider_result_role_message(item, provider_shape=provider_shape_prefix):
             if direct_items:
                 break
             continue
@@ -2159,21 +2168,21 @@ def _root_outputs_to_message(raw: dict[str, Any], *, depth: int = 0) -> dict[str
             break
         message_obj = item.get("message")
         if isinstance(message_obj, dict):
-            result_echo = _native_provider_result_role_message(message_obj, provider_shape="root.outputs")
+            result_echo = _native_provider_result_role_message(message_obj, provider_shape=provider_shape_prefix)
             if result_echo:
                 continue
-            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix="root.outputs")
+            message = _provider_message_wrapper_to_message(message_obj, provider_shape_prefix=provider_shape_prefix)
             if message:
                 return message
         if _responses_output_item_looks_like_message(item):
-            message = _provider_message_wrapper_to_message(item, provider_shape_prefix="root.outputs")
+            message = _provider_message_wrapper_to_message(item, provider_shape_prefix=provider_shape_prefix)
             if message:
                 return message
         nested = _first_choice_message(item, _wrapper_depth=depth + 1)
         if nested:
             return nested
     if direct_items:
-        return _root_outputs_direct_tool_calls_to_message(list(reversed(direct_items)))
+        return _root_outputs_direct_tool_calls_to_message(list(reversed(direct_items)), provider_shape_prefix=provider_shape_prefix)
     return {}
 
 
@@ -3366,6 +3375,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.")):
+            wrapper_label = provider_shape.split(".", 2)[1]
+            label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.endswith(".object_map") or provider_shape == "tool_calls.object_map":
@@ -3483,6 +3495,9 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             label = "native provider root predictions " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("root.outputs."):
             label = "native provider root outputs " + provider_shape.rsplit(".", 1)[-1]
+        elif provider_shape.startswith(("root.output_items.", "root.outputItems.", "root.output_item.", "root.outputItem.")):
+            wrapper_label = provider_shape.split(".", 2)[1]
+            label = "native provider root " + wrapper_label + " " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape.startswith("bedrock.converse.message."):
             label = "native provider bedrock converse message " + provider_shape.rsplit(".", 1)[-1]
         elif provider_shape == "single_top_level.tool_calls":

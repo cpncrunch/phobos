@@ -9805,6 +9805,118 @@ class AgentRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_openai_root_output_items_wrappers_are_translated(self):
+        for wrapper_key in ("output_items", "outputItems"):
+            with self.subTest(wrapper_key=wrapper_key):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    engagement = tmp_path / "engagement.json"
+                    EngagementROE(
+                        name="Native Root Output Items Wrapper",
+                        authorized=True,
+                        in_scope_targets=["app.example.test"],
+                        evidence_dir=str(tmp_path / "evidence"),
+                    ).save(engagement)
+                    captured_payloads = []
+                    dry_run_marker = tmp_path / f"native-root-{wrapper_key}-should-not-run.txt"
+                    provider_result_marker = "ROOT_OUTPUT_ITEMS_RESULT_SHOULD_NOT_SURFACE"
+                    wrapper_slug = wrapper_key.replace("_", "-").lower()
+
+                    class FakeRootOutputItemsHTTPResponse:
+                        def __enter__(self):
+                            return self
+
+                        def __exit__(self, exc_type, exc, tb):
+                            return False
+
+                        def read(self) -> bytes:
+                            return json.dumps({
+                                wrapper_key: [
+                                    {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "id": f"{wrapper_key}_old_memory",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "remember",
+                                                    "arguments": json.dumps({"key": f"native-root-{wrapper_slug}-old", "value": "old root output item call should not dispatch"}),
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {"role": "tool", "content": provider_result_marker + " token=root-output-items-secret"},
+                                    {
+                                        "type": "function_call",
+                                        "call_id": f"{wrapper_key}_memory",
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": f"native-root-{wrapper_slug}", "value": f"{wrapper_key} root output-items wrapper accepted"}),
+                                    },
+                                    {
+                                        "type": "function",
+                                        "id": f"{wrapper_key}_dry",
+                                        "function": {
+                                            "name": "run_command",
+                                            "arguments": json.dumps({
+                                                "target": "app.example.test",
+                                                "purpose": "root output-items native dry-run boundary",
+                                                "command": f"printf native-root-output-items > {dry_run_marker}",
+                                                "execute": True,
+                                            }),
+                                        },
+                                    },
+                                ]
+                            }).encode("utf-8")
+
+                    def fake_urlopen(request, timeout=0):
+                        captured_payloads.append(json.loads(request.data.decode("utf-8")))
+                        return FakeRootOutputItemsHTTPResponse()
+
+                    runtime = OffSecAgentRuntime(
+                        AgentRuntimeConfig(
+                            engagement_path=str(engagement),
+                            db_path=str(tmp_path / "agent.db"),
+                            session_name=f"native-root-{wrapper_slug}-wrapper",
+                            auto_model_planning=True,
+                        ),
+                        adapter=OpenAICompatibleAdapter(model="fake-native-root-output-items", base_url="http://127.0.0.1:9/v1"),
+                    )
+                    try:
+                        with mock.patch("offsec_agent_harness.model_adapters.urllib.request.urlopen", side_effect=fake_urlopen):
+                            planned = runtime.handle_message(f'/auto model=true prompt="native root {wrapper_key} wrapper token=root-output-items-secret"')
+                            payload = json.loads(planned.split("\n", 1)[1])
+                            self.assertEqual(payload["mode"], "plan_only")
+                            self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "run_command"])
+                            self.assertIn(f"native provider root {wrapper_key} function_call", payload["tool_calls"][0].get("reason", ""))
+                            self.assertIn(f"native provider root {wrapper_key} function", payload["tool_calls"][1].get("reason", ""))
+                            self.assertFalse(payload["tool_calls"][1]["args"].get("execute"))
+                            call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
+                            self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], [f"{wrapper_key}_memory", f"{wrapper_key}_dry"])
+                            self.assertEqual([item.get("native_tool_call_source") for item in call_metadata], [f"native provider root {wrapper_key} function_call", f"native provider root {wrapper_key} function"])
+                            self.assertNotIn("root-output-items-secret", planned + json.dumps(payload))
+                            self.assertNotIn(provider_result_marker, planned + json.dumps(payload))
+
+                            applied = runtime.handle_message(f'/auto apply=true model=true prompt="native root {wrapper_key} wrapper token=root-output-items-secret"')
+                            applied_payload = json.loads(applied.split("\n", 1)[1])
+                            self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "dry_run"])
+                            ledger = applied_payload.get("execution_ledger", [])
+                            self.assertEqual([item.get("provider_tool_call_id") for item in ledger], [f"{wrapper_key}_memory", f"{wrapper_key}_dry"])
+                            self.assertEqual([item.get("native_tool_call_source") for item in ledger], [f"native provider root {wrapper_key} function_call", f"native provider root {wrapper_key} function"])
+                            self.assertFalse(ledger[1].get("actual_command_or_process_activity"))
+                        recall = runtime.handle_message(f'/recall query=native-root-{wrapper_slug}')
+                        status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
+                        self.assertIn(f"{wrapper_key} root output-items wrapper accepted", recall)
+                        self.assertNotIn("old root output item call should not dispatch", recall)
+                        self.assertIn(f"root_{wrapper_key}_function_call", status.get("provider_native_tool_call_variants", []))
+                        self.assertTrue(status.get("milestone_contract", {}).get("root_output_items_wrapper_translation"), status)
+                        self.assertFalse(dry_run_marker.exists())
+                        self.assertTrue(captured_payloads)
+                        self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
+                        self.assertNotIn("root-output-items-secret", applied + recall + json.dumps(status))
+                        self.assertNotIn(provider_result_marker, applied + recall)
+                    finally:
+                        runtime.close()
+
     def test_openai_collapsed_choice_wrapper_tool_calls_are_translated(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
