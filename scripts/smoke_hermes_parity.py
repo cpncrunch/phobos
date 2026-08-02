@@ -2158,6 +2158,7 @@ def main(argv: list[str] | None = None) -> int:
             and native_status_milestone_contract.get("provider_result_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_data_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("provider_list_envelope_wrapper_translation") is True
+            and native_status_milestone_contract.get("provider_plural_envelope_wrapper_translation") is True
             and native_status_milestone_contract.get("root_function_call_translation") is True
             and native_status_milestone_contract.get("root_function_calls_alias_translation") is True
             and native_status_milestone_contract.get("root_function_calls_snake_alias_translation") is True
@@ -4528,6 +4529,144 @@ def main(argv: list[str] | None = None) -> int:
             and not native_data_list_envelope_marker.exists()
             and native_data_list_envelope_result_marker not in native_data_list_envelope_blob
             and "native-data-list-envelope-secret" not in native_data_list_envelope_blob
+        )
+
+        native_plural_envelope_captured = {"tool_choices": []}
+        native_plural_envelope_marker = root / "native-plural-envelope-should-not-run.txt"
+        native_plural_envelope_result_marker = "PLURAL_ENVELOPE_RESULT_SHOULD_NOT_SURFACE_SMOKE"
+
+        def native_plural_envelope_payload(wrapper_key: str) -> dict:
+            return {
+                wrapper_key: [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": f"stale {wrapper_key} plan should not be selected token=native-plural-envelope-secret",
+                            "tool_calls": [
+                                {
+                                    "id": f"{wrapper_key}_old_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": f"native-{wrapper_key}-old-smoke", "value": f"old {wrapper_key} envelope call should not dispatch"}),
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": f"native {wrapper_key} plural envelope smoke token=native-plural-envelope-secret"},
+                                {"type": "tool_result", "content": native_plural_envelope_result_marker + " token=native-plural-envelope-secret"},
+                            ],
+                            "tool_calls": [
+                                {
+                                    "id": "plural_envelope_memory",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "remember",
+                                        "arguments": json.dumps({"key": "native-plural-envelope-smoke", "value": f"{wrapper_key} plural envelope wrapper native tool call translated"}),
+                                    },
+                                },
+                                {
+                                    "toolCallId": "plural_envelope_dry",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": json.dumps({
+                                            "target": "app.example.test",
+                                            "purpose": f"{wrapper_key} plural envelope native dry-run smoke",
+                                            "command": f"printf native-plural-envelope > {native_plural_envelope_marker}",
+                                            "execute": True,
+                                        }),
+                                    },
+                                },
+                            ],
+                        }
+                    },
+                    {"message": {"role": "tool", "content": native_plural_envelope_result_marker + " trailing token=native-plural-envelope-secret"}},
+                ],
+                "metadata": {"note": f"outer {wrapper_key} envelope token=native-plural-envelope-secret should not surface"},
+            }
+
+        class NativeOpenAIPluralEnvelopeSmokeResponse:
+            def __init__(self, wrapper_key: str):
+                self.wrapper_key = wrapper_key
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(native_plural_envelope_payload(self.wrapper_key)).encode("utf-8")
+
+        def fake_native_plural_envelope_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            native_plural_envelope_captured["tool_choices"].append(payload.get("tool_choice"))
+            native_plural_envelope_captured["tool_count"] = len(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else 0
+            wrapper_key = "responses" if len(native_plural_envelope_captured["tool_choices"]) == 1 else "results"
+            return NativeOpenAIPluralEnvelopeSmokeResponse(wrapper_key)
+
+        native_plural_envelope_runtime = PhobosAgentRuntime(
+            AgentRuntimeConfig(
+                engagement_path=str(engagement_path),
+                db_path=str(data / "native-provider-plural-envelope.db"),
+                session_name="native-provider-plural-envelope-smoke",
+                auto_model_planning=True,
+            ),
+            adapter=OpenAICompatibleAdapter(model="fake-native-plural-envelope-smoke", base_url="http://127.0.0.1:9/v1"),
+        )
+        native_plural_envelope_original_urlopen = model_adapters.urllib.request.urlopen
+        try:
+            model_adapters.urllib.request.urlopen = fake_native_plural_envelope_urlopen
+            native_plural_envelope_plan = native_plural_envelope_runtime.handle_message('/auto model=true prompt="native plural envelope smoke token=native-plural-envelope-secret"')
+            native_plural_envelope_plan_payload = json.loads(native_plural_envelope_plan.split("\n", 1)[1])
+            native_plural_envelope_apply = native_plural_envelope_runtime.handle_message('/auto apply=true model=true prompt="native plural envelope smoke token=native-plural-envelope-secret"')
+            native_plural_envelope_apply_payload = json.loads(native_plural_envelope_apply.split("\n", 1)[1])
+            native_plural_envelope_recall = native_plural_envelope_runtime.handle_message('/recall query=native-plural-envelope-smoke')
+            write("native-provider-plural-envelope-wrapper.json", json.dumps({
+                "plan": native_plural_envelope_plan_payload,
+                "apply": native_plural_envelope_apply_payload,
+                "captured": native_plural_envelope_captured,
+                "recall": native_plural_envelope_recall,
+                "marker_exists": native_plural_envelope_marker.exists(),
+            }, indent=2, sort_keys=True))
+        finally:
+            model_adapters.urllib.request.urlopen = native_plural_envelope_original_urlopen
+            native_plural_envelope_runtime.close()
+        native_plural_envelope_calls = native_plural_envelope_plan_payload.get("tool_calls", []) if isinstance(native_plural_envelope_plan_payload.get("tool_calls"), list) else []
+        native_plural_envelope_metadata = native_plural_envelope_plan_payload.get("metadata", {}) if isinstance(native_plural_envelope_plan_payload.get("metadata"), dict) else {}
+        native_plural_envelope_call_metadata = [call.get("metadata", {}) if isinstance(call, dict) else {} for call in native_plural_envelope_calls]
+        native_plural_envelope_ledger = native_plural_envelope_apply_payload.get("execution_ledger", []) if isinstance(native_plural_envelope_apply_payload.get("execution_ledger"), list) else []
+        native_plural_envelope_blob = native_plural_envelope_plan + native_plural_envelope_apply + native_plural_envelope_recall + json.dumps(native_plural_envelope_plan_payload) + json.dumps(native_plural_envelope_apply_payload)
+        checks["native_provider_plural_envelope_wrapper_ok"] = (
+            native_plural_envelope_plan_payload.get("mode") == "plan_only"
+            and [call.get("tool") for call in native_plural_envelope_calls] == ["remember", "run_command"]
+            and all("native provider root message tool_calls" in call.get("reason", "") for call in native_plural_envelope_calls)
+            and native_plural_envelope_calls[0].get("args", {}).get("value") == "responses plural envelope wrapper native tool call translated"
+            and native_plural_envelope_calls[1].get("args", {}).get("execute") is False
+            and native_plural_envelope_metadata.get("native_tool_calls") is True
+            and native_plural_envelope_metadata.get("native_tool_call_count") == 2
+            and [item.get("provider_tool_call_id") for item in native_plural_envelope_call_metadata] == ["plural_envelope_memory", "plural_envelope_dry"]
+            and [item.get("native_tool_call_source") for item in native_plural_envelope_call_metadata] == ["native provider root message tool_calls", "native provider root message tool_calls"]
+            and [item.get("result", {}).get("status") for item in native_plural_envelope_apply_payload.get("results", [])] == ["ok", "dry_run"]
+            and [item.get("provider_tool_call_id") for item in native_plural_envelope_ledger] == ["plural_envelope_memory", "plural_envelope_dry"]
+            and native_plural_envelope_ledger[1].get("actual_command_or_process_activity") is False
+            and native_status_milestone_contract.get("provider_plural_envelope_wrapper_translation") is True
+            and "provider_plural_envelope_wrapper" in native_status_data.get("provider_native_tool_call_variants", [])
+            and "tool_result" in json.dumps(native_plural_envelope_plan_payload.get("warnings", [])).lower()
+            and "results plural envelope wrapper native tool call translated" in native_plural_envelope_recall
+            and "old responses envelope call should not dispatch" not in native_plural_envelope_blob
+            and "old results envelope call should not dispatch" not in native_plural_envelope_blob
+            and native_plural_envelope_captured.get("tool_choices") == ["auto", "auto"]
+            and native_plural_envelope_captured.get("tool_count", 0) > 0
+            and not native_plural_envelope_marker.exists()
+            and native_plural_envelope_result_marker not in native_plural_envelope_blob
+            and "native-plural-envelope-secret" not in native_plural_envelope_blob
         )
 
         native_root_messages_captured = {}
@@ -10533,6 +10672,7 @@ def main(argv: list[str] | None = None) -> int:
             "native_provider_result_envelope_wrapper_ok",
             "native_provider_data_envelope_wrapper_ok",
             "native_provider_data_list_envelope_wrapper_ok",
+            "native_provider_plural_envelope_wrapper_ok",
             "native_provider_root_messages_wrapper_ok",
             "native_provider_root_contents_wrapper_ok",
             "native_provider_root_predictions_wrapper_ok",

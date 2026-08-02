@@ -753,17 +753,19 @@ def _provider_response_envelope_to_message(raw: dict[str, Any], *, depth: int = 
     a root ``response`` object, for example ``{"response": {"message": ...}}``
     or ``{"response": {"choices": [...]}}``.  Some lightweight gateways use a
     ``result`` object for the same final provider payload, while generic API
-    facades commonly use a root ``data`` object or list.  Treat those envelopes
-    as an adapter translation concern only: recurse into the nested provider
-    payload, then let the existing Phobos runtime boundary validate schemas,
-    runtime policy, ROE, approvals, execution intent, and transcript redaction
-    before any tool can run.  Limit recursion so malformed nested envelopes fail
-    closed as no-tool responses instead of causing unbounded parsing.
+    facades commonly use a root ``data`` object or list.  Plural ``responses``
+    and ``results`` lists show up in router batch/transcript captures too; treat
+    them as the same newest-first, result-echo-skipping translation boundary.
+    Recurse into the nested provider payload, then let the existing Phobos
+    runtime boundary validate schemas, runtime policy, ROE, approvals, execution
+    intent, and transcript redaction before any tool can run.  Limit recursion so
+    malformed nested envelopes fail closed as no-tool responses instead of
+    causing unbounded parsing.
     """
 
     if depth >= 3 or not isinstance(raw, dict):
         return {}
-    for envelope_key in ("response", "result", "data"):
+    for envelope_key in ("response", "result", "data", "responses", "results"):
         wrapped = raw.get(envelope_key)
         if isinstance(wrapped, dict):
             message = _first_choice_message(wrapped, _wrapper_depth=depth + 1)
