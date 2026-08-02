@@ -2272,6 +2272,20 @@ def _responses_output_to_message(raw: dict[str, Any]) -> dict[str, Any]:
                     "_provider_shape": f"{provider_shape}.functionCall",
                 })
                 continue
+            tool = item.get("tool")
+            if isinstance(tool, dict):
+                # A few provider routers use a neutral nested ``tool`` object
+                # inside Responses-style output items rather than OpenAI's
+                # ``function`` or Gemini's ``functionCall`` wrappers.  Keep this
+                # as inert planner provenance; runtime schema, ROE, approval,
+                # and explicit execution gates still own dispatch.
+                tool_calls.append({
+                    "type": "tool_call",
+                    "tool": tool,
+                    "call_id": str(_native_call_id(item, tool)),
+                    "_provider_shape": f"{provider_shape}.tool",
+                })
+                continue
             name = _native_tool_name(item)
             arguments = _native_argument_value(item, preferred=("arguments", "input", "args", "parameters", "params"))
             call_id = _native_call_id(item)
@@ -2913,6 +2927,18 @@ def _parse_native_content_tool_block(
             call_id=call_id,
             label=label,
         )
+    nested_tool = item.get("tool")
+    if isinstance(nested_tool, dict):
+        return _parse_native_function_call(
+            {
+                "name": _native_tool_name(nested_tool),
+                "arguments": _native_argument_value(nested_tool, preferred=("input", "arguments", "args", "parameters", "params")),
+            },
+            index=index,
+            legacy=False,
+            call_id=_native_call_id(item, nested_tool),
+            label=_native_content_label(provider_shape, "tool"),
+        )
     arguments = _native_argument_value(item, preferred=("input", "arguments", "args", "parameters", "params"))
     return _parse_native_function_call(
         {"name": _native_tool_name(item), "arguments": arguments},
@@ -3056,6 +3082,18 @@ def _parse_native_tool_call(item: Any, *, index: int) -> tuple[dict[str, Any] | 
             legacy=False,
             call_id=_native_call_id(item, nested_tool_use),
             label=_native_nested_tool_call_alias_label(provider_shape, nested_tool_use_key or "toolUse"),
+        )
+    nested_tool = item.get("tool")
+    if isinstance(nested_tool, dict):
+        return _parse_native_function_call(
+            {
+                "name": _native_tool_name(nested_tool),
+                "arguments": _native_argument_value(nested_tool, preferred=("input", "arguments", "args", "parameters", "params")),
+            },
+            index=index,
+            legacy=False,
+            call_id=_native_call_id(item, nested_tool),
+            label=_native_nested_tool_call_alias_label(provider_shape, "tool"),
         )
     function = item.get("function")
     if isinstance(function, dict):

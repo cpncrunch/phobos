@@ -5361,6 +5361,14 @@ class AgentRuntimeTests(unittest.TestCase):
                                                 },
                                             },
                                         },
+                                        {
+                                            "tool_call_id": "nested_tool_object_memory",
+                                            "type": "tool_call",
+                                            "tool": {
+                                                "name": "remember",
+                                                "argumentsJson": {"key": "native-nested-tool-object", "value": "nested tool object in tool_calls accepted"},
+                                            },
+                                        },
                                     ],
                                 }
                             }
@@ -5385,36 +5393,41 @@ class AgentRuntimeTests(unittest.TestCase):
                     planned = runtime.handle_message('/auto model=true prompt="native nested tool_calls token=nested-tool-call-secret"')
                     payload = json.loads(planned.split("\n", 1)[1])
                     self.assertEqual(payload["mode"], "plan_only")
-                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "run_command"])
+                    self.assertEqual([call["tool"] for call in payload["tool_calls"]], ["remember", "list_tasks", "run_command", "remember"])
                     self.assertIn("native provider tool_call nested functionCall", payload["tool_calls"][0]["reason"])
                     self.assertIn("native provider tool_call nested toolUse", payload["tool_calls"][1]["reason"])
+                    self.assertIn("native provider tool_call nested tool", payload["tool_calls"][3]["reason"])
                     self.assertFalse(payload["tool_calls"][2]["args"]["execute"])
                     call_metadata = [call.get("metadata", {}) for call in payload["tool_calls"]]
-                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in call_metadata], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry", "nested_tool_object_memory"])
                     self.assertEqual(
                         [item.get("native_tool_call_source") for item in call_metadata],
-                        ["native provider tool_call nested functionCall", "native provider tool_call nested toolUse", "native provider tool_call nested toolUse"],
+                        ["native provider tool_call nested functionCall", "native provider tool_call nested toolUse", "native provider tool_call nested toolUse", "native provider tool_call nested tool"],
                     )
-                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 3)
+                    self.assertEqual(payload.get("metadata", {}).get("native_tool_call_count"), 4)
                     self.assertNotIn("nested-tool-call-secret", planned)
 
                     applied = runtime.handle_message('/auto apply=true model=true prompt="native nested tool_calls token=nested-tool-call-secret"')
                     applied_payload = json.loads(applied.split("\n", 1)[1])
-                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "dry_run"])
+                    self.assertEqual([item["result"]["status"] for item in applied_payload["results"]], ["ok", "ok", "dry_run", "ok"])
                     ledger = applied_payload.get("execution_ledger", [])
-                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry"])
+                    self.assertEqual([item.get("provider_tool_call_id") for item in ledger], ["nested_functioncall_memory", "nested_tooluse_tasks", "nested_tooluse_dry", "nested_tool_object_memory"])
                     self.assertFalse(ledger[2].get("actual_command_or_process_activity"))
                     self.assertEqual(ledger[2].get("native_tool_call_source"), "native provider tool_call nested toolUse")
                 recall = runtime.handle_message('/recall query=native-nested-functioncall')
+                tool_recall = runtime.handle_message('/recall query=native-nested-tool-object')
                 status = runtime.registry.run("runtime_status", {}).data.get("native_tool_calling", {})
                 self.assertIn("nested functionCall in tool_calls accepted", recall)
+                self.assertIn("nested tool object in tool_calls accepted", tool_recall)
                 self.assertTrue(status.get("milestone_contract", {}).get("tool_calls_nested_alias_translation"), status)
+                self.assertTrue(status.get("milestone_contract", {}).get("tool_calls_nested_tool_object_translation"), status)
                 self.assertIn("tool_calls_nested_functionCall", status.get("provider_native_tool_call_variants", []))
                 self.assertIn("tool_calls_nested_toolUse", status.get("provider_native_tool_call_variants", []))
+                self.assertIn("tool_calls_nested_tool", status.get("provider_native_tool_call_variants", []))
                 self.assertFalse(dry_run_marker.exists())
                 self.assertTrue(captured_payloads)
                 self.assertEqual(captured_payloads[0].get("tool_choice"), "auto")
-                self.assertNotIn("nested-tool-call-secret", applied + recall + json.dumps(status))
+                self.assertNotIn("nested-tool-call-secret", applied + recall + tool_recall + json.dumps(status))
             finally:
                 runtime.close()
 
